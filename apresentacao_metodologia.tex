@@ -1,0 +1,467 @@
+\documentclass[aspectratio=169]{beamer}
+\usepackage[%
+numbering=fraction,%
+block=fill,%
+subsectionpage=progressbar]{pescPres}
+\usepackage{appendixnumberbeamer}
+\usepackage[brazilian]{babel}
+\usepackage{booktabs}
+
+\title[Metodologia Experimental]{Metodologia Experimental}
+\subtitle{Resumo para apresentação de 20 minutos \\ v-2.0 (revisão crítica)}
+\author{João Pedro Vital Brasil Wieland}
+\advisor{Claudia Maria Lima Werner}
+
+\begin{document}
+\maketitle
+
+%================================================
+\section{}
+
+\begin{frame}{O problema e a mensagem central}
+\small
+\begin{itemize}
+  \item \textbf{Problema}: correção automática de acessibilidade em aplicações React é difícil porque:
+  \begin{itemize}
+    \item scanners têm falsos positivos/negativos,
+    \item violações variam muito em complexidade,
+    \item correções podem \textbf{quebrar} funcionalidade.
+  \end{itemize}
+  \item \textbf{Tese metodológica}: para avaliar reparo com LLMs de forma científica, precisamos de:
+  \begin{itemize}
+    \item \textbf{realismo} (projetos reais),
+    \item \textbf{controle} (condições comparáveis),
+    \item \textbf{reprodutibilidade} (snapshot + ordem determinística),
+    \item \textbf{segurança} (validação anti-regressão).
+  \end{itemize}
+  \item \textbf{Contribuição}: um pipeline reprodutível e controlado para
+        \textbf{detectar, corrigir e validar} violações WCAG com LLMs.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Por que esta metodologia é ``a mais científica'' para o problema}
+\small
+\begin{itemize}
+  \item \textbf{Evita vieses clássicos} de avaliações com LLMs:
+  \begin{itemize}
+    \item exemplos sintéticos e fáceis,
+    \item ordem aleatória de processamento,
+    \item sucesso sem checar regressão,
+    \item comparações injustas (problemas diferentes por condição).
+  \end{itemize}
+  \item \textbf{Controla variáveis críticas}:
+  \begin{itemize}
+    \item mesmos problemas para todas as condições (comparação pareada),
+    \item parâmetros fixos do modelo (redução de aleatoriedade),
+    \item validação padronizada (mesmo oráculo).
+  \end{itemize}
+  \item \textbf{É honesta com suas limitações}: ameaças à validade são
+        \textbf{documentadas e mitigadas} no desenho, não ignoradas.
+  \item \textbf{Torna o resultado auditável}:
+  cada correção é um patch rastreável;
+  cada decisão é operacionalizada (equações).
+\end{itemize}
+\end{frame}
+
+%================================================
+\section{Ferramenta Desenvolvida}
+
+\begin{frame}{A ferramenta: o que ela faz (visão prática)}
+\small
+\begin{itemize}
+  \item A ferramenta implementa uma \textbf{linha de produção}:
+  \begin{enumerate}
+    \item baixa e congela projetos React (\emph{snapshot} por commit);
+    \item executa múltiplos scanners e normaliza violações;
+    \item prioriza violações de forma determinística;
+    \item escolhe estratégia/agente com base em complexidade (\emph{routing});
+    \item gera patch com LLM (prompts controlados);
+    \item valida o patch com análise estática em 4 camadas;
+    \item reexecuta scanners e registra métricas.
+  \end{enumerate}
+  \item Resultado final: um conjunto de \textbf{correções validadas} +
+        um log completo para avaliação científica.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Por que multiagente (e não um único prompt gigante)?}
+\small
+\begin{itemize}
+  \item \textbf{Observação prática}: violações WCAG diferem muito em escopo e
+        complexidade.
+  \item Um único agente tende a:
+  \begin{itemize}
+    \item desperdiçar contexto em casos simples,
+    \item falhar em casos que exigem vários arquivos,
+    \item gerar patches grandes e arriscados.
+  \end{itemize}
+  \item A arquitetura multiagente permite:
+  \begin{itemize}
+    \item agentes especializados por tipo de tarefa (local vs.\ global),
+    \item decisões explícitas sobre contexto e restrições,
+    \item controle fino para ablações e comparação justa.
+  \end{itemize}
+  \item \textbf{Roteamento explícito}: a decisão entre agentes é registrada
+        com \emph{score} e razão — cada escolha é auditável.
+\end{itemize}
+\end{frame}
+
+%================================================
+\section{Escolhas Experimentais (e por quê)}
+
+\begin{frame}{Escolha 1: projetos reais + snapshot por commit}
+\small
+\begin{itemize}
+  \item \textbf{Por que projetos reais?}
+  \begin{itemize}
+    \item evita ``toy problems'',
+    \item incorpora build, dependências, estilos e dívida técnica reais.
+  \end{itemize}
+  \item \textbf{Por que snapshot?}
+  \begin{itemize}
+    \item garante que o código não muda durante o experimento,
+    \item hash SHA-256 do conteúdo protege contra mudanças silenciosas,
+    \item permite reprodução exata no futuro.
+  \end{itemize}
+  \item \textbf{Efeito científico}: aumenta validade externa sem sacrificar
+        reprodutibilidade.
+
+  \medskip
+  \alert{\textbf{Ameaça reconhecida}}: componentes são escaneados em
+  \emph{harness} HTML isolado, sem contexto de routing ou estado global.
+  Violações dependentes de contexto podem ser sub/super-estimadas.
+  $\Rightarrow$ Escopo declarado: desempenho ao nível do scanner
+  (\emph{scanner-level}), não ao nível da aplicação integrada.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Escolha 2: múltiplos scanners + normalização}
+\small
+\begin{itemize}
+  \item \textbf{Por que múltiplos scanners?}
+  \begin{itemize}
+    \item cada scanner tem heurísticas e coberturas diferentes,
+    \item reduz dependência de um único oráculo imperfeito,
+    \item aumenta \emph{recall} do conjunto de violações detectadas.
+  \end{itemize}
+  \item \textbf{Confiança baseada em consenso}:
+  \begin{itemize}
+    \item \textbf{HIGH}: $\geq$ \texttt{min\_tool\_consensus} ferramentas concordam
+          no mesmo seletor + critério WCAG,
+    \item \textbf{MEDIUM}: 1 ferramenta + impacto \emph{critical/serious},
+    \item \textbf{LOW}: demais casos.
+  \end{itemize}
+  \item \textbf{Threshold configurável} (\texttt{.env}): permite ajustar o
+        critério de consenso sem mudar código.
+  \item \textbf{Por que normalizar?} Saídas são heterogêneas (formatos e
+        severidades); normalização cria a unidade experimental estável:
+        \textbf{``violação tratável''}.
+  \item \textbf{Efeito científico}: aumenta controle e comparabilidade entre execuções.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Escolha 3: ordem determinística via função de sorting}
+\small
+\begin{itemize}
+  \item \textbf{Problema}: ordem aleatória altera consumo de recursos e resultados.
+  \item \textbf{Solução}: ordenar violações por uma chave determinística e justificável.
+\end{itemize}
+\vspace{0.4em}
+\[
+  \text{sort\_key}(i)=\bigl(
+  -\text{conf\_rank}(i.\texttt{confidence}),\;
+  -\text{imp\_rank}(i.\texttt{impact}),\;
+  i.\texttt{wcag\_criteria},\;
+  i.\texttt{selector}
+  \bigr)
+\]
+\vspace{0.2em}
+\begin{itemize}
+  \item \textbf{Justificativa}: corrige primeiro o que é mais confiável
+        e mais severo.
+  \item \textbf{Sentinel}: critérios sem mapeamento WCAG recebem
+        \texttt{"9.9.9"} $\Rightarrow$ ordenados ao final
+        (decisão explícita, não implícita).
+  \item \textbf{Efeito científico}: elimina um confound importante
+        (ordem de processamento).
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Escolha 4: comparação ``justa'' (mesmos problemas por condição)}
+\small
+\begin{itemize}
+  \item \textbf{Princípio}: uma condição não pode receber um conjunto mais fácil de violações.
+  \item \textbf{Desenho}: cada violação é tentada em múltiplas condições
+        (modelo/prompt/ablação).
+  \item Consequências:
+  \begin{itemize}
+    \item comparações são \textbf{pareadas} (\emph{within-subject}),
+    \item variação por dificuldade do problema é controlada,
+    \item diferenças observadas são mais atribuíveis à condição.
+  \end{itemize}
+  \item \textbf{Testes estatísticos compatíveis}:
+  \begin{itemize}
+    \item H1: McNemar (pares binários),
+    \item H2--H3: Kruskal-Wallis + Mann-Whitney pós-hoc + Bonferroni.
+  \end{itemize}
+  \item \textbf{Efeito científico}: aumenta poder estatístico e reduz viés de seleção.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Escolha 5: dois estudos de ablação para explicar ``o que importa''}
+\small
+\begin{columns}[T]
+\column{0.48\textwidth}
+\textbf{Ablação do template de prompt} (H1 --- confirmatory)
+\begin{itemize}
+  \item Template tem 6 componentes:\\
+        role, constraints, file, issues, few-shot examples, output format
+  \item Remove um componente por vez e mede SR
+  \item McNemar + Cliff's $\delta$
+  \item Responde: quais partes são essenciais?
+\end{itemize}
+
+\column{0.48\textwidth}
+\textbf{Ablação de scanners} (exploratório)
+\begin{itemize}
+  \item Variantes: \emph{pa11y\_only}, \emph{axe\_only},
+        \emph{playwright\_only}, \emph{pa11y+axe}, \emph{all\_tools}
+  \item Modelo fixo (isola variável dos scanners)
+  \item Mede SR, IFR, MTTR por combinação
+  \item Responde: quanto cada ferramenta contribui?
+\end{itemize}
+\end{columns}
+
+\vspace{0.5em}
+\small
+\alert{Distinção fundamental}: ablação de prompt é \textbf{confirmatória}
+(H1 pré-especificada); ablação de scanners é \textbf{exploratória}
+(gera hipóteses para trabalhos futuros).
+\end{frame}
+
+%================================================
+\section{Segurança e Validação}
+
+\begin{frame}{Escolha 6: validação em 4 camadas (análise estática)}
+\small
+\begin{itemize}
+  \item \textbf{Princípio}: ``corrigir sem quebrar'' é requisito do mundo real.
+  \item Um patch só é aceito se passar por quatro camadas de análise estática:
+  \begin{enumerate}
+    \item \textbf{Sintática}: heurísticas de formato (resposta não vazia,
+          bloco JSX presente, sem marcadores de recusa do LLM),
+    \item \textbf{Preservação estrutural}: interfaces TypeScript, assinaturas de
+          export e handlers de evento preservados por análise de texto,
+    \item \textbf{Verificação de domínio}: presença dos atributos de
+          acessibilidade esperados pelos tipos de violação corrigidos,
+    \item \textbf{Qualidade de código}: padrões proibidos
+          (\texttt{tabIndex~$<$~-1}, \texttt{dangerouslySetInnerHTML}).
+  \end{enumerate}
+  \item \textbf{Escopo declarado}: as camadas são \emph{análise estática},
+        não execução de runtime.
+        Uma aprovação \textbf{não garante} ausência de regressão de
+        comportamento --- isso é uma ameaça documentada (Seção~3.8.1).
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Métricas: eficácia e segurança, sem ``truques''}
+\small
+\begin{itemize}
+  \item \textbf{Sucesso} é definido de forma verificável e operacional.
+  \item Métricas centrais:
+\end{itemize}
+\vspace{0.2em}
+\[
+  \text{SR} =
+  \frac{\#\text{arquivos que passaram todas as 4 camadas}}{\#\text{tentativas}}
+  \qquad
+  \text{IFR} =
+  \frac{\sum|I_{\text{corrigidas}}(f)|}{\sum|I(f)|}
+\]
+\[
+  \text{MTTR} =
+  \frac{\sum t_{\text{corrigido}}}{\#\text{sucessos}}
+  \qquad
+  \text{TE} =
+  \frac{\text{IFR} \times |I|}{\text{tokens}/1000}
+\]
+\vspace{0.2em}
+\begin{itemize}
+  \item \textbf{Inferência} vai além do valor-$p$:
+  \begin{itemize}
+    \item critério duplo: $p < \alpha$ \textbf{e} $|\delta| \geq 0.147$
+          (efeito pequeno de Cliff),
+    \item bootstrap CI com $n=2000$, semente 42 (reprodutível),
+    \item Bonferroni para comparações múltiplas (H2--H3).
+  \end{itemize}
+  \item \textbf{MTTR}: medida sobre sucessos apenas (MTTR indefinida em
+        zero sucessos --- não é um ``truque'' estatístico, é o comportamento
+        correto da métrica).
+\end{itemize}
+\end{frame}
+
+%================================================
+\section{Ameaças à Validade}
+
+\begin{frame}{Ameaças à validade (reconhecidas e mitigadas)}
+\small
+\begin{columns}[T]
+\column{0.48\textwidth}
+\textbf{Validade de construto}
+\begin{itemize}
+  \item Scanners em \emph{harness} isolado $\neq$ app integrada\\
+        \textit{Mitigação}: escopo declarado como \emph{scanner-level}
+  \item Validação estática $\neq$ ausência de regressão de runtime\\
+        \textit{Mitigação}: $\rho$ (H5) mede taxa de rejeições --- limitação documentada
+\end{itemize}
+
+\textbf{Validade interna}
+\begin{itemize}
+  \item Threshold do router calibrado em 50 arquivos\\
+        \textit{Mitigação}: comentário no código + seção de limitações
+  \item LLM não determinístico por natureza\\
+        \textit{Mitigação}: temperatura=0.1, 3+ repetições por condição
+\end{itemize}
+
+\column{0.48\textwidth}
+\textbf{Validade externa}
+\begin{itemize}
+  \item Apenas modelos locais (Qwen, DeepSeek, CodeLlama\ldots)\\
+        \textit{Mitigação}: resultados são interpretados para esse escopo;
+        generalização para modelos proprietários é trabalho futuro
+  \item Projetos selecionados por disponibilidade pública
+\end{itemize}
+
+\textbf{Validade de conclusão estatística}
+\begin{itemize}
+  \item Múltiplas comparações\\
+        \textit{Mitigação}: Bonferroni
+  \item Pequenas amostras por categoria\\
+        \textit{Mitigação}: bootstrap CI + Cliff's $\delta$
+\end{itemize}
+\end{columns}
+\end{frame}
+
+%================================================
+\section{Fechamento}
+
+\begin{frame}{Por que confiar nos resultados}
+\small
+\begin{itemize}
+  \item O experimento é confiável porque:
+  \begin{itemize}
+    \item usa projetos reais e congelados por hash (reprodutível),
+    \item controla ordem e condições (determinístico),
+    \item compara de forma pareada (justo),
+    \item documenta o que a validação faz e o que não faz (honesto),
+    \item mede com métricas simples e auditáveis.
+  \end{itemize}
+  \item \textbf{Interpretação correta}: resultados indicam capacidade de
+        reparo \emph{scanner-level} sob validação estática anti-regressão.
+  \item \textbf{Distinção confirmatory/exploratory} previne
+        \emph{p-hacking}: H1--H4 pré-especificadas; H5 gera
+        hipóteses para trabalhos futuros.
+  \item \textbf{O que isso entrega}: um protocolo científico replicável para
+        avaliação de reparo automático de acessibilidade com LLMs locais.
+\end{itemize}
+\end{frame}
+
+\appendix
+\begin{frame}[allowframebreaks]
+  \frametitle{Referências}
+  \nocite{*}
+  \bibliographystyle{apalike}
+  \bibliography{biblio.bib}
+\end{frame}
+
+% ── Slides extras (backup para perguntas da banca) ──────────────────────────
+
+\begin{frame}[noframenumbering]{Backup: como o router decide o agente}
+\small
+\begin{columns}[T]
+\column{0.55\textwidth}
+\textbf{Matriz de pontuação} (código: \texttt{router/engine.py})
+\begin{itemize}
+  \item[\textbf{+4}] tipos CONTRAST ou SEMANTIC presentes
+  \item[\textbf{+4}] $n_{\text{issues}} \geq \tau$ (\texttt{swe\_max\_issues}=4)
+  \item[\textbf{+5}] $n_{\text{issues}} \geq 2\tau$
+  \item[\textbf{+3}] algum issue com complexidade COMPLEX
+  \item[\textbf{+3}] $\geq$ 3 tipos de issue distintos
+  \item[\textbf{-3}] todos ARIA/LABEL/ALT-TEXT e $n<\tau$
+\end{itemize}
+\vspace{0.3em}
+$\text{score} \geq 3 \Rightarrow$ OpenHands \quad
+$\text{score} < 3 \Rightarrow$ SWE-agent
+
+\column{0.42\textwidth}
+\textbf{Limitação declarada} (\texttt{ROUTING\_THRESHOLD = 3}):
+\begin{quote}\small
+\textit{``empirically calibrated on 50 representative files. Internal validity threat: if the benchmark distribution differs from the calibration set, this threshold may be suboptimal.''}
+\end{quote}
+$\Rightarrow$ Threshold é uma \textbf{decisão de design
+explicitamente documentada}, não um fato empírico validado.
+\end{columns}
+\end{frame}
+
+\begin{frame}[noframenumbering]{Backup: o que a validação realmente verifica}
+\small
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Camada} & \textbf{Técnica} & \textbf{O que verifica / O que não verifica} \\
+\midrule
+1 & Heurística regex & Não vazio, bloco JSX presente, sem recusa LLM \\
+  &                  & \alert{Não} é parse AST completo \\
+\addlinespace
+2 & Análise estática & Interfaces TS, exports e event handlers preservados \\
+  &                  & \alert{Não} compila, \alert{não} roda testes \\
+\addlinespace
+3 & Heurística regex & Atributos \texttt{alt=}, \texttt{aria-label=} esperados \\
+  &                  & \alert{Não} re-executa os scanners reais \\
+\addlinespace
+4 & Pattern matching & \texttt{tabIndex < -1}, \texttt{dangerouslySetInnerHTML} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+\small
+\textbf{Implicação}: aprovação em todas as camadas é condição necessária
+mas não suficiente para ausência de regressão de runtime.
+A \textbf{taxa de regressão} $\rho$ (H5, exploratória) mede exatamente
+o que a camada~2 detecta estaticamente --- e é apresentada como
+\emph{exploratory}, não como prova definitiva.
+\end{frame}
+
+\begin{frame}[noframenumbering]{Backup: confirmatory vs.\ exploratory}
+\small
+\begin{columns}[T]
+\column{0.48\textwidth}
+\textbf{Confirmatory (H1--H4)} --- pré-especificadas
+\begin{itemize}
+  \item H1: ablação de prompt melhora SR?
+        (McNemar + $|\delta| \geq 0.147$)
+  \item H2: qual estratégia de prompt é melhor?
+        (Kruskal-Wallis + TE $\geq$ 80\% zero-shot)
+  \item H3: arquitetura do LLM importa?
+        (Kruskal-Wallis pairwise)
+  \item H4: complexidade da violação prediz sucesso?
+        (direcional: IFR\textsubscript{simples} $>$ IFR\textsubscript{complexo})
+\end{itemize}
+
+\column{0.48\textwidth}
+\textbf{Exploratory (H5 + outros)}
+\begin{itemize}
+  \item H5: taxa de regressão $\rho$ por (modelo, categoria)\\
+        com bootstrap CI --- \emph{descritivo}
+  \item Ablação de scanners: qual combinação de ferramentas é mais eficaz?
+  \item Perfil de rejeição por camada
+\end{itemize}
+
+\vspace{0.5em}
+\alert{Por que isso importa?}\\
+A distinção previne \emph{p-hacking} post-hoc:
+resultados exploratórios geram hipóteses para \emph{futuras} avaliações,
+não confirmam as hipóteses do estudo corrente.
+\end{columns}
+\end{frame}
+
+\end{document}

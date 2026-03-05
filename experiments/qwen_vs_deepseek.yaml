@@ -1,0 +1,41 @@
+# experiments/qwen_vs_deepseek.yaml
+# Comparação entre família Qwen 2.5 Coder e DeepSeek Coder V2
+
+name: "Qwen vs DeepSeek - A11y Correction Comparison"
+description: |
+  Compara eficácia dos modelos Qwen 2.5 Coder e DeepSeek Coder V2
+  na correção automática de issues de acessibilidade WCAG 2.1 AA.
+  Métricas: taxa de sucesso, tempo médio, issues corrigidos.
+
+models:
+  - qwen2.5-coder-7b
+  - qwen2.5-coder-14b
+  - deepseek-coder-v2-16b
+
+files:
+  - ./tests/fixtures/sample_components/Button.tsx
+  - ./tests/fixtures/sample_components/Form.tsx
+
+wcag_level: AA
+
+agents:
+  - openhands
+  - swe-agent
+
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+
+metrics:
+  - success_rate
+  - avg_time
+  - tokens_used
+  - issues_fixed
+
+repetitions: 1
+
+output_format:
+  - json
+  - html
+  - csv

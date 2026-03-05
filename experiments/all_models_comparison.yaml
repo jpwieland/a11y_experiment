@@ -1,0 +1,43 @@
+# experiments/all_models_comparison.yaml
+# Comparação completa entre todos os modelos disponíveis (small + medium)
+
+name: "All Models Comparison - Full Benchmark"
+description: |
+  Benchmark completo comparando todos os modelos small e medium
+  disponíveis na correção de issues de acessibilidade.
+
+models:
+  - qwen2.5-coder-7b
+  - qwen2.5-coder-14b
+  - deepseek-coder-v2-16b
+  - codellama-7b
+  - llama3.1-8b
+
+files:
+  - ./tests/fixtures/sample_components/Button.tsx
+  - ./tests/fixtures/sample_components/Form.tsx
+
+wcag_level: AA
+
+agents:
+  - openhands
+  - swe-agent
+
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+
+metrics:
+  - success_rate
+  - avg_time
+  - tokens_used
+  - issues_fixed
+  - issues_introduced
+
+repetitions: 3
+
+output_format:
+  - json
+  - html
+  - csv

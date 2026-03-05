@@ -1,0 +1,112 @@
+
+[1m[0;36m♿ a11y-autofix — Configuração Completa do Ambiente[0m
+══════════════════════════════════════════════════════
+Projeto : /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix
+Log     : /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix/setup.log
+Data    : 2026-03-02 01:35:09
+
+
+[1m[0;36m── [1/14] Verificar Python ≥ 3.10 ──[0m
+[0;32m  ✓[0m Python 3.12.12  (python3.12)
+
+[1m[0;36m── [2/14] Virtual environment (.venv/) ──[0m
+[0;32m  ✓[0m .venv já existe — reutilizando
+[0;32m  ✓[0m venv ativado — /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix/.venv/bin/python
+
+[1m[0;36m── [3/14] Dependências Python (pip install -e .[dev]) ──[0m
+[0;34m  →[0m Atualizando pip / setuptools / wheel...
+    [0;34m$[0m /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix/.venv/bin/pip
+install
+--upgrade
+pip
+setuptools
+wheel
+--quiet
+[0;34m  →[0m Instalando a11y-autofix com extras [dev]...
+    [0;34m$[0m /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix/.venv/bin/pip
+install
+-e
+.[dev]
+--quiet
+WARNING: typer 0.24.1 does not provide the extra 'all'
+[0;32m  ✓[0m a11y-autofix instalado (editable)
+
+[1m[0;36m── [4/14] Extras científicos (psutil, numpy, scipy) ──[0m
+[0;32m  ✓[0m psutil, numpy, scipy já presentes
+
+[1m[0;36m── [5/14] Detecção de GPU ──[0m
+[0;32m  ✓[0m Apple Silicon detectado: Apple M1 Pro  (memória unificada: 17.2 GB)
+[0;34m  →[0m Ollama usa Metal automaticamente — nenhuma configuração extra necessária
+  GPU_TYPE=apple  VRAM=17.2GB
+
+[1m[0;36m── [6/14] Backend GPU (vLLM) ──[0m
+[0;34m  →[0m vLLM não suporta Metal/MPS — modelos grandes rodarão via Ollama (Metal nativo)
+[0;34m  →[0m Para modelos via API OpenAI-compatible, use: LM Studio (download em lmstudio.ai)
+[0;32m  ✓[0m Backend para Apple Silicon: Ollama (Metal) + LM Studio (MPS)
+
+[1m[0;36m── [7/14] Node.js + ferramentas de acessibilidade ──[0m
+[0;32m  ✓[0m Node.js v25.2.1 / npm 11.6.2
+[0;32m  ✓[0m pa11y  (8.0.0)
+[0;32m  ✓[0m @axe-core/cli  (4.11.1)
+[0;32m  ✓[0m lighthouse  (12.2.2)
+
+[1m[0;36m── [8/14] Playwright + Chromium ──[0m
+[0;34m  →[0m Instalando browser Chromium...
+    [0;34m$[0m /Users/joaowieland/Documents/mestrado/a11y_agent_experiment/a11y-autofix/.venv/bin/python
+-m
+playwright
+install
+chromium
+--with-deps
+[0;32m  ✓[0m Playwright Chromium instalado
+
+[1m[0;36m── [9/14] Configurar .env ──[0m
+[0;32m  ✓[0m .env já contém configuração de GPU — mantendo
+
+[1m[0;36m── [10/14] Criar diretórios de trabalho ──[0m
+[0;32m  ✓[0m Diretórios criados: 8
+
+[1m[0;36m── [11/14] Configurar Ollama (flags de GPU) ──[0m
+[0;32m  ✓[0m Ollama: Warning: could not connect to a running Ollama instance
+[0;32m  ✓[0m Ollama configurado para Apple Silicon (Apple M1 Pro, ctx=16384)
+[0;34m  →[0m   Flash Attention ativado para Metal
+[0;34m  →[0m   Config em: /Users/joaowieland/.ollama/ollama.env
+[0;34m  →[0m Ollama daemon não está rodando
+[0;34m  →[0m   Inicie com: ollama serve
+
+[1m[0;36m── [12/14] Baixar modelos Ollama ──[0m
+[1;33m  ⚠[0m Ollama daemon não está rodando — pulando pull
+[1;33m  ⚠[0m   Execute depois: ollama serve && ollama pull qwen2.5-coder:7b
+
+[1m[0;36m── [13/14] Hardware preflight check ──[0m
+[0;34m  →[0m Executando a11y-autofix hardware...
+
+♿ Hardware Preflight Check
+══════════════════════════════════════════════════
+2026-03-02 01:35:17 [info     ] hardware_profile               checks_failed=['disk: 15.7 GB free < 20 GB required'] checks_passed=['python_version', 'ram'] disk_free_gb=15.7 gpu_vram_gb=None platform=Darwin python_version=3.12.12 ram_gb=16.0
+                    Hardware Profile                     
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Component   ┃ Measured  ┃ Requirement        ┃ Status ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ Python      │ 3.12.12   │ ≥ 3.10             │ ✓ OK   │
+│ RAM         │ 16.0 GB   │ ≥ 16 GB            │ ✓ OK   │
+│ GPU VRAM    │ N/A (CPU) │ ≥ 8 GB recommended │ ✓ OK   │
+│ Disk (free) │ 15.7 GB   │ ≥ 20 GB            │ ✗ FAIL │
+└─────────────┴───────────┴────────────────────┴────────┘
+
+Failing checks:
+  ✗ disk: 15.7 GB free < 20 GB required
+[1;33m  ⚠[0m Alguns checks falharam — veja: a11y-autofix hardware
+
+[1m[0;36m── [14/14] Resumo ──[0m
+
+══════════════════════════════════════════════════════
+[1mResumo do Setup[0m
+══════════════════════════════════════════════════════
+[0;32m  ✓ Passou  : 16[0m
+[1;33m  ⚠ Avisos  : 3[0m
+
+[1mGPU:[0m
+
+
+[1;33m[1mSetup concluído com avisos. Experimento pode rodar com funcionalidade reduzida.[0m

@@ -1,0 +1,133 @@
+# models.yaml — Registro de modelos LLM para experimentação
+# Edite este arquivo para adicionar/remover modelos sem modificar código.
+
+models:
+  # ═══ Qwen Family ═══
+  qwen2.5-coder-7b:
+    backend: ollama
+    model_id: "qwen2.5-coder:7b"
+    family: qwen
+    size: 7b
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [coding, instruct, multilingual]
+
+  qwen2.5-coder-14b:
+    backend: ollama
+    model_id: "qwen2.5-coder:14b"
+    family: qwen
+    size: 14b
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [coding, instruct, multilingual]
+
+  qwen2.5-coder-32b:
+    backend: vllm
+    base_url: "http://localhost:8000/v1"
+    model_id: "Qwen/Qwen2.5-Coder-32B-Instruct"
+    family: qwen
+    size: 32b
+    temperature: 0.1
+    max_tokens: 16384
+    tags: [coding, instruct, multilingual, large]
+
+  # ═══ DeepSeek Family ═══
+  deepseek-coder-v2-16b:
+    backend: ollama
+    model_id: "deepseek-coder-v2:16b"
+    family: deepseek
+    size: 16b
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [coding, instruct, fill-in-middle]
+
+  deepseek-coder-v2-236b:
+    backend: vllm
+    base_url: "http://gpu-server:8000/v1"
+    model_id: "deepseek-ai/DeepSeek-Coder-V2-Instruct"
+    family: deepseek
+    size: 236b
+    temperature: 0.1
+    max_tokens: 16384
+    tags: [coding, instruct, sota, large]
+
+  # ═══ CodeLlama Family ═══
+  codellama-7b:
+    backend: ollama
+    model_id: "codellama:7b-instruct"
+    family: codellama
+    size: 7b
+    temperature: 0.2
+    max_tokens: 4096
+    tags: [coding, instruct]
+
+  codellama-13b:
+    backend: lm_studio
+    model_id: "TheBloke/CodeLlama-13B-Instruct-GGUF"
+    family: codellama
+    size: 13b
+    temperature: 0.2
+    max_tokens: 4096
+    tags: [coding, instruct]
+
+  codellama-34b:
+    backend: vllm
+    base_url: "http://localhost:8001/v1"
+    model_id: "codellama/CodeLlama-34b-Instruct-hf"
+    family: codellama
+    size: 34b
+    temperature: 0.2
+    max_tokens: 8192
+    tags: [coding, instruct, large]
+
+  # ═══ Llama ═══
+  llama3.1-8b:
+    backend: ollama
+    model_id: "llama3.1:8b-instruct-q4_K_M"
+    family: llama
+    size: 8b
+    quantization: q4_k_m
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [general, instruct]
+
+  # ═══ Mistral / Codestral ═══
+  codestral-22b:
+    backend: lm_studio
+    model_id: "mistral-ai/Codestral-22B-v0.1"
+    family: mistral
+    size: 22b
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [coding, instruct, fill-in-middle]
+
+# Grupos de modelos para experimentos comparativos
+model_groups:
+  small_models:
+    - qwen2.5-coder-7b
+    - codellama-7b
+    - llama3.1-8b
+
+  medium_models:
+    - qwen2.5-coder-14b
+    - deepseek-coder-v2-16b
+    - codellama-13b
+
+  large_models:
+    - qwen2.5-coder-32b
+    - deepseek-coder-v2-236b
+    - codellama-34b
+
+  all_qwen:
+    - qwen2.5-coder-7b
+    - qwen2.5-coder-14b
+    - qwen2.5-coder-32b
+
+  all_deepseek:
+    - deepseek-coder-v2-16b
+    - deepseek-coder-v2-236b
+
+  recommended:
+    - qwen2.5-coder-7b
+    - qwen2.5-coder-14b
+    - deepseek-coder-v2-16b

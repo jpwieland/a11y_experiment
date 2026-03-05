@@ -1,0 +1,42 @@
+# experiments/ablation_study.yaml
+# Ablation study: qual combinação de scanners é mais eficaz?
+
+name: "Scanner Tools Ablation Study"
+description: |
+  Avalia a contribuição de cada ferramenta de scan para a qualidade
+  dos resultados. Usa um único modelo para isolar a variável do scanner.
+
+# Mesmo modelo para isolar variável dos scanners
+models:
+  - qwen2.5-coder-7b
+
+files:
+  - ./tests/fixtures/sample_components/Button.tsx
+  - ./tests/fixtures/sample_components/Form.tsx
+
+wcag_level: AA
+
+# Variantes de combinações de scanners
+variants:
+  - name: "pa11y_only"
+    scanners: [pa11y]
+  - name: "axe_only"
+    scanners: [axe-core]
+  - name: "playwright_only"
+    scanners: [playwright+axe]
+  - name: "pa11y_axe"
+    scanners: [pa11y, axe-core]
+  - name: "all_tools"
+    scanners: [pa11y, axe-core, playwright+axe]
+
+metrics:
+  - success_rate
+  - avg_time
+  - issues_fixed
+
+repetitions: 5
+
+output_format:
+  - json
+  - html
+  - csv
