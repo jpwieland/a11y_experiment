@@ -14,6 +14,42 @@ from a11y_autofix.scanner.base import BaseRunner
 
 log = structlog.get_logger(__name__)
 
+# Candidatos de comando para pa11y — tenta cada um em ordem até encontrar um que funcione.
+# Isso resolve o problema de pa11y instalado mas não no PATH do subprocess Python
+# (comum ao rodar dentro de .venv ou com PATH customizado pelo npm).
+_PA11Y_CANDIDATES = [
+    ["pa11y"],                    # Instalado no PATH padrão
+    ["npx", "pa11y"],             # Via npx (encontra globals npm sem precisar do PATH)
+    ["npx", "--yes", "pa11y"],    # Via npx com download automático se ausente
+]
+
+
+async def _find_pa11y_cmd() -> list[str] | None:
+    """
+    Descobre qual comando pa11y funciona no ambiente atual.
+
+    Testa candidatos em ordem e retorna o primeiro que responde com sucesso.
+    Resolve o problema de pa11y instalado mas fora do PATH do subprocess Python
+    (frequente dentro de .venv ou quando npm usa prefix customizado).
+
+    Returns:
+        Lista de tokens de comando (ex: ['npx', 'pa11y']) ou None se nenhum funcionar.
+    """
+    for cmd in _PA11Y_CANDIDATES:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode == 0:
+                log.debug("pa11y_cmd_found", cmd=cmd)
+                return cmd
+        except (FileNotFoundError, asyncio.TimeoutError, OSError):
+            continue
+    return None
+
 
 class Pa11yRunner(BaseRunner):
     """
@@ -23,35 +59,52 @@ class Pa11yRunner(BaseRunner):
     para o formato interno ToolFinding.
 
     Pa11y retorna código 2 quando há issues (comportamento esperado, não erro).
+
+    Estratégia de resolução de comando:
+        Tenta ['pa11y'], depois ['npx', 'pa11y'], depois ['npx', '--yes', 'pa11y'].
+        Isso garante que funcione mesmo dentro de .venv onde o PATH não herda
+        o npm prefix customizado do usuário.
     """
 
     tool = ScanTool.PA11Y
 
+    def __init__(self) -> None:
+        # Cache do comando resolvido para evitar redescoberta a cada scan
+        self._cmd: list[str] | None = None
+        self._cmd_resolved = False
+
+    async def _get_cmd(self) -> list[str] | None:
+        """Retorna o comando pa11y resolvido (com cache)."""
+        if not self._cmd_resolved:
+            self._cmd = await _find_pa11y_cmd()
+            self._cmd_resolved = True
+            if self._cmd is None:
+                log.warning(
+                    "pa11y_not_found",
+                    candidates=[c[0] for c in _PA11Y_CANDIDATES],
+                    hint="Execute: npm install -g pa11y",
+                )
+        return self._cmd
+
     async def available(self) -> bool:
-        """Verifica se pa11y está instalado."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pa11y", "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            return proc.returncode == 0
-        except FileNotFoundError:
-            return False
+        """Verifica se pa11y está disponível (via PATH ou npx)."""
+        return (await self._get_cmd()) is not None
 
     async def version(self) -> str:
         """Retorna versão do pa11y."""
+        cmd = await self._get_cmd()
+        if cmd is None:
+            return "unknown"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "pa11y", "--version",
+                *cmd, "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             if proc.returncode == 0:
                 return stdout.decode().strip()
-        except FileNotFoundError:
+        except (FileNotFoundError, asyncio.TimeoutError, OSError):
             pass
         return "unknown"
 
@@ -66,11 +119,17 @@ class Pa11yRunner(BaseRunner):
         Returns:
             Lista de ToolFinding.
         """
+        cmd = await self._get_cmd()
+        if cmd is None:
+            raise RuntimeError(
+                "pa11y não encontrado. Execute: npm install -g pa11y"
+            )
+
         version = await self.version()
         url = f"file://{harness_path.resolve()}"
 
         proc = await asyncio.create_subprocess_exec(
-            "pa11y",
+            *cmd,
             "--reporter", "json",
             "--standard", wcag,
             "--timeout", "30000",

@@ -25,10 +25,14 @@ CHECK_ONLY=false
 [[ "${1:-}" == "--check-only" ]] && CHECK_ONLY=true
 
 # ─── Descobrir npm bin dir ────────────────────────────────────────────────────
+# CORRETO: usar `npm config get prefix` e não `npm root -g`
+#   npm root -g  → /home/user/.local/npm/lib/node_modules
+#   npm prefix   → /home/user/.local/npm
+#   npm bin      → /home/user/.local/npm/bin   ← precisa deste
 get_npm_bin() {
-    local npm_root
-    npm_root=$(npm root -g 2>/dev/null) || { fail "npm não encontrado"; exit 1; }
-    echo "${npm_root%/node_modules}/bin"
+    local npm_prefix
+    npm_prefix=$(npm config get prefix 2>/dev/null) || { fail "npm não encontrado"; exit 1; }
+    echo "${npm_prefix}/bin"
 }
 
 # ─── Adicionar npm bin ao PATH (sessão atual + persistência) ─────────────────
