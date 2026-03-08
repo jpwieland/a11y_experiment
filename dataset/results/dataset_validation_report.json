@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-03-06T14:03:53.189421+00:00",
+  "catalog": "dataset/catalog/projects_backup_20260302_184013.yaml",
+  "total_projects": 333,
+  "checks": [
+    {
+      "metric_id": "QM1",
+      "name": "Inter-annotator agreement",
+      "threshold": "\u03ba \u2265 0.7 per repository",
+      "measured": "N/A",
+      "passed": false,
+      "details": "No doubly-annotated projects found. Run annotate.py --pass 2."
+    },
+    {
+      "metric_id": "QM2",
+      "name": "Corpus size",
+      "threshold": "\u2265 400 included repositories",
+      "measured": 126,
+      "passed": false,
+      "details": "Included repos: 126"
+    },
+    {
+      "metric_id": "QM3",
+      "name": "Stratum balance",
+      "threshold": "max(stratum_fraction) \u2264 20%",
+      "measured": 0.2619,
+      "passed": false,
+      "details": "Max: dashboard=26.2% | dashboard=33(26%), developer_tools=31(25%), ecommerce=15(12%), education=3(2%), government=8(6%), healthcare=6(5%), social=30(24%)"
+    },
+    {
+      "metric_id": "QM4",
+      "name": "Issue type coverage",
+      "threshold": "All 7 issue types present",
+      "measured": 0,
+      "passed": false,
+      "details": "Types found: "
+    },
+    {
+      "metric_id": "QM5",
+      "name": "False-positive rate",
+      "threshold": "\u2264 10% overall",
+      "measured": 0.0,
+      "passed": true,
+      "details": "Confirmed: 0, False positives: 0, Total: 0"
+    },
+    {
+      "metric_id": "QM6",
+      "name": "Snapshot integrity (pinned commits)",
+      "threshold": "\u2265 90% of snapshots pinned",
+      "measured": 1.0,
+      "passed": true,
+      "details": "Pinned: 126/126 (100.0%)"
+    },
+    {
+      "metric_id": "QM7",
+      "name": "Scan success rate",
+      "threshold": "\u2265 70% of included projects scanned",
+      "measured": 0.0,
+      "passed": false,
+      "details": "Successfully scanned: 0/126 (0.0%)"
+    },
+    {
+      "metric_id": "QM8",
+      "name": "WCAG principle coverage",
+      "threshold": "All 4 WCAG principles present",
+      "measured": 0,
+      "passed": false,
+      "details": "Principles found: "
+    }
+  ],
+  "passed": 2,
+  "total": 8,
+  "all_passed": false,
+  "note": "Meeting these thresholds is a necessary but not sufficient condition for dataset quality. They establish a reproducible minimum bar, not a guarantee of representativeness. See methodology Section 3.5.5."
+}

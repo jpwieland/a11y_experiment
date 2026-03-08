@@ -201,7 +201,7 @@ async def scan_project(
 
     # Execute scan
     try:
-        scan_results = await scanner.scan_files(unique_files, wcag_level="WCAG2AA")
+        scan_results = await scanner.scan_files(unique_files, wcag="WCAG2AA")
     except Exception as e:
         print(f"  [{entry.id}] Scan error: {e}", file=sys.stderr)
         entry.scan.status = "error"

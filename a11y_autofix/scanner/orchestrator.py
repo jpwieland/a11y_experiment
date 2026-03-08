@@ -14,6 +14,7 @@ import structlog
 from a11y_autofix.config import ScanResult, ScanTool, Settings, ToolFinding
 from a11y_autofix.scanner.axe import AxeRunner
 from a11y_autofix.scanner.base import BaseRunner
+from a11y_autofix.scanner.eslint import EslintRunner
 from a11y_autofix.scanner.lighthouse import LighthouseRunner
 from a11y_autofix.scanner.pa11y import Pa11yRunner
 from a11y_autofix.scanner.playwright_axe import PlaywrightAxeRunner
@@ -79,6 +80,7 @@ class MultiToolScanner:
         """
         self.settings = settings
         self._runners: list[BaseRunner] = []
+        self._eslint_runner: EslintRunner | None = None
 
         if settings.use_pa11y:
             self._runners.append(Pa11yRunner())
@@ -88,6 +90,8 @@ class MultiToolScanner:
             self._runners.append(LighthouseRunner())
         if settings.use_playwright:
             self._runners.append(PlaywrightAxeRunner())
+        if settings.use_eslint:
+            self._eslint_runner = EslintRunner()
 
     async def scan_file(self, file: Path, wcag: str) -> ScanResult:
         """
@@ -124,7 +128,7 @@ class MultiToolScanner:
         harness_path = self._write_temp_harness(harness_html)
 
         try:
-            # Descobrir runners disponíveis
+            # Descobrir runners disponíveis (harness-based)
             available: list[BaseRunner] = []
             for runner in self._runners:
                 try:
@@ -135,7 +139,17 @@ class MultiToolScanner:
                 except Exception as e:
                     log.warning("runner_availability_check_failed", tool=runner.tool.value, error=str(e))
 
-            if not available:
+            # Verificar disponibilidade do ESLint (source-based)
+            eslint_available = False
+            if self._eslint_runner:
+                try:
+                    eslint_available = await self._eslint_runner.available()
+                    if not eslint_available:
+                        log.debug("runner_unavailable", tool=ScanTool.ESLINT.value)
+                except Exception as e:
+                    log.warning("runner_availability_check_failed", tool=ScanTool.ESLINT.value, error=str(e))
+
+            if not available and not eslint_available:
                 log.warning("no_runners_available", file=str(file))
                 return ScanResult(
                     file=file,
@@ -144,7 +158,7 @@ class MultiToolScanner:
                     scan_time=time.perf_counter() - t0,
                     tools_used=[],
                     tool_versions={},
-                    error="No scan tools available. Install pa11y, axe-core or playwright.",
+                    error="No scan tools available. Install pa11y, axe-core, playwright or eslint.",
                 )
 
             # Coletar versões
@@ -154,21 +168,46 @@ class MultiToolScanner:
                     versions[runner.tool.value] = await runner.version()
                 except Exception:
                     versions[runner.tool.value] = "unknown"
+            if eslint_available and self._eslint_runner:
+                try:
+                    versions[ScanTool.ESLINT.value] = await self._eslint_runner.version()
+                except Exception:
+                    versions[ScanTool.ESLINT.value] = "unknown"
 
-            # Executar todos em paralelo
-            raw_results = await asyncio.gather(
-                *[runner.safe_run(harness_path, wcag) for runner in available],
+            # Executar harness runners + ESLint em paralelo
+            harness_tasks = [runner.safe_run(harness_path, wcag) for runner in available]
+            eslint_task = (
+                self._eslint_runner.safe_run_on_source(file, wcag)
+                if eslint_available and self._eslint_runner
+                else asyncio.coroutine(lambda: [])()
+            )
+
+            all_results = await asyncio.gather(
+                *harness_tasks,
+                eslint_task,
                 return_exceptions=True,
             )
 
+            harness_results = all_results[:-1]
+            eslint_result = all_results[-1]
+
             # Mapear findings por tool
             findings_by_tool: dict[ScanTool, list[ToolFinding]] = {}
-            for runner, result in zip(available, raw_results):
+            for runner, result in zip(available, harness_results):
                 if isinstance(result, Exception):
                     log.warning("runner_exception", tool=runner.tool.value, error=str(result))
                     findings_by_tool[runner.tool] = []
                 else:
                     findings_by_tool[runner.tool] = result  # type: ignore[assignment]
+
+            if eslint_available:
+                if isinstance(eslint_result, Exception):
+                    log.warning("runner_exception", tool=ScanTool.ESLINT.value, error=str(eslint_result))
+                    findings_by_tool[ScanTool.ESLINT] = []
+                else:
+                    findings_by_tool[ScanTool.ESLINT] = eslint_result or []  # type: ignore[assignment]
+
+            all_tools = [r.tool for r in available] + ([ScanTool.ESLINT] if eslint_available else [])
 
             # Aplicar protocolo científico
             protocol = DetectionProtocol(self.settings)
@@ -176,7 +215,7 @@ class MultiToolScanner:
                 file=file,
                 file_content=content,
                 findings_by_tool=findings_by_tool,
-                tools_used=[r.tool for r in available],
+                tools_used=all_tools,
                 tool_versions=versions,
             )
             scan_result.file_hash = file_hash
@@ -187,7 +226,7 @@ class MultiToolScanner:
                 file=file.name,
                 issues=len(scan_result.issues),
                 high_conf=len(scan_result.high_confidence_issues()),
-                tools=len(available),
+                tools=len(all_tools),
                 time_s=f"{scan_result.scan_time:.2f}",
             )
             return scan_result

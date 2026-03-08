@@ -41,6 +41,7 @@ class ScanTool(str, Enum):
     AXE = "axe-core"
     LIGHTHOUSE = "lighthouse"
     PLAYWRIGHT = "playwright+axe"
+    ESLINT = "eslint-jsx-a11y"
 
 
 class WCAGLevel(str, Enum):
@@ -135,6 +136,7 @@ class Settings(BaseSettings):
     use_axe: bool = Field(default=True)
     use_lighthouse: bool = Field(default=False)
     use_playwright: bool = Field(default=True)
+    use_eslint: bool = Field(default=True)
 
     # ═══ Protocolo Científico ═══
     min_tool_consensus: int = Field(default=2, ge=1, description="Mínimo de ferramentas para HIGH confidence")
