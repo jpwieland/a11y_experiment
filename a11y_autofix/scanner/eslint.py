@@ -28,28 +28,46 @@ from a11y_autofix.config import ScanTool, ToolFinding
 
 log = structlog.get_logger(__name__)
 
-# Regras jsx-a11y e seus mapeamentos WCAG + impacto
+# Regras jsx-a11y e seus mapeamentos WCAG + impacto.
+#
+# IMPORTANTE: inclua apenas regras que existem oficialmente no eslint-plugin-jsx-a11y.
+# Lista de referência: https://github.com/jsx-eslint/eslint-plugin-jsx-a11y#supported-rules
+#
+# Regras removidas intencionalmente:
+#   ❌ jsx-a11y/aria-hidden-body  — nunca foi uma regra oficial do plugin
+#   ❌ jsx-a11y/button-has-type   — pertence ao plugin 'eslint-plugin-react', não jsx-a11y
+#
+# O ESLint 10 lança TypeError ao encontrar qualquer regra desconhecida,
+# abortando o lint do arquivo inteiro antes de produzir qualquer saída.
 _RULE_META: dict[str, dict] = {
+    # ── Conteúdo não-textual ──────────────────────────────────────────────────
     "jsx-a11y/alt-text": {
         "wcag": "1.1.1",
         "impact": "critical",
         "help": "https://www.w3.org/WAI/WCAG21/Understanding/non-text-content",
     },
-    "jsx-a11y/aria-props": {
-        "wcag": "4.1.2",
-        "impact": "serious",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    "jsx-a11y/img-redundant-alt": {
+        "wcag": "1.1.1",
+        "impact": "minor",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/non-text-content",
     },
-    "jsx-a11y/aria-role": {
-        "wcag": "4.1.2",
+    # ── Semântica e estrutura ─────────────────────────────────────────────────
+    "jsx-a11y/heading-has-content": {
+        "wcag": "1.3.1",
+        "impact": "moderate",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
+    },
+    "jsx-a11y/label-has-associated-control": {
+        "wcag": "1.3.1",
         "impact": "critical",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
     },
-    "jsx-a11y/aria-hidden-body": {
-        "wcag": "4.1.2",
-        "impact": "critical",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    "jsx-a11y/scope": {
+        "wcag": "1.3.1",
+        "impact": "moderate",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
     },
+    # ── Teclado e foco ────────────────────────────────────────────────────────
     "jsx-a11y/click-events-have-key-events": {
         "wcag": "2.1.1",
         "impact": "serious",
@@ -60,60 +78,59 @@ _RULE_META: dict[str, dict] = {
         "impact": "serious",
         "help": "https://www.w3.org/WAI/WCAG21/Understanding/keyboard",
     },
-    "jsx-a11y/label-has-associated-control": {
-        "wcag": "1.3.1",
-        "impact": "critical",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
-    },
-    "jsx-a11y/no-autofocus": {
-        "wcag": "2.4.3",
-        "impact": "serious",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/focus-order",
-    },
-    "jsx-a11y/no-distracting-elements": {
-        "wcag": "2.2.2",
-        "impact": "serious",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/pause-stop-hide",
-    },
-    "jsx-a11y/tabindex-no-positive": {
-        "wcag": "2.4.3",
-        "impact": "serious",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/focus-order",
-    },
-    "jsx-a11y/anchor-is-valid": {
-        "wcag": "4.1.2",
+    "jsx-a11y/mouse-events-have-key-events": {
+        "wcag": "2.1.1",
         "impact": "moderate",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
-    },
-    "jsx-a11y/button-has-type": {
-        "wcag": "4.1.2",
-        "impact": "moderate",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
-    },
-    "jsx-a11y/heading-has-content": {
-        "wcag": "1.3.1",
-        "impact": "moderate",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
-    },
-    "jsx-a11y/html-has-lang": {
-        "wcag": "3.1.1",
-        "impact": "serious",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/language-of-page",
-    },
-    "jsx-a11y/img-redundant-alt": {
-        "wcag": "1.1.1",
-        "impact": "minor",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/non-text-content",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/keyboard",
     },
     "jsx-a11y/no-access-key": {
         "wcag": "2.1.1",
         "impact": "moderate",
         "help": "https://www.w3.org/WAI/WCAG21/Understanding/keyboard",
     },
-    "jsx-a11y/mouse-events-have-key-events": {
-        "wcag": "2.1.1",
-        "impact": "moderate",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/keyboard",
+    # ── Distrações / animações ────────────────────────────────────────────────
+    "jsx-a11y/no-distracting-elements": {
+        "wcag": "2.2.2",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/pause-stop-hide",
+    },
+    # ── Ordem de foco / tabindex ──────────────────────────────────────────────
+    "jsx-a11y/tabindex-no-positive": {
+        "wcag": "2.4.3",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/focus-order",
+    },
+    "jsx-a11y/no-autofocus": {
+        "wcag": "2.4.3",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/focus-order",
+    },
+    # ── Idioma ────────────────────────────────────────────────────────────────
+    "jsx-a11y/html-has-lang": {
+        "wcag": "3.1.1",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/language-of-page",
+    },
+    # ── ARIA ──────────────────────────────────────────────────────────────────
+    "jsx-a11y/aria-props": {
+        "wcag": "4.1.2",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    },
+    "jsx-a11y/aria-proptypes": {
+        "wcag": "4.1.2",
+        "impact": "serious",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    },
+    "jsx-a11y/aria-role": {
+        "wcag": "4.1.2",
+        "impact": "critical",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    },
+    "jsx-a11y/aria-unsupported-elements": {
+        "wcag": "4.1.2",
+        "impact": "minor",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
     },
     "jsx-a11y/role-has-required-aria-props": {
         "wcag": "4.1.2",
@@ -125,10 +142,16 @@ _RULE_META: dict[str, dict] = {
         "impact": "critical",
         "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
     },
-    "jsx-a11y/scope": {
-        "wcag": "1.3.1",
+    # ── Links e navegação ─────────────────────────────────────────────────────
+    "jsx-a11y/anchor-is-valid": {
+        "wcag": "4.1.2",
         "impact": "moderate",
-        "help": "https://www.w3.org/WAI/WCAG21/Understanding/info-and-relationships",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
+    },
+    "jsx-a11y/anchor-has-content": {
+        "wcag": "4.1.2",
+        "impact": "moderate",
+        "help": "https://www.w3.org/WAI/WCAG21/Understanding/name-role-value",
     },
 }
 
@@ -152,6 +175,12 @@ def _build_flat_config_cjs(rules: dict[str, str]) -> str:
 
     Usa require() para carregar plugins — funciona com NODE_PATH apontando
     para o npm root global, sem precisar instalar plugins no projeto escaneado.
+
+    Estratégia de resiliência de versão:
+        O config filtra dinamicamente as regras para incluir apenas as que
+        existem na versão instalada do plugin. Isso evita TypeError no ESLint 10
+        quando uma regra não existe no plugin (comportamento que abortava o lint
+        inteiro antes de produzir qualquer saída JSON).
     """
     rules_json = json.dumps(rules, indent=4)
     return (
@@ -163,15 +192,28 @@ def _build_flat_config_cjs(rules: dict[str, str]) -> str:
         'try {\n'
         '  jsxA11y = require("eslint-plugin-jsx-a11y");\n'
         '} catch (e) {\n'
-        '  console.error("[a11y] eslint-plugin-jsx-a11y não encontrado:", e.message);\n'
-        '  jsxA11y = { rules: {}, flatConfigs: {} };\n'
+        '  process.stderr.write("[a11y] eslint-plugin-jsx-a11y nao encontrado: " + e.message + "\\n");\n'
+        '  jsxA11y = { rules: {} };\n'
         '}\n'
         'try {\n'
         '  tsParser = require("@typescript-eslint/parser");\n'
         '} catch (e) {\n'
-        '  console.error("[a11y] @typescript-eslint/parser não encontrado:", e.message);\n'
         '  tsParser = null;\n'
         '}\n'
+        "\n"
+        "// Filtra apenas regras que existem na versao instalada do plugin.\n"
+        "// ESLint 10 lanca TypeError se qualquer regra declarada nao existir no plugin,\n"
+        "// abortando o lint inteiro antes de gerar qualquer saida JSON.\n"
+        "const availableRules = new Set(Object.keys(jsxA11y.rules || {}));\n"
+        f"const allRules = {rules_json};\n"
+        "const rules = Object.fromEntries(\n"
+        "  Object.entries(allRules).filter(([key]) => {\n"
+        "    const name = key.replace('jsx-a11y/', '');\n"
+        "    const ok = availableRules.has(name);\n"
+        "    if (!ok) process.stderr.write('[a11y] regra ignorada (nao existe no plugin): ' + key + '\\n');\n"
+        "    return ok;\n"
+        "  })\n"
+        ");\n"
         "\n"
         "const langOptions = {\n"
         "  parserOptions: {\n"
@@ -187,7 +229,7 @@ def _build_flat_config_cjs(rules: dict[str, str]) -> str:
         '    files: ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"],\n'
         "    plugins: { 'jsx-a11y': jsxA11y },\n"
         "    languageOptions: langOptions,\n"
-        f"    rules: {rules_json},\n"
+        "    rules,\n"
         "  },\n"
         "];\n"
     )

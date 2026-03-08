@@ -26,75 +26,90 @@ from a11y_autofix.utils.hashing import stable_issue_id
 log = structlog.get_logger(__name__)
 
 # ─── Mapeamento WCAG → IssueType ────────────────────────────────────────────
-# Cobrindo >40 critérios WCAG 2.1/2.2
+# Cobrindo critérios WCAG 2.1/2.2 relevantes para React/JSX estático.
+#
+# IMPORTANTE: sem chaves duplicadas — Python silenciosamente descarta a primeira
+# ocorrência quando há duplicação, o que mascara bugs de mapeamento.
+# Cada critério aparece UMA vez, na categoria mais específica.
 WCAG_TO_ISSUE_TYPE: dict[str, IssueType] = {
-    # Contraste
-    "1.4.3": IssueType.CONTRAST,
-    "1.4.6": IssueType.CONTRAST,
-    "1.4.11": IssueType.CONTRAST,
+    # ── Texto alternativo ───────────────────────────────────────────────────
+    "1.1.1": IssueType.ALT_TEXT,     # Non-text Content
 
-    # Texto alternativo
-    "1.1.1": IssueType.ALT_TEXT,
+    # ── Multimídia ──────────────────────────────────────────────────────────
+    "1.2.1": IssueType.OTHER,        # Audio-only and Video-only
+    "1.2.2": IssueType.OTHER,        # Captions (Prerecorded)
+    "1.2.3": IssueType.OTHER,        # Audio Description or Media Alternative
+    "1.2.4": IssueType.OTHER,        # Captions (Live)
+    "1.2.5": IssueType.OTHER,        # Audio Description (Prerecorded)
 
-    # Semântica / Estrutura
-    "1.3.1": IssueType.SEMANTIC,
-    "1.3.2": IssueType.SEMANTIC,
-    "1.3.3": IssueType.SEMANTIC,
-    "1.3.4": IssueType.SEMANTIC,
-    "1.3.5": IssueType.SEMANTIC,
-    "2.4.6": IssueType.SEMANTIC,
-    "2.4.10": IssueType.SEMANTIC,
-    "3.1.1": IssueType.SEMANTIC,
-    "3.1.2": IssueType.SEMANTIC,
-    "3.2.1": IssueType.SEMANTIC,
-    "3.2.2": IssueType.SEMANTIC,
-    "4.1.1": IssueType.SEMANTIC,
+    # ── Semântica / Estrutura ───────────────────────────────────────────────
+    "1.3.1": IssueType.SEMANTIC,     # Info and Relationships
+    "1.3.2": IssueType.SEMANTIC,     # Meaningful Sequence
+    "1.3.3": IssueType.SEMANTIC,     # Sensory Characteristics
+    "1.3.4": IssueType.SEMANTIC,     # Orientation
+    "1.3.5": IssueType.SEMANTIC,     # Identify Input Purpose
+    "3.1.1": IssueType.SEMANTIC,     # Language of Page (html lang=)
+    "3.1.2": IssueType.SEMANTIC,     # Language of Parts
+    "3.2.1": IssueType.SEMANTIC,     # On Focus (predictable behavior)
+    "3.2.2": IssueType.SEMANTIC,     # On Input
+    "4.1.1": IssueType.SEMANTIC,     # Parsing
 
-    # Labels
-    "1.3.6": IssueType.LABEL,
-    "2.4.2": IssueType.LABEL,
-    "2.4.4": IssueType.LABEL,
-    "2.5.3": IssueType.LABEL,
+    # ── Contraste ───────────────────────────────────────────────────────────
+    "1.4.1": IssueType.CONTRAST,     # Use of Color
+    "1.4.3": IssueType.CONTRAST,     # Contrast (Minimum)
+    "1.4.6": IssueType.CONTRAST,     # Contrast (Enhanced)
+    "1.4.11": IssueType.CONTRAST,    # Non-text Contrast
 
-    # ARIA
-    "4.1.2": IssueType.ARIA,
-    "4.1.3": IssueType.ARIA,
+    # ── Acessibilidade visual / Layout ─────────────────────────────────────
+    "1.4.2": IssueType.OTHER,        # Audio Control
+    "1.4.4": IssueType.OTHER,        # Resize Text
+    "1.4.5": IssueType.OTHER,        # Images of Text
+    "1.4.10": IssueType.OTHER,       # Reflow
+    "1.4.12": IssueType.OTHER,       # Text Spacing
+    "1.4.13": IssueType.OTHER,       # Content on Hover or Focus
 
-    # Teclado
-    "2.1.1": IssueType.KEYBOARD,
-    "2.1.2": IssueType.KEYBOARD,
-    "2.1.3": IssueType.KEYBOARD,
-    "2.1.4": IssueType.KEYBOARD,
-    "2.4.1": IssueType.KEYBOARD,
-    "2.4.3": IssueType.KEYBOARD,
-    "2.4.7": IssueType.KEYBOARD,
-    "2.4.11": IssueType.KEYBOARD,
-    "2.4.12": IssueType.KEYBOARD,
+    # ── Labels ──────────────────────────────────────────────────────────────
+    "1.3.6": IssueType.LABEL,        # Identify Purpose
+    "2.4.2": IssueType.LABEL,        # Page Titled
+    "2.4.4": IssueType.LABEL,        # Link Purpose (In Context)
+    "2.5.3": IssueType.LABEL,        # Label in Name
 
-    # Foco
-    "2.4.7": IssueType.FOCUS,
-    "2.4.11": IssueType.FOCUS,
-    "3.2.1": IssueType.FOCUS,
+    # ── Teclado ─────────────────────────────────────────────────────────────
+    "2.1.1": IssueType.KEYBOARD,     # Keyboard
+    "2.1.2": IssueType.KEYBOARD,     # No Keyboard Trap
+    "2.1.3": IssueType.KEYBOARD,     # Keyboard (No Exception)
+    "2.1.4": IssueType.KEYBOARD,     # Character Key Shortcuts
+    "2.4.1": IssueType.KEYBOARD,     # Bypass Blocks
+    "2.4.3": IssueType.KEYBOARD,     # Focus Order (also affects FOCUS type)
+    "2.4.12": IssueType.KEYBOARD,    # Focus Appearance (Enhanced)
 
-    # Multimídia
-    "1.2.1": IssueType.OTHER,
-    "1.2.2": IssueType.OTHER,
-    "1.2.3": IssueType.OTHER,
-    "1.2.4": IssueType.OTHER,
-    "1.2.5": IssueType.OTHER,
+    # ── Distrações / Timing ─────────────────────────────────────────────────
+    "2.2.2": IssueType.OTHER,        # Pause, Stop, Hide (marquee, blink)
 
-    # Movimento / Acessibilidade visual
-    "1.4.1": IssueType.CONTRAST,
-    "1.4.2": IssueType.OTHER,
-    "1.4.4": IssueType.OTHER,
-    "1.4.5": IssueType.OTHER,
-    "1.4.10": IssueType.OTHER,
-    "1.4.12": IssueType.OTHER,
-    "1.4.13": IssueType.OTHER,
+    # ── Foco ────────────────────────────────────────────────────────────────
+    # Nota: 2.4.7 e 2.4.11 são sobre APARÊNCIA de foco (visual), não teclado
+    "2.4.7": IssueType.FOCUS,        # Focus Visible
+    "2.4.11": IssueType.FOCUS,       # Focus Appearance (Minimum)
+
+    # ── Headings / Labels de navegação ─────────────────────────────────────
+    "2.4.6": IssueType.SEMANTIC,     # Headings and Labels
+    "2.4.10": IssueType.SEMANTIC,    # Section Headings
+
+    # ── ARIA ────────────────────────────────────────────────────────────────
+    "4.1.2": IssueType.ARIA,         # Name, Role, Value
+    "4.1.3": IssueType.ARIA,         # Status Messages
 }
 
 # ─── Mapeamento rule_id → IssueType (fallback quando WCAG não disponível) ────
+# Inclui IDs de regras dos três scanners principais:
+#   - axe-core (sem prefixo)
+#   - pa11y (formato WCAG2AA.Principle1.Guideline...)
+#   - eslint-plugin-jsx-a11y (prefixo "jsx-a11y/")
+#
+# Nota: o mapping via WCAG_TO_ISSUE_TYPE tem prioridade quando wcag_criteria
+# está disponível. Este dict é o fallback para quando wcag_criteria é None.
 RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
+    # ── axe-core rules ──────────────────────────────────────────────────────
     "color-contrast": IssueType.CONTRAST,
     "color-contrast-enhanced": IssueType.CONTRAST,
     "image-alt": IssueType.ALT_TEXT,
@@ -112,7 +127,6 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
     "aria-roles": IssueType.ARIA,
     "aria-valid-attr": IssueType.ARIA,
     "aria-valid-attr-value": IssueType.ARIA,
-    "aria-hidden-body": IssueType.ARIA,
     "aria-hidden-focus": IssueType.ARIA,
     "aria-input-field-name": IssueType.ARIA,
     "aria-toggle-field-name": IssueType.ARIA,
@@ -150,38 +164,64 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
     "meta-viewport": IssueType.OTHER,
     "audio-caption": IssueType.OTHER,
     "video-caption": IssueType.OTHER,
+
+    # ── eslint-plugin-jsx-a11y rules (prefixo "jsx-a11y/") ──────────────────
+    # Usados como fallback; normalmente wcag_criteria já está preenchido
+    # pelo EslintRunner via _RULE_META, então o mapping WCAG tem prioridade.
+    "jsx-a11y/alt-text": IssueType.ALT_TEXT,
+    "jsx-a11y/img-redundant-alt": IssueType.ALT_TEXT,
+    "jsx-a11y/heading-has-content": IssueType.SEMANTIC,
+    "jsx-a11y/html-has-lang": IssueType.SEMANTIC,
+    "jsx-a11y/scope": IssueType.SEMANTIC,
+    "jsx-a11y/anchor-has-content": IssueType.LABEL,
+    "jsx-a11y/label-has-associated-control": IssueType.LABEL,
+    "jsx-a11y/click-events-have-key-events": IssueType.KEYBOARD,
+    "jsx-a11y/interactive-supports-focus": IssueType.KEYBOARD,
+    "jsx-a11y/mouse-events-have-key-events": IssueType.KEYBOARD,
+    "jsx-a11y/no-access-key": IssueType.KEYBOARD,
+    "jsx-a11y/tabindex-no-positive": IssueType.FOCUS,
+    "jsx-a11y/no-autofocus": IssueType.FOCUS,
+    "jsx-a11y/no-distracting-elements": IssueType.OTHER,
+    "jsx-a11y/aria-props": IssueType.ARIA,
+    "jsx-a11y/aria-proptypes": IssueType.ARIA,
+    "jsx-a11y/aria-role": IssueType.ARIA,
+    "jsx-a11y/aria-unsupported-elements": IssueType.ARIA,
+    "jsx-a11y/role-has-required-aria-props": IssueType.ARIA,
+    "jsx-a11y/role-supports-aria-props": IssueType.ARIA,
+    "jsx-a11y/anchor-is-valid": IssueType.ARIA,
 }
 
 # ─── Mapeamento WCAG → Complexity ───────────────────────────────────────────
 WCAG_TO_COMPLEXITY: dict[str, Complexity] = {
-    # SIMPLE: Apenas adicionar atributo
-    "1.1.1": Complexity.SIMPLE,   # alt text
+    # ── SIMPLE: Adicionar/corrigir um atributo ──────────────────────────────
+    "1.1.1": Complexity.SIMPLE,   # alt text — só adicionar alt=""
     "2.4.2": Complexity.SIMPLE,   # page title
-    "3.1.1": Complexity.SIMPLE,   # lang attribute
+    "3.1.1": Complexity.SIMPLE,   # lang attribute — só adicionar lang=""
     "4.1.2": Complexity.SIMPLE,   # name, role, value
     "4.1.1": Complexity.SIMPLE,   # parsing
+    "4.1.3": Complexity.SIMPLE,   # status messages (aria-live)
+    "2.2.2": Complexity.SIMPLE,   # pause/stop/hide — remover <marquee>/<blink>
 
-    # MODERATE: Reestruturação parcial
+    # ── MODERATE: Reestruturação parcial ───────────────────────────────────
     "1.3.1": Complexity.MODERATE,   # info and relationships
     "1.3.2": Complexity.MODERATE,   # meaningful sequence
-    "2.1.1": Complexity.MODERATE,   # keyboard
+    "2.1.1": Complexity.MODERATE,   # keyboard accessibility
     "2.4.1": Complexity.MODERATE,   # bypass blocks
     "2.4.3": Complexity.MODERATE,   # focus order
     "2.4.4": Complexity.MODERATE,   # link purpose
     "2.4.6": Complexity.MODERATE,   # headings and labels
     "2.4.7": Complexity.MODERATE,   # focus visible
-    "4.1.3": Complexity.MODERATE,   # status messages
 
-    # COMPLEX: Redesign substancial
-    "1.4.3": Complexity.COMPLEX,    # contrast
-    "1.4.6": Complexity.COMPLEX,    # enhanced contrast
+    # ── COMPLEX: Redesign substancial ──────────────────────────────────────
+    "1.4.3": Complexity.COMPLEX,    # contrast (minimum)
+    "1.4.6": Complexity.COMPLEX,    # contrast (enhanced)
     "1.4.11": Complexity.COMPLEX,   # non-text contrast
     "1.4.10": Complexity.COMPLEX,   # reflow
     "1.4.12": Complexity.COMPLEX,   # text spacing
     "1.3.4": Complexity.COMPLEX,    # orientation
     "2.1.2": Complexity.COMPLEX,    # no keyboard trap
-    "2.4.11": Complexity.COMPLEX,   # focus appearance minimum
-    "2.4.12": Complexity.COMPLEX,   # focus appearance enhanced
+    "2.4.11": Complexity.COMPLEX,   # focus appearance (minimum)
+    "2.4.12": Complexity.COMPLEX,   # focus appearance (enhanced)
 }
 
 # Mapeamento impact → prioridade numérica
