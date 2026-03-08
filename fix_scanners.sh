@@ -283,7 +283,12 @@ EOF
     fi
 fi
 
-# Teste ESLint jsx-a11y
+# Teste ESLint jsx-a11y — detecta versão e usa flat config (9+/10) ou legado (8)
+ESLINT_MAJOR=$(npx eslint --version 2>/dev/null | grep -oP '^\D*\K\d+' | head -1 || echo "8")
+info "ESLint major version: $ESLINT_MAJOR"
+
+NPM_ROOT_G=$(npm root -g 2>/dev/null || echo "")
+
 TMP_TSX=$(mktemp /tmp/test_XXXXXX.tsx)
 cat > "$TMP_TSX" << 'EOF'
 import React from 'react';
@@ -295,28 +300,50 @@ export const BadComponent = () => (
 );
 EOF
 
-TMP_CFG=$(mktemp /tmp/.eslintrc_XXXXXX.json)
-cat > "$TMP_CFG" << 'EOF'
+if [[ "$ESLINT_MAJOR" -ge 9 ]]; then
+    # ── Flat config para ESLint 9+/10 ──
+    info "Usando flat config (.cjs) para ESLint $ESLINT_MAJOR"
+    TMP_CFG=$(mktemp /tmp/a11y_eslint_cfg_XXXXXX.cjs)
+    cat > "$TMP_CFG" << 'CFGEOF'
+"use strict";
+let jsxA11y, tsParser;
+try { jsxA11y = require("eslint-plugin-jsx-a11y"); } catch(e) { jsxA11y = { rules: {} }; }
+try { tsParser = require("@typescript-eslint/parser"); } catch(e) { tsParser = null; }
+const langOpts = { parserOptions: { ecmaVersion: 2022, ecmaFeatures: { jsx: true }, sourceType: "module" } };
+if (tsParser) langOpts.parser = tsParser;
+module.exports = [{
+  files: ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"],
+  plugins: { "jsx-a11y": jsxA11y },
+  languageOptions: langOpts,
+  rules: { "jsx-a11y/alt-text": "error", "jsx-a11y/click-events-have-key-events": "error" }
+}];
+CFGEOF
+    ESLINT_OUT=$(NODE_PATH="$NPM_ROOT_G" npx eslint --format json --config "$TMP_CFG" "$TMP_TSX" 2>/tmp/eslint_test_err.txt || true)
+else
+    # ── Config legado para ESLint 8 ──
+    info "Usando config legado (.eslintrc.json) para ESLint $ESLINT_MAJOR"
+    TMP_CFG=$(mktemp /tmp/.eslintrc_XXXXXX.json)
+    cat > "$TMP_CFG" << 'CFGEOF'
 {
   "root": true,
   "parser": "@typescript-eslint/parser",
   "parserOptions": { "ecmaVersion": 2022, "ecmaFeatures": {"jsx": true}, "sourceType": "module" },
   "plugins": ["jsx-a11y"],
-  "rules": {
-    "jsx-a11y/alt-text": "error",
-    "jsx-a11y/click-events-have-key-events": "error"
-  }
+  "rules": { "jsx-a11y/alt-text": "error", "jsx-a11y/click-events-have-key-events": "error" }
 }
-EOF
-
-ESLINT_OUT=$(npx eslint --format json --no-eslintrc --config "$TMP_CFG" "$TMP_TSX" 2>/dev/null || true)
+CFGEOF
+    ESLINT_OUT=$(npx eslint --format json --no-eslintrc --config "$TMP_CFG" "$TMP_TSX" 2>/tmp/eslint_test_err.txt || true)
+fi
 rm -f "$TMP_TSX" "$TMP_CFG"
 
 if echo "$ESLINT_OUT" | grep -q '"ruleId"'; then
     ISSUE_COUNT=$(echo "$ESLINT_OUT" | python3 -c "import sys,json; data=json.load(sys.stdin); print(sum(len(f['messages']) for f in data))" 2>/dev/null || echo "?")
     ok "ESLint jsx-a11y funcionando ($ISSUE_COUNT issues detectados no TSX de teste ✓)"
 elif echo "$ESLINT_OUT" | grep -q '\[\]'; then
-    warn "ESLint rodou mas não encontrou issues (verifique plugins)"
+    warn "ESLint rodou mas não encontrou issues"
+    if [[ -s /tmp/eslint_test_err.txt ]]; then
+        info "Stderr: $(head -3 /tmp/eslint_test_err.txt)"
+    fi
 else
     fail "ESLint não funcionou corretamente"
     info "Saída: ${ESLINT_OUT:0:200}"
