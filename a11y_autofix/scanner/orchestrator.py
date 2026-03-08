@@ -176,10 +176,14 @@ class MultiToolScanner:
 
             # Executar harness runners + ESLint em paralelo
             harness_tasks = [runner.safe_run(harness_path, wcag) for runner in available]
+
+            async def _no_eslint() -> list[ToolFinding]:
+                return []
+
             eslint_task = (
                 self._eslint_runner.safe_run_on_source(file, wcag)
                 if eslint_available and self._eslint_runner
-                else asyncio.coroutine(lambda: [])()
+                else _no_eslint()
             )
 
             all_results = await asyncio.gather(
