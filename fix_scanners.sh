@@ -1,87 +1,77 @@
 #!/usr/bin/env bash
 # =============================================================================
-# fix_scanners.sh — Instala e valida pa11y, ESLint jsx-a11y e ChromeDriver
+# fix_scanners.sh — Instala, valida e repara todas as ferramentas de scan
 #
-# Problema: runner_unavailable tool=pa11y + axe_json_parse_error
-# Causa:   pa11y não no PATH | ESLint não instalado | ChromeDriver desatualizado
+# Ferramentas gerenciadas:
+#   - pa11y          (accessibility via puppeteer)
+#   - axe-core CLI   (@axe-core/cli)
+#   - ESLint + jsx-a11y + @typescript-eslint (análise estática JSX)
+#   - Playwright     (chromium headless via Python)
+#   - axe-core npm   (para injeção local pelo Playwright runner)
 #
-# Uso: bash fix_scanners.sh [--check-only]
+# Uso:
+#   bash fix_scanners.sh             # instala e valida tudo
+#   bash fix_scanners.sh --check-only # só diagnóstico, sem instalar
+#
 # =============================================================================
-
 set -euo pipefail
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-ok()   { echo -e "${GREEN}✅ $*${NC}"; }
-fail() { echo -e "${RED}❌ $*${NC}"; }
-warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
-info() { echo -e "${BLUE}ℹ️  $*${NC}"; }
+# ─── Cores ────────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m';  CYAN='\033[0;36m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}  ✅ $*${NC}"; }
+fail() { echo -e "${RED}  ❌ $*${NC}"; }
+warn() { echo -e "${YELLOW}  ⚠️  $*${NC}"; }
+info() { echo -e "${BLUE}  ℹ️  $*${NC}"; }
+head() { echo -e "\n${CYAN}══════════════════════════════════════════════${NC}"; \
+         echo -e "${CYAN}  $*${NC}"; \
+         echo -e "${CYAN}══════════════════════════════════════════════${NC}"; }
 
 CHECK_ONLY=false
 [[ "${1:-}" == "--check-only" ]] && CHECK_ONLY=true
 
-# ─── Descobrir npm bin dir ────────────────────────────────────────────────────
-# CORRETO: usar `npm config get prefix` e não `npm root -g`
-#   npm root -g  → /home/user/.local/npm/lib/node_modules
-#   npm prefix   → /home/user/.local/npm
-#   npm bin      → /home/user/.local/npm/bin   ← precisa deste
+# ─── npm bin helper ───────────────────────────────────────────────────────────
 get_npm_bin() {
+    # CORRETO: npm config get prefix retorna /home/user/.local/npm
+    # e o bin dir é ${prefix}/bin — NÃO usar `npm root -g` que dá lib/node_modules
     local npm_prefix
     npm_prefix=$(npm config get prefix 2>/dev/null) || { fail "npm não encontrado"; exit 1; }
     echo "${npm_prefix}/bin"
 }
 
-# ─── Adicionar npm bin ao PATH (sessão atual + persistência) ─────────────────
 ensure_npm_in_path() {
     local npm_bin
     npm_bin=$(get_npm_bin)
-
     if echo "$PATH" | grep -q "$npm_bin"; then
-        ok "npm bin já no PATH: $npm_bin"
+        ok "npm bin no PATH: $npm_bin"
         return 0
     fi
-
-    warn "npm bin NÃO está no PATH: $npm_bin"
-
+    warn "npm bin NÃO no PATH: $npm_bin"
     if [[ "$CHECK_ONLY" == "true" ]]; then
-        fail "Adicione ao PATH: export PATH=\"$npm_bin:\$PATH\""
+        fail "Adicione: export PATH=\"$npm_bin:\$PATH\""
         return 1
     fi
-
-    # Adicionar à sessão atual
     export PATH="$npm_bin:$PATH"
-    info "PATH atualizado para esta sessão"
-
-    # Persistir no .bashrc
-    local bashrc="$HOME/.bashrc"
-    local profile="$HOME/.profile"
     local marker="# a11y-autofix npm PATH"
     local line="export PATH=\"$npm_bin:\$PATH\"  $marker"
-
-    if ! grep -q "$marker" "$bashrc" 2>/dev/null; then
-        echo "" >> "$bashrc"
-        echo "$line" >> "$bashrc"
-        ok "PATH adicionado ao $bashrc"
-    else
-        warn "PATH já estava no $bashrc (pulando)"
-    fi
-
-    if ! grep -q "$marker" "$profile" 2>/dev/null; then
-        echo "" >> "$profile"
-        echo "$line" >> "$profile"
-        ok "PATH adicionado ao $profile"
-    fi
+    for rc in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
+        [[ -f "$rc" ]] || continue
+        if ! grep -q "$marker" "$rc" 2>/dev/null; then
+            { echo ""; echo "$line"; } >> "$rc"
+            ok "PATH adicionado a $rc"
+        fi
+    done
+    info "PATH atualizado (sessão atual). Para persistir: source ~/.bashrc"
 }
 
-# ─── PASSO 1: Verificar Node.js e npm ────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 1: Verificar Node.js e npm"
-echo "════════════════════════════════════════════════════"
+npm_install_global() {
+    # npm install -g com --prefix explícito quando prefix não está no PATH padrão
+    local pkg="$1"
+    npm install -g "$pkg" 2>&1 | tail -3
+}
+
+# ─── PASSO 1: Node.js e npm ───────────────────────────────────────────────────
+head "PASSO 1: Node.js e npm"
 
 if command -v node &>/dev/null; then
     NODE_VER=$(node --version)
@@ -93,279 +83,485 @@ else
 fi
 
 if command -v npm &>/dev/null; then
-    NPM_VER=$(npm --version)
-    ok "npm: $NPM_VER"
+    ok "npm: $(npm --version)"
 else
     fail "npm NÃO encontrado!"
     exit 1
 fi
 
 NPM_BIN=$(get_npm_bin)
-info "npm bin global: $NPM_BIN"
+NPM_ROOT=$(npm root -g 2>/dev/null || echo "")
+info "npm prefix: $(npm config get prefix 2>/dev/null)"
+info "npm bin:    $NPM_BIN"
+info "npm root:   $NPM_ROOT"
 
-# ─── PASSO 2: Corrigir PATH para npm ─────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 2: Verificar PATH do npm"
-echo "════════════════════════════════════════════════════"
+# ─── PASSO 2: PATH ───────────────────────────────────────────────────────────
+head "PASSO 2: PATH do npm"
 ensure_npm_in_path
 
-# ─── PASSO 3: Instalar pa11y ─────────────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 3: pa11y"
-echo "════════════════════════════════════════════════════"
+# ─── PASSO 3: pa11y ──────────────────────────────────────────────────────────
+head "PASSO 3: pa11y"
 
+PA11Y_CMD=""
 if command -v pa11y &>/dev/null; then
-    PA11Y_VER=$(pa11y --version 2>&1 || echo "erro ao obter versão")
-    ok "pa11y já instalado: $PA11Y_VER"
+    PA11Y_CMD="pa11y"
+elif [[ -f "$NPM_BIN/pa11y" ]]; then
+    PA11Y_CMD="$NPM_BIN/pa11y"
+elif npx pa11y --version &>/dev/null 2>&1; then
+    PA11Y_CMD="npx pa11y"
+fi
+
+if [[ -n "$PA11Y_CMD" ]]; then
+    PA11Y_VER=$($PA11Y_CMD --version 2>&1 | head -1)
+    ok "pa11y: $PA11Y_VER (cmd: $PA11Y_CMD)"
 else
     warn "pa11y não encontrado"
-    if [[ "$CHECK_ONLY" == "true" ]]; then
-        fail "Instale: npm install -g pa11y"
-    else
-        info "Instalando pa11y..."
-        npm install -g pa11y
-
-        # Re-verificar após instalação
+    if [[ "$CHECK_ONLY" == "false" ]]; then
+        info "Instalando pa11y globalmente..."
+        npm_install_global pa11y
+        # Recarregar PATH
+        export PATH="$NPM_BIN:$PATH"
         if command -v pa11y &>/dev/null; then
-            PA11Y_VER=$(pa11y --version 2>&1)
-            ok "pa11y instalado com sucesso: $PA11Y_VER"
+            ok "pa11y instalado: $(pa11y --version 2>&1)"
+        elif [[ -f "$NPM_BIN/pa11y" ]]; then
+            ok "pa11y instalado em $NPM_BIN (adicione ao PATH)"
         else
-            # Tentar caminho direto
-            if [[ -f "$NPM_BIN/pa11y" ]]; then
-                PA11Y_VER=$("$NPM_BIN/pa11y" --version 2>&1)
-                ok "pa11y encontrado em $NPM_BIN: $PA11Y_VER"
-                warn "PATH pode não ter sido atualizado — reinicie o terminal ou: source ~/.bashrc"
-            else
-                fail "pa11y instalado mas não encontrado. Verifique: $NPM_BIN"
-                ls -la "$NPM_BIN/" | grep -i pa11y || echo "  (não listado)"
-            fi
+            fail "Falha ao instalar pa11y"
         fi
+    else
+        fail "Instale: npm install -g pa11y"
     fi
 fi
 
-# ─── PASSO 4: Instalar ESLint + jsx-a11y ─────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 4: ESLint + jsx-a11y"
-echo "════════════════════════════════════════════════════"
+# ─── PASSO 4: axe-core (npm local para Playwright runner) ────────────────────
+head "PASSO 4: axe-core (npm)"
+
+AXE_PATH=""
+if [[ -n "$NPM_ROOT" ]]; then
+    for candidate in "$NPM_ROOT/axe-core/axe.min.js" "$NPM_ROOT/@axe-core/cli/node_modules/axe-core/axe.min.js"; do
+        if [[ -f "$candidate" ]]; then
+            AXE_PATH="$candidate"
+            break
+        fi
+    done
+fi
+
+if [[ -n "$AXE_PATH" ]]; then
+    AXE_SIZE=$(du -h "$AXE_PATH" | cut -f1)
+    ok "axe-core (local): $AXE_PATH ($AXE_SIZE)"
+else
+    warn "axe-core não encontrado no npm global"
+    if [[ "$CHECK_ONLY" == "false" ]]; then
+        info "Instalando axe-core + @axe-core/cli globalmente..."
+        npm_install_global "axe-core @axe-core/cli"
+        # Re-verificar
+        if [[ -n "$NPM_ROOT" && -f "$NPM_ROOT/axe-core/axe.min.js" ]]; then
+            ok "axe-core instalado: $NPM_ROOT/axe-core/axe.min.js"
+        elif npx --yes @axe-core/cli --version &>/dev/null 2>&1; then
+            ok "axe-core CLI disponível via npx"
+        else
+            warn "axe-core pode não estar disponível localmente (CDN será usado como fallback)"
+        fi
+    else
+        warn "Instale: npm install -g axe-core @axe-core/cli"
+        info "  Sem axe local → Playwright usará CDN fallback (mais lento)"
+    fi
+fi
+
+# ─── PASSO 5: ESLint + plugins ───────────────────────────────────────────────
+head "PASSO 5: ESLint + jsx-a11y"
 
 ESLINT_OK=false
 JSXA11Y_OK=false
 TS_PARSER_OK=false
 
-# Verificar ESLint
-if command -v eslint &>/dev/null || npx eslint --version &>/dev/null 2>&1; then
+if npx eslint --version &>/dev/null 2>&1; then
     ESLINT_VER=$(npx eslint --version 2>&1 | head -1)
-    ok "ESLint disponível: $ESLINT_VER"
+    ESLINT_MAJOR=$(echo "$ESLINT_VER" | grep -oP '\d+' | head -1)
+    ok "ESLint: $ESLINT_VER (major: $ESLINT_MAJOR)"
     ESLINT_OK=true
 else
     warn "ESLint não encontrado"
+    ESLINT_MAJOR=0
 fi
 
-# Verificar jsx-a11y
-if npm list -g eslint-plugin-jsx-a11y 2>/dev/null | grep -q jsx-a11y; then
-    ok "eslint-plugin-jsx-a11y instalado globalmente"
+if npm list -g eslint-plugin-jsx-a11y 2>/dev/null | grep -q "eslint-plugin-jsx-a11y"; then
+    JSXA11Y_VER=$(npm list -g eslint-plugin-jsx-a11y 2>/dev/null | grep "eslint-plugin-jsx-a11y" | grep -oP '[\d.]+' | head -1)
+    ok "eslint-plugin-jsx-a11y: $JSXA11Y_VER"
     JSXA11Y_OK=true
 else
-    warn "eslint-plugin-jsx-a11y não instalado globalmente"
+    warn "eslint-plugin-jsx-a11y NÃO instalado globalmente"
 fi
 
-# Verificar @typescript-eslint/parser
-if npm list -g @typescript-eslint/parser 2>/dev/null | grep -q typescript-eslint; then
-    ok "@typescript-eslint/parser instalado globalmente"
+if npm list -g @typescript-eslint/parser 2>/dev/null | grep -q "typescript-eslint"; then
+    ok "@typescript-eslint/parser: instalado"
     TS_PARSER_OK=true
 else
-    warn "@typescript-eslint/parser não instalado globalmente"
+    warn "@typescript-eslint/parser NÃO instalado globalmente"
 fi
 
 if [[ "$ESLINT_OK" == "false" ]] || [[ "$JSXA11Y_OK" == "false" ]] || [[ "$TS_PARSER_OK" == "false" ]]; then
-    if [[ "$CHECK_ONLY" == "true" ]]; then
-        fail "Execute: npm install -g eslint eslint-plugin-jsx-a11y @typescript-eslint/parser @typescript-eslint/eslint-plugin"
-    else
-        info "Instalando ESLint + plugins..."
-        npm install -g eslint \
-                       eslint-plugin-jsx-a11y \
-                       @typescript-eslint/parser \
-                       @typescript-eslint/eslint-plugin
+    if [[ "$CHECK_ONLY" == "false" ]]; then
+        info "Instalando ESLint + plugins jsx-a11y + TypeScript parser..."
+        npm install -g \
+            eslint \
+            eslint-plugin-jsx-a11y \
+            @typescript-eslint/parser \
+            @typescript-eslint/eslint-plugin 2>&1 | tail -5
 
-        # Re-verificar
         if npx eslint --version &>/dev/null 2>&1; then
             ESLINT_VER=$(npx eslint --version 2>&1 | head -1)
+            ESLINT_MAJOR=$(echo "$ESLINT_VER" | grep -oP '\d+' | head -1)
             ok "ESLint instalado: $ESLINT_VER"
         else
-            fail "ESLint não funcionou após instalação"
+            fail "Falha ao instalar ESLint"
         fi
+    else
+        fail "Instale: npm install -g eslint eslint-plugin-jsx-a11y @typescript-eslint/parser @typescript-eslint/eslint-plugin"
     fi
 fi
 
-# ─── PASSO 5: Corrigir ChromeDriver (axe/playwright) ─────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 5: Chrome + ChromeDriver (axe-core)"
-echo "════════════════════════════════════════════════════"
+# ─── PASSO 6: Chrome / Chromium ───────────────────────────────────────────────
+head "PASSO 6: Chrome/Chromium"
 
+CHROME_CMD=""
 CHROME_VER=""
-DRIVER_VER=""
+for cmd in google-chrome google-chrome-stable chromium-browser chromium; do
+    if command -v "$cmd" &>/dev/null; then
+        CHROME_CMD="$cmd"
+        CHROME_VER=$($cmd --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || echo "?")
+        ok "Chrome/Chromium: $CHROME_VER (cmd: $cmd)"
+        break
+    fi
+done
+[[ -z "$CHROME_CMD" ]] && warn "Chrome/Chromium não encontrado no PATH"
 
-if command -v google-chrome &>/dev/null; then
-    CHROME_VER=$(google-chrome --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-    ok "Google Chrome: $CHROME_VER"
-elif command -v chromium-browser &>/dev/null; then
-    CHROME_VER=$(chromium-browser --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-    ok "Chromium: $CHROME_VER"
-elif command -v chromium &>/dev/null; then
-    CHROME_VER=$(chromium --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-    ok "Chromium: $CHROME_VER"
-else
-    warn "Chrome/Chromium não encontrado no PATH"
-fi
-
+# ChromeDriver
 if command -v chromedriver &>/dev/null; then
-    DRIVER_VER=$(chromedriver --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-    info "ChromeDriver atual: $DRIVER_VER"
-
+    DRIVER_VER=$(chromedriver --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || echo "?")
     CHROME_MAJOR=$(echo "$CHROME_VER" | cut -d. -f1)
     DRIVER_MAJOR=$(echo "$DRIVER_VER" | cut -d. -f1)
-
+    info "ChromeDriver: $DRIVER_VER"
     if [[ -n "$CHROME_MAJOR" && -n "$DRIVER_MAJOR" && "$CHROME_MAJOR" != "$DRIVER_MAJOR" ]]; then
         warn "MISMATCH: Chrome $CHROME_MAJOR vs ChromeDriver $DRIVER_MAJOR"
-        if [[ "$CHECK_ONLY" == "true" ]]; then
-            fail "Execute: npx browser-driver-manager install chrome"
+        if [[ "$CHECK_ONLY" == "false" ]]; then
+            info "Atualizando ChromeDriver..."
+            npx browser-driver-manager install chrome 2>&1 | tail -3
+            ok "ChromeDriver atualizado: $(chromedriver --version 2>&1 | head -1)"
         else
-            info "Instalando ChromeDriver compatível..."
-            npx browser-driver-manager install chrome 2>&1 | tail -5
-            DRIVER_VER_NEW=$(chromedriver --version 2>&1 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-            ok "ChromeDriver atualizado: $DRIVER_VER_NEW"
+            fail "Execute: npx browser-driver-manager install chrome"
         fi
     else
-        ok "Chrome ($CHROME_MAJOR) e ChromeDriver ($DRIVER_MAJOR) compatíveis"
+        ok "Chrome e ChromeDriver compatíveis (major: $CHROME_MAJOR)"
     fi
 else
     warn "ChromeDriver não encontrado"
-    if [[ "$CHECK_ONLY" == "true" ]]; then
-        fail "Execute: npx browser-driver-manager install chrome"
-    else
+    if [[ "$CHECK_ONLY" == "false" ]]; then
         info "Instalando ChromeDriver..."
-        npx browser-driver-manager install chrome 2>&1 | tail -5
+        npx browser-driver-manager install chrome 2>&1 | tail -3
         ok "ChromeDriver instalado"
+    else
+        warn "Execute: npx browser-driver-manager install chrome"
     fi
 fi
 
-# ─── PASSO 6: Verificação funcional ──────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  PASSO 6: Teste funcional"
-echo "════════════════════════════════════════════════════"
+# ─── PASSO 7: Playwright (Python) ────────────────────────────────────────────
+head "PASSO 7: Playwright (Python)"
 
-# Teste pa11y
-if command -v pa11y &>/dev/null; then
-    # Criar HTML mínimo para testar
-    TMP_HTML=$(mktemp /tmp/test_XXXXXX.html)
+if python3 -c "import playwright" &>/dev/null 2>&1; then
+    PW_VER=$(python3 -c "import playwright; print(getattr(playwright,'__version__','?'))" 2>/dev/null || echo "?")
+    ok "playwright Python: $PW_VER"
+
+    # Verificar se chromium está instalado
+    if python3 -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch(args=['--no-sandbox'])
+    b.close()
+print('ok')
+" &>/dev/null 2>&1; then
+        ok "playwright chromium: disponível"
+    else
+        warn "playwright chromium NÃO disponível"
+        if [[ "$CHECK_ONLY" == "false" ]]; then
+            info "Instalando chromium para playwright..."
+            python3 -m playwright install chromium 2>&1 | tail -3
+            ok "playwright chromium instalado"
+        else
+            fail "Execute: python3 -m playwright install chromium"
+        fi
+    fi
+else
+    warn "playwright Python NÃO instalado"
+    if [[ "$CHECK_ONLY" == "false" ]]; then
+        info "Instalando playwright..."
+        pip install playwright 2>&1 | tail -3
+        python3 -m playwright install chromium 2>&1 | tail -3
+        ok "playwright instalado"
+    else
+        fail "Execute: pip install playwright && python3 -m playwright install chromium"
+    fi
+fi
+
+# ─── PASSO 8: Testes funcionais ───────────────────────────────────────────────
+head "PASSO 8: Testes funcionais"
+
+# ── 8a: pa11y via HTTP simples ────────────────────────────────────────────────
+if [[ -n "$PA11Y_CMD" ]] || command -v pa11y &>/dev/null || npx pa11y --version &>/dev/null 2>&1; then
+    info "Testando pa11y com arquivo HTML simples..."
+    TMP_DIR=$(mktemp -d)
+    TMP_HTML="$TMP_DIR/test.html"
     cat > "$TMP_HTML" << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head><title>Test</title></head>
-<body><img src="test.jpg"><button>Click</button></body>
+<body>
+  <img src="test.jpg">
+  <button>Click</button>
+  <a href="">Empty link</a>
+</body>
 </html>
 EOF
 
-    PA11Y_OUT=$(pa11y --reporter json "file://$TMP_HTML" 2>&1 | head -c 200 || true)
-    rm -f "$TMP_HTML"
+    # Tentar pa11y com --timeout aumentado (CDN pode ser lento)
+    PA11Y_OUT=$(pa11y --reporter json \
+                      --timeout 60000 \
+                      --wait 500 \
+                      --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
+                      "file://$TMP_HTML" 2>/dev/null || \
+               npx pa11y --reporter json \
+                         --timeout 60000 \
+                         --wait 500 \
+                         --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
+                         "file://$TMP_HTML" 2>/dev/null || echo "[]")
+    rm -rf "$TMP_DIR"
 
-    if echo "$PA11Y_OUT" | grep -q '"code"'; then
-        ok "pa11y funcionando (encontrou issues no HTML de teste ✓)"
-    elif echo "$PA11Y_OUT" | grep -q '\[\]'; then
-        ok "pa11y rodou (sem issues no HTML de teste)"
+    if echo "$PA11Y_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" &>/dev/null 2>&1; then
+        COUNT=$(echo "$PA11Y_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))")
+        if [[ "$COUNT" -gt 0 ]]; then
+            ok "pa11y funcional: $COUNT issues detectados no HTML de teste ✓"
+        else
+            warn "pa11y rodou mas encontrou 0 issues (inesperado no HTML de teste)"
+        fi
     else
-        warn "pa11y rodou mas saída inesperada: ${PA11Y_OUT:0:100}"
+        warn "pa11y rodou mas saída não é JSON válido"
+        info "Saída: ${PA11Y_OUT:0:150}"
     fi
+else
+    warn "pa11y indisponível — pulando teste funcional"
 fi
 
-# Teste ESLint jsx-a11y — detecta versão e usa flat config (9+/10) ou legado (8)
-ESLINT_MAJOR=$(npx eslint --version 2>/dev/null | grep -oP '^\D*\K\d+' | head -1 || echo "8")
-info "ESLint major version: $ESLINT_MAJOR"
+# ── 8b: ESLint jsx-a11y com TSX de teste ─────────────────────────────────────
+info "Testando ESLint jsx-a11y com componente TSX..."
 
+ESLINT_MAJOR_NUM="${ESLINT_MAJOR:-0}"
 NPM_ROOT_G=$(npm root -g 2>/dev/null || echo "")
 
-TMP_TSX=$(mktemp /tmp/test_XXXXXX.tsx)
+TMP_DIR=$(mktemp -d)
+TMP_TSX="$TMP_DIR/BadComponent.tsx"
 cat > "$TMP_TSX" << 'EOF'
 import React from 'react';
 export const BadComponent = () => (
   <div onClick={() => console.log('click')}>
     <img src="logo.png" />
-    <button>Submit</button>
+    <button></button>
+    <a href="">Empty anchor</a>
+    <div role="button">Div with role</div>
   </div>
 );
 EOF
 
-if [[ "$ESLINT_MAJOR" -ge 9 ]]; then
-    # ── Flat config para ESLint 9+/10 ──
-    info "Usando flat config (.cjs) para ESLint $ESLINT_MAJOR"
-    TMP_CFG=$(mktemp /tmp/a11y_eslint_cfg_XXXXXX.cjs)
+ESLINT_OUT=""
+if [[ "$ESLINT_MAJOR_NUM" -ge 9 ]]; then
+    TMP_CFG="$TMP_DIR/a11y_cfg.cjs"
     cat > "$TMP_CFG" << 'CFGEOF'
 "use strict";
 let jsxA11y, tsParser;
 try { jsxA11y = require("eslint-plugin-jsx-a11y"); } catch(e) { jsxA11y = { rules: {} }; }
 try { tsParser = require("@typescript-eslint/parser"); } catch(e) { tsParser = null; }
-const langOpts = { parserOptions: { ecmaVersion: 2022, ecmaFeatures: { jsx: true }, sourceType: "module" } };
+const langOpts = {
+  parserOptions: { ecmaVersion: 2022, ecmaFeatures: { jsx: true }, sourceType: "module" }
+};
 if (tsParser) langOpts.parser = tsParser;
+const availableRules = new Set(Object.keys(jsxA11y.rules || {}));
+const allRules = {
+  "jsx-a11y/alt-text": "error",
+  "jsx-a11y/click-events-have-key-events": "error",
+  "jsx-a11y/anchor-has-content": "error",
+  "jsx-a11y/interactive-supports-focus": "error"
+};
+const rules = Object.fromEntries(
+  Object.entries(allRules).filter(([k]) => availableRules.has(k.replace('jsx-a11y/','')))
+);
 module.exports = [{
-  files: ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"],
+  files: ["**/*.tsx","**/*.jsx","**/*.ts","**/*.js"],
   plugins: { "jsx-a11y": jsxA11y },
   languageOptions: langOpts,
-  rules: { "jsx-a11y/alt-text": "error", "jsx-a11y/click-events-have-key-events": "error" }
+  rules,
 }];
 CFGEOF
     ESLINT_OUT=$(NODE_PATH="$NPM_ROOT_G" npx eslint --format json --config "$TMP_CFG" "$TMP_TSX" 2>/tmp/eslint_test_err.txt || true)
 else
-    # ── Config legado para ESLint 8 ──
-    info "Usando config legado (.eslintrc.json) para ESLint $ESLINT_MAJOR"
-    TMP_CFG=$(mktemp /tmp/.eslintrc_XXXXXX.json)
+    TMP_CFG="$TMP_DIR/.eslintrc.json"
     cat > "$TMP_CFG" << 'CFGEOF'
 {
   "root": true,
   "parser": "@typescript-eslint/parser",
   "parserOptions": { "ecmaVersion": 2022, "ecmaFeatures": {"jsx": true}, "sourceType": "module" },
   "plugins": ["jsx-a11y"],
-  "rules": { "jsx-a11y/alt-text": "error", "jsx-a11y/click-events-have-key-events": "error" }
+  "rules": {
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/click-events-have-key-events": "error",
+    "jsx-a11y/anchor-has-content": "error",
+    "jsx-a11y/interactive-supports-focus": "error"
+  }
 }
 CFGEOF
     ESLINT_OUT=$(npx eslint --format json --no-eslintrc --config "$TMP_CFG" "$TMP_TSX" 2>/tmp/eslint_test_err.txt || true)
 fi
-rm -f "$TMP_TSX" "$TMP_CFG"
+rm -rf "$TMP_DIR"
 
-if echo "$ESLINT_OUT" | grep -q '"ruleId"'; then
-    ISSUE_COUNT=$(echo "$ESLINT_OUT" | python3 -c "import sys,json; data=json.load(sys.stdin); print(sum(len(f['messages']) for f in data))" 2>/dev/null || echo "?")
-    ok "ESLint jsx-a11y funcionando ($ISSUE_COUNT issues detectados no TSX de teste ✓)"
-elif echo "$ESLINT_OUT" | grep -q '\[\]'; then
-    warn "ESLint rodou mas não encontrou issues"
-    if [[ -s /tmp/eslint_test_err.txt ]]; then
-        info "Stderr: $(head -3 /tmp/eslint_test_err.txt)"
+if echo "$ESLINT_OUT" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+msgs = sum(len(f.get('messages', [])) for f in data)
+print(msgs)
+" &>/dev/null 2>&1; then
+    ESLINT_COUNT=$(echo "$ESLINT_OUT" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+msgs = sum(len(f.get('messages', [])) for f in data)
+print(msgs)
+")
+    if [[ "$ESLINT_COUNT" -gt 0 ]]; then
+        ok "ESLint jsx-a11y funcional: $ESLINT_COUNT issues detectados no TSX de teste ✓"
+    else
+        warn "ESLint rodou mas encontrou 0 issues (esperado ≥ 2 no TSX de teste)"
+        [[ -s /tmp/eslint_test_err.txt ]] && info "Stderr: $(head -2 /tmp/eslint_test_err.txt)"
     fi
 else
-    fail "ESLint não funcionou corretamente"
-    info "Saída: ${ESLINT_OUT:0:200}"
+    fail "ESLint não produziu JSON válido"
+    info "stdout: ${ESLINT_OUT:0:200}"
+    [[ -s /tmp/eslint_test_err.txt ]] && info "stderr: $(head -3 /tmp/eslint_test_err.txt)"
+fi
+
+# ── 8c: Playwright + axe-core ────────────────────────────────────────────────
+info "Testando Playwright + axe-core..."
+
+PLAYWRIGHT_TEST_RESULT=$(python3 - << 'PYEOF' 2>/dev/null || echo "error"
+import asyncio, json, sys
+async def test():
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        print("playwright_not_installed")
+        return
+
+    # Procurar axe local
+    import subprocess, pathlib
+    axe_path = None
+    try:
+        npm_root = subprocess.check_output(["npm", "root", "-g"], text=True, timeout=10).strip()
+        for p in [pathlib.Path(npm_root) / "axe-core" / "axe.min.js",
+                  pathlib.Path(npm_root) / "@axe-core" / "cli" / "node_modules" / "axe-core" / "axe.min.js"]:
+            if p.exists():
+                axe_path = str(p)
+                break
+    except Exception:
+        pass
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+        page = await browser.new_page()
+        try:
+            await page.set_content("""<!DOCTYPE html>
+<html lang="en"><head><title>Test</title></head>
+<body><img src="x.png"><button></button></body></html>""")
+            if axe_path:
+                await page.add_script_tag(path=axe_path)
+            else:
+                await page.add_script_tag(url="https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js")
+                await page.wait_for_function("window.axe !== undefined", timeout=15000)
+            result = await page.evaluate("""
+async () => {
+  const r = await window.axe.run(document, { runOnly: { type:'tag', values:['wcag2a','wcag2aa'] } });
+  return r.violations.length;
+}""")
+            print(f"ok:{result}")
+        except Exception as e:
+            print(f"error:{e}")
+        finally:
+            await browser.close()
+
+asyncio.run(test())
+PYEOF
+)
+
+if echo "$PLAYWRIGHT_TEST_RESULT" | grep -q "^ok:"; then
+    PW_VIOLATIONS=$(echo "$PLAYWRIGHT_TEST_RESULT" | grep -oP '\d+')
+    if [[ "$PW_VIOLATIONS" -gt 0 ]]; then
+        ok "Playwright + axe-core funcional: $PW_VIOLATIONS violations detectados ✓"
+    else
+        warn "Playwright rodou mas encontrou 0 violations (esperado ≥ 1)"
+    fi
+elif echo "$PLAYWRIGHT_TEST_RESULT" | grep -q "playwright_not_installed"; then
+    warn "Playwright não está instalado no Python"
+    [[ "$CHECK_ONLY" == "false" ]] && pip install playwright &>/dev/null && python3 -m playwright install chromium &>/dev/null && ok "playwright instalado"
+else
+    warn "Playwright encontrou erro: $PLAYWRIGHT_TEST_RESULT"
 fi
 
 # ─── RESUMO FINAL ─────────────────────────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  RESUMO"
-echo "════════════════════════════════════════════════════"
-echo ""
-
-command -v pa11y &>/dev/null    && ok "pa11y:       $(pa11y --version 2>&1)"    || fail "pa11y:       NÃO DISPONÍVEL"
-npx eslint --version &>/dev/null 2>&1 && ok "ESLint:      $(npx eslint --version 2>&1)" || fail "ESLint:      NÃO DISPONÍVEL"
-npm list -g eslint-plugin-jsx-a11y 2>/dev/null | grep -q jsx-a11y && ok "jsx-a11y:    instalado" || fail "jsx-a11y:    NÃO INSTALADO"
-command -v chromedriver &>/dev/null && ok "ChromeDriver: $(chromedriver --version 2>&1 | head -1)" || warn "ChromeDriver: não encontrado"
+head "RESUMO FINAL"
 
 echo ""
+printf "  %-30s" "pa11y:"
+command -v pa11y &>/dev/null \
+    && echo -e "${GREEN}✅ $(pa11y --version 2>&1)${NC}" \
+    || (npx pa11y --version &>/dev/null 2>&1 \
+        && echo -e "${GREEN}✅ via npx$(NC)" \
+        || echo -e "${RED}❌ NÃO DISPONÍVEL${NC}")
+
+printf "  %-30s" "ESLint:"
+npx eslint --version &>/dev/null 2>&1 \
+    && echo -e "${GREEN}✅ $(npx eslint --version 2>&1)${NC}" \
+    || echo -e "${RED}❌ NÃO DISPONÍVEL${NC}"
+
+printf "  %-30s" "jsx-a11y (global):"
+npm list -g eslint-plugin-jsx-a11y 2>/dev/null | grep -q jsx-a11y \
+    && echo -e "${GREEN}✅ instalado${NC}" \
+    || echo -e "${RED}❌ NÃO INSTALADO${NC}"
+
+printf "  %-30s" "@typescript-eslint/parser:"
+npm list -g @typescript-eslint/parser 2>/dev/null | grep -q typescript \
+    && echo -e "${GREEN}✅ instalado${NC}" \
+    || echo -e "${YELLOW}⚠️  não encontrado${NC}"
+
+printf "  %-30s" "axe-core (npm local):"
+[[ -n "$AXE_PATH" ]] \
+    && echo -e "${GREEN}✅ $AXE_PATH${NC}" \
+    || echo -e "${YELLOW}⚠️  não encontrado (CDN será usado)${NC}"
+
+printf "  %-30s" "Playwright (Python):"
+python3 -c "import playwright; print(playwright.__version__)" &>/dev/null 2>&1 \
+    && echo -e "${GREEN}✅ $(python3 -c "import playwright; print(playwright.__version__)" 2>/dev/null)${NC}" \
+    || echo -e "${YELLOW}⚠️  não instalado${NC}"
+
+printf "  %-30s" "ChromeDriver:"
+command -v chromedriver &>/dev/null \
+    && echo -e "${GREEN}✅ $(chromedriver --version 2>&1 | head -1)${NC}" \
+    || echo -e "${YELLOW}⚠️  não encontrado${NC}"
+
+echo ""
+echo -e "${BLUE}─────────────────────────────────────────────────${NC}"
 if [[ "$CHECK_ONLY" == "false" ]]; then
-    echo -e "${BLUE}Para aplicar o PATH na sessão atual:${NC}"
-    echo "  source ~/.bashrc"
+    echo -e "${BLUE}Para aplicar PATH na sessão atual:${NC}"
+    echo "    source ~/.bashrc"
     echo ""
     echo -e "${BLUE}Para reescanear todos os projetos:${NC}"
-    echo "  bash reset_scan.sh --yes --and-scan"
+    echo "    bash reset_scan.sh --yes --and-scan"
+    echo ""
+    echo -e "${BLUE}Para ver relatório de findings coletados:${NC}"
+    echo "    python dataset/scripts/findings_report.py"
 fi
+echo ""

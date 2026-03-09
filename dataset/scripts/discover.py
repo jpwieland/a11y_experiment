@@ -6,9 +6,11 @@ Implements stratified sampling across 7 application domains, 3 size classes,
 and 3 popularity tiers using the GitHub Search REST API v3.
 
 Usage:
-    python dataset/scripts/discover.py --token <GITHUB_TOKEN> --output dataset/catalog/projects.yaml
-    python dataset/scripts/discover.py --token <GITHUB_TOKEN> --domain government --max 20
-    python dataset/scripts/discover.py --dry-run  # show queries without calling API
+    python dataset/scripts/discover.py --token <TOKEN> --output dataset/catalog/projects.yaml
+    python dataset/scripts/discover.py --token <TOKEN> --domain ecommerce --max 20
+    python dataset/scripts/discover.py --token <TOKEN> --top-up          # fill gaps
+    python dataset/scripts/discover.py --stats                           # show coverage
+    python dataset/scripts/discover.py --dry-run                         # preview queries
 
 References:
     - GitHub Search API: https://docs.github.com/en/rest/search/search
@@ -43,7 +45,6 @@ from dataset.schema.models import (
     ProjectSize,
     ProjectStatus,
     ScreeningRecord,
-    SnapshotMetadata,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -80,94 +81,186 @@ COURSE_PATTERNS: list[re.Pattern[str]] = [
 
 DOMAIN_QUERIES: dict[ProjectDomain, list[str]] = {
     ProjectDomain.ECOMMERCE: [
-        "react typescript ecommerce storefront in:topics",
-        "react typescript shopping-cart marketplace in:topics",
+        # Topic-based queries
         "topic:ecommerce language:TypeScript stars:>100",
         "topic:storefront language:TypeScript stars:>100",
         "topic:shopify language:TypeScript stars:>50",
         "topic:woocommerce language:TypeScript stars:>50",
-        "react typescript online-store checkout in:topics",
         "topic:nextjs-ecommerce language:TypeScript",
-        "react typescript product catalog shop in:description stars:>100",
         "topic:saleor language:TypeScript",
+        "topic:magento language:TypeScript stars:>50",
+        "topic:commercetools language:TypeScript",
+        "topic:medusajs language:TypeScript",
+        "topic:stripe language:TypeScript stars:>100",
+        # Description-based queries
+        "react typescript ecommerce storefront in:topics stars:>100",
+        "react typescript shopping-cart marketplace in:topics stars:>50",
+        "react typescript online-store checkout in:topics stars:>50",
+        "react typescript product catalog shop in:description stars:>100",
+        "react typescript payment checkout order in:description stars:>100",
+        # Framework-specific
+        "next.js typescript ecommerce in:description stars:>100",
+        "nextjs typescript shop store cart in:name stars:>100",
+        "react typescript commerce headless in:description stars:>100",
+        "typescript vite ecommerce shop in:description stars:>50",
+        "remix typescript ecommerce store in:name,description stars:>50",
     ],
     ProjectDomain.GOVERNMENT: [
-        "react typescript government civic in:topics",
+        # Topic-based queries
         "topic:government language:TypeScript stars:>50",
         "topic:civic-tech language:TypeScript",
-        "react typescript public-sector accessibility in:description stars:>50",
-        "topic:open-data language:TypeScript stars:>50",
-        "react typescript city portal municipality in:description stars:>50",
         "topic:govtech language:TypeScript",
-        "react typescript nonprofit ngo in:topics stars:>50",
         "topic:open-government language:TypeScript",
+        "topic:open-data language:TypeScript stars:>50",
+        "topic:transparency language:TypeScript stars:>50",
+        "topic:public-service language:TypeScript",
+        "topic:democracy language:TypeScript stars:>50",
+        # Description-based queries
+        "react typescript government civic in:topics stars:>50",
+        "react typescript public-sector accessibility in:description stars:>50",
+        "react typescript city portal municipality in:description stars:>50",
+        "react typescript nonprofit ngo in:topics stars:>50",
         "react typescript usa.gov federal state in:description stars:>50",
+        "react typescript open-source government portal in:description stars:>50",
+        # Agency/platform specific
+        "typescript nextjs government portal in:description stars:>50",
+        "react typescript legislation parliament senate in:description stars:>30",
+        "react typescript voting election civic in:description stars:>50",
+        "typescript public sector dashboard reporting in:description stars:>50",
+        "react typescript policy regulation compliance in:description stars:>50",
+        "typescript digital government services accessibility in:description stars:>30",
     ],
     ProjectDomain.HEALTHCARE: [
-        "react typescript healthcare medical in:topics",
+        # Topic-based queries
         "topic:healthcare language:TypeScript stars:>50",
         "topic:ehr language:TypeScript",
-        "react typescript patient portal in:description",
         "topic:fhir language:TypeScript stars:>50",
         "topic:telemedicine language:TypeScript",
-        "react typescript hospital clinic medical-record in:description stars:>50",
         "topic:health language:TypeScript stars:>100",
-        "react typescript pharmacy prescription in:description stars:>50",
         "topic:openemr language:TypeScript",
+        "topic:medical language:TypeScript stars:>50",
+        "topic:clinical language:TypeScript stars:>50",
+        "topic:patient language:TypeScript stars:>50",
+        "topic:telehealth language:TypeScript",
+        # Description-based queries
+        "react typescript healthcare medical in:topics stars:>50",
+        "react typescript patient portal in:description stars:>50",
+        "react typescript hospital clinic medical-record in:description stars:>50",
+        "react typescript pharmacy prescription in:description stars:>50",
+        "react typescript mental-health wellness in:description stars:>50",
+        # Framework-specific
+        "nextjs typescript health patient in:description stars:>50",
+        "react typescript genomics bioinformatics in:description stars:>50",
+        "typescript hl7 fhir patient health in:name,description stars:>50",
+        "react typescript appointment scheduling clinic in:description stars:>50",
+        "typescript health dashboard analytics medical in:description stars:>50",
     ],
     ProjectDomain.EDUCATION: [
-        "react typescript education lms in:topics",
+        # Topic-based queries
         "topic:education language:TypeScript stars:>100",
         "topic:edtech language:TypeScript",
         "topic:e-learning language:TypeScript stars:>100",
         "topic:lms language:TypeScript stars:>50",
         "topic:mooc language:TypeScript",
-        "react typescript course platform learning in:description stars:>100",
         "topic:classroom language:TypeScript stars:>50",
         "topic:moodle language:TypeScript",
+        "topic:canvas language:TypeScript stars:>50",
+        "topic:coding-education language:TypeScript",
+        "topic:math language:TypeScript stars:>100",
+        # Description-based queries
+        "react typescript education lms in:topics stars:>100",
+        "react typescript course platform learning in:description stars:>100",
         "react typescript quiz exam assessment in:topics stars:>50",
+        "react typescript student teacher school in:description stars:>100",
+        "react typescript online-learning elearning in:description stars:>100",
+        # Framework-specific
+        "nextjs typescript education course in:description stars:>100",
+        "react typescript curriculum lesson content in:description stars:>100",
+        "typescript vite learning platform educational in:description stars:>50",
+        "react typescript flashcard vocabulary language in:description stars:>50",
+        "typescript education gamification achievement in:description stars:>50",
     ],
     ProjectDomain.DEVELOPER_TOOLS: [
-        "react typescript developer-tools ide in:topics",
+        # Topic-based queries
         "topic:developer-tools language:TypeScript stars:>200",
-        "react component library typescript in:topics stars:>500",
         "topic:design-system language:TypeScript stars:>100",
         "topic:storybook language:TypeScript stars:>100",
         "topic:code-editor language:TypeScript stars:>100",
-        "react typescript cli devtools workspace in:description stars:>200",
         "topic:playground language:TypeScript stars:>100",
         "topic:api-client language:TypeScript stars:>100",
+        "topic:devtools language:TypeScript stars:>200",
+        "topic:vscode language:TypeScript stars:>200",
+        "topic:component-library language:TypeScript stars:>200",
+        "topic:monorepo language:TypeScript stars:>200",
+        # Description-based queries
+        "react typescript developer-tools ide in:topics stars:>200",
+        "react component library typescript in:topics stars:>500",
+        "react typescript cli devtools workspace in:description stars:>200",
         "react typescript debugger profiler trace in:description stars:>100",
+        "react typescript api-explorer rest graphql in:description stars:>100",
+        # Framework / niche specific
+        "typescript nextjs admin panel crud in:description stars:>100",
+        "react typescript schema editor form builder in:description stars:>100",
+        "typescript openapi swagger client in:description stars:>100",
+        "react typescript code snippet documentation in:description stars:>100",
+        "typescript nx turborepo monorepo workspace in:description stars:>100",
     ],
     ProjectDomain.DASHBOARD: [
-        "react typescript dashboard analytics in:topics",
+        # Topic-based queries
         "topic:dashboard language:TypeScript stars:>100",
         "topic:data-visualization language:TypeScript stars:>100",
-        "react typescript monitoring analytics in:description stars:>200",
         "topic:admin-dashboard language:TypeScript stars:>100",
         "topic:bi language:TypeScript stars:>100",
-        "react typescript reporting metrics kpi in:description stars:>100",
         "topic:grafana language:TypeScript stars:>100",
-        "react typescript table grid chart in:topics stars:>100",
         "topic:superset language:TypeScript",
+        "topic:analytics language:TypeScript stars:>200",
+        "topic:charting language:TypeScript stars:>100",
+        "topic:recharts language:TypeScript stars:>50",
+        "topic:d3 language:TypeScript stars:>100",
+        # Description-based queries
+        "react typescript dashboard analytics in:topics stars:>100",
+        "react typescript monitoring analytics in:description stars:>200",
+        "react typescript reporting metrics kpi in:description stars:>100",
+        "react typescript table grid chart in:topics stars:>100",
+        "react typescript admin panel management in:description stars:>200",
+        # Framework-specific
+        "nextjs typescript dashboard admin in:description stars:>100",
+        "react typescript real-time metrics websocket in:description stars:>100",
+        "typescript tremor shadcn dashboard in:description stars:>50",
+        "react typescript map geospatial visualization in:description stars:>100",
+        "typescript observability logs tracing monitoring in:description stars:>100",
     ],
     ProjectDomain.SOCIAL: [
-        "react typescript chat messaging collaboration in:topics",
+        # Topic-based queries
         "topic:messaging language:TypeScript stars:>100",
         "topic:collaboration language:TypeScript stars:>100",
-        "react social network typescript in:topics stars:>100",
         "topic:forum language:TypeScript stars:>100",
         "topic:community language:TypeScript stars:>100",
-        "react typescript feed timeline post in:description stars:>100",
         "topic:slack-alternative language:TypeScript stars:>100",
         "topic:discord-clone language:TypeScript stars:>50",
+        "topic:chat language:TypeScript stars:>100",
+        "topic:social-network language:TypeScript stars:>100",
+        "topic:stream language:TypeScript stars:>100",
+        "topic:webrtc language:TypeScript stars:>100",
+        # Description-based queries
+        "react typescript chat messaging collaboration in:topics stars:>100",
+        "react social network typescript in:topics stars:>100",
+        "react typescript feed timeline post in:description stars:>100",
         "react typescript video-call webrtc in:topics stars:>100",
+        "react typescript live stream broadcast in:description stars:>100",
+        # Framework-specific
+        "nextjs typescript social feed community in:description stars:>100",
+        "react typescript matrix element chat in:description stars:>50",
+        "typescript socket.io realtime chat in:description stars:>100",
+        "react typescript comment thread discussion in:description stars:>100",
+        "typescript nextjs blog cms content social in:description stars:>100",
     ],
 }
 
 # Target project counts per domain stratum.
-# Total ≈ 560; after ~25% IC4/IC6/IC7 failures → ~420 included (QM2: ≥ 400).
-# Each domain ≈ 80 repos → 80/420 ≈ 19% < 20% (QM3 passes).
+# Total target ≈ 560; after ~25% IC4/IC6/IC7 failures → ~420 included (QM2: ≥ 400).
+# Each domain ≈ 60-90 repos → max ≈ 90/420 ≈ 21% — close but domains with lower targets
+# help keep max stratum ≤ 20% (QM3).
 DOMAIN_TARGETS: dict[ProjectDomain, int] = {
     ProjectDomain.ECOMMERCE: 90,
     ProjectDomain.GOVERNMENT: 60,
@@ -379,6 +472,16 @@ class GitHubDiscovery:
         Execute a GitHub repository search query and return all result items.
 
         Handles pagination and rate-limit backoff automatically.
+
+        Args:
+            query: GitHub search query string.
+            sort: Sort field ('stars', 'updated', 'forks').
+            order: Sort direction ('desc', 'asc').
+            per_page: Results per page (max 100).
+            max_pages: Maximum pages to fetch.
+
+        Returns:
+            List of repository dicts from the GitHub API.
         """
         results: list[dict[str, Any]] = []
 
@@ -410,9 +513,17 @@ class GitHubDiscovery:
         self,
         url: str,
         params: dict[str, Any],
-        max_retries: int = 3,
+        max_retries: int = 4,
     ) -> dict[str, Any] | None:
-        """HTTP GET with exponential backoff on rate-limit (403/429)."""
+        """
+        HTTP GET with exponential backoff on rate-limit (403/429).
+
+        Handles:
+        - 200: Return parsed JSON
+        - 403/429: Rate limited — use X-RateLimit-Reset or Retry-After header
+        - 422: Invalid query — skip immediately (don't retry)
+        - Network errors: Exponential backoff
+        """
         for attempt in range(max_retries):
             try:
                 response = self._client.get(url, params=params)
@@ -421,23 +532,47 @@ class GitHubDiscovery:
                     return response.json()
 
                 if response.status_code in (403, 429):
-                    reset_ts = int(response.headers.get("X-RateLimit-Reset", 0))
-                    wait = max(reset_ts - int(time.time()) + 5, 60)
-                    print(f"  Rate limited. Waiting {wait}s (attempt {attempt + 1})")
+                    # Try Retry-After header first (more accurate for secondary limits)
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = int(retry_after) + 5
+                        except ValueError:
+                            wait = 60
+                    else:
+                        # Fall back to X-RateLimit-Reset timestamp
+                        reset_ts = int(response.headers.get("X-RateLimit-Reset", 0))
+                        now = int(time.time())
+                        wait = max(reset_ts - now + 5, 60) if reset_ts > now else 60
+
+                    print(
+                        f"  ⏳ Rate limited (HTTP {response.status_code}). "
+                        f"Waiting {wait}s (attempt {attempt + 1}/{max_retries})..."
+                    )
                     time.sleep(wait)
                     continue
 
+                if response.status_code == 422:
+                    # Unprocessable entity — invalid query syntax, skip
+                    print(
+                        f"  ⚠️  Invalid query (HTTP 422). Skipping.",
+                        file=sys.stderr,
+                    )
+                    return None
+
                 print(
-                    f"  HTTP {response.status_code} for query. Skipping.",
+                    f"  ⚠️  HTTP {response.status_code} for query. "
+                    f"Body: {response.text[:200]}",
                     file=sys.stderr,
                 )
                 return None
 
             except httpx.RequestError as e:
-                wait = 2 ** attempt * 5
-                print(f"  Network error: {e}. Retrying in {wait}s")
+                wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
+                print(f"  ⚠️  Network error: {e}. Retrying in {wait}s")
                 time.sleep(wait)
 
+        print("  ❌ Max retries exceeded.", file=sys.stderr)
         return None
 
     def close(self) -> None:
@@ -458,7 +593,7 @@ def load_existing_catalog(path: Path) -> tuple[dict[str, ProjectEntry], dict[str
             entry = ProjectEntry(**raw)
             entries[entry.id] = entry
         except Exception as e:
-            print(f"  Warning: could not parse entry {raw.get('id', '?')}: {e}")
+            print(f"  ⚠️  Warning: could not parse entry {raw.get('id', '?')}: {e}")
 
     return entries, data.get("metadata", {})
 
@@ -485,7 +620,65 @@ def save_catalog(
     with open(path, "w") as f:
         yaml.dump(output, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-    print(f"  Saved {len(entries)} entries to {path}")
+    print(f"  💾 Saved {len(entries)} entries to {path}")
+
+
+def print_stats(entries: dict[str, ProjectEntry]) -> None:
+    """
+    Print catalog coverage statistics by domain vs. targets.
+
+    Shows current count, target, gap, and QM2/QM3 compliance indicators.
+    """
+    total_target = sum(DOMAIN_TARGETS.values())
+    total_current = len(entries)
+    domain_counts: dict[ProjectDomain, int] = {d: 0 for d in DOMAIN_TARGETS}
+
+    for entry in entries.values():
+        if entry.domain in domain_counts:
+            domain_counts[entry.domain] += 1
+
+    print("\n♿  Catalog Coverage Report")
+    print("═" * 60)
+    print(f"  {'Domain':<20} {'Current':>8} {'Target':>8} {'Gap':>6}  {'Status'}")
+    print(f"  {'-'*20} {'-'*8} {'-'*8} {'-'*6}  {'-'*12}")
+
+    needs_topup: list[ProjectDomain] = []
+    for domain in ProjectDomain:
+        if domain == ProjectDomain.OTHER:
+            continue
+        target = DOMAIN_TARGETS.get(domain, 0)
+        current = domain_counts.get(domain, 0)
+        gap = max(0, target - current)
+        pct = round(current / max(target, 1) * 100)
+        bar = "✅" if current >= target else ("⚠️ " if pct >= 70 else "❌")
+        print(f"  {domain.value:<20} {current:>8} {target:>8} {gap:>6}  {bar} ({pct}%)")
+        if gap > 0:
+            needs_topup.append(domain)
+
+    print(f"  {'─'*20} {'─'*8} {'─'*8} {'─'*6}")
+    total_gap = max(0, total_target - total_current)
+    total_pct = round(total_current / max(total_target, 1) * 100)
+    print(f"  {'TOTAL':<20} {total_current:>8} {total_target:>8} {total_gap:>6}")
+
+    print()
+    print(f"  QM2 (≥400 included):  {'✅' if total_current >= 400 else '❌'} ({total_current} / 400)")
+
+    # QM3: max domain ≤ 20% of total
+    if total_current > 0:
+        max_domain = max(domain_counts.values())
+        max_domain_name = max(domain_counts, key=lambda d: domain_counts[d])
+        max_pct = round(max_domain / total_current * 100, 1)
+        print(
+            f"  QM3 (max domain ≤20%): {'✅' if max_pct <= 20 else '❌'} "
+            f"({max_domain_name.value}: {max_pct}%)"
+        )
+
+    if needs_topup:
+        print(f"\n  Domains below target: {', '.join(d.value for d in needs_topup)}")
+        print(f"  Run with --top-up to fill gaps automatically.")
+    else:
+        print("\n  ✅ All domains at or above target!")
+    print()
 
 
 def discover_domain(
@@ -494,64 +687,132 @@ def discover_domain(
     existing_ids: set[str],
     target: int,
     verbose: bool = False,
+    sort: str = "stars",
 ) -> list[ProjectEntry]:
-    """Discover and screen projects for a single domain stratum."""
+    """
+    Discover and screen projects for a single domain stratum.
+
+    Iterates over all domain queries in order. For each query, fetches up to
+    5 pages of results and screens each repository against the inclusion criteria.
+    Stops early once `target` new projects have been found.
+
+    Each query is tried sorted by `sort` (default: 'stars'). If enough results
+    are not found in the first pass, a second pass with sort='updated' is attempted
+    to surface more recently active (but perhaps less starred) projects.
+
+    Args:
+        client: Authenticated GitHub API client.
+        domain: Target domain stratum.
+        existing_ids: Set of repo IDs already in the catalog (to skip duplicates).
+        target: Number of NEW projects to find.
+        verbose: Print detailed screening information.
+        sort: Primary sort field ('stars' or 'updated').
+
+    Returns:
+        List of new ProjectEntry objects (length ≤ target).
+    """
     queries = DOMAIN_QUERIES[domain]
     found: list[ProjectEntry] = []
     seen_ids: set[str] = set(existing_ids)
 
-    for query in queries:
+    # Two-pass strategy: primary sort first, then 'updated' for diversity
+    sort_strategies = [sort] if sort != "stars" else ["stars", "updated"]
+
+    for current_sort in sort_strategies:
         if len(found) >= target:
             break
 
-        if verbose:
-            print(f"    Query: {query}")
+        if current_sort != sort_strategies[0]:
+            remaining_needed = target - len(found)
+            print(
+                f"    ℹ️  Switching to sort='{current_sort}' to find "
+                f"{remaining_needed} more repos..."
+            )
 
-        results = client.search(query, max_pages=5)
-        print(f"    → {len(results)} raw results for: {query[:60]}")
-
-        for repo in results:
+        for query in queries:
             if len(found) >= target:
                 break
 
-            repo_id = f"{repo['owner']['login']}__{repo['name']}"
-            if repo_id in seen_ids:
-                continue
-            seen_ids.add(repo_id)
+            if verbose:
+                print(f"    🔍 Query [{current_sort}]: {query}")
 
-            passes, screening = screen_repository(repo)
-            if not passes:
-                if verbose:
-                    print(f"      Excluded {repo_id}: {screening.exclusion_reason}")
-                continue
+            results = client.search(query, sort=current_sort, max_pages=5)
+            new_in_query = 0
+            skipped_duplicate = 0
+            excluded = 0
 
-            entry = repo_to_project_entry(repo, domain, screening)
-            found.append(entry)
-            print(f"      ✓ {repo_id} ({repo['stargazers_count']} ★)")
+            for repo in results:
+                if len(found) >= target:
+                    break
 
-        time.sleep(2.0)  # Respect rate limits between queries
+                repo_id = f"{repo['owner']['login']}__{repo['name']}"
+                if repo_id in seen_ids:
+                    skipped_duplicate += 1
+                    continue
+                seen_ids.add(repo_id)
+
+                passes, screening = screen_repository(repo)
+                if not passes:
+                    excluded += 1
+                    if verbose:
+                        print(f"      ✗ {repo_id}: {screening.exclusion_reason}")
+                    continue
+
+                entry = repo_to_project_entry(repo, domain, screening)
+                found.append(entry)
+                new_in_query += 1
+                print(f"      ✓ {repo_id} ({repo['stargazers_count']} ★)")
+
+            print(
+                f"    → {len(results)} raw | "
+                f"+{new_in_query} new | "
+                f"{skipped_duplicate} dupes | "
+                f"{excluded} excluded | "
+                f"query: {query[:55]}{'...' if len(query) > 55 else ''}"
+            )
+
+            # Respect secondary rate limit between queries
+            time.sleep(2.0)
 
     return found
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Discover GitHub projects for the a11y-autofix benchmark corpus"
+        description="Discover GitHub projects for the a11y-autofix benchmark corpus",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Discover all domains up to targets
+  python dataset/scripts/discover.py --token ghp_xxx
+
+  # Show current catalog coverage without calling GitHub API
+  python dataset/scripts/discover.py --stats
+
+  # Fill only domains below target (requires token)
+  python dataset/scripts/discover.py --token ghp_xxx --top-up
+
+  # Discover a single domain (useful for debugging)
+  python dataset/scripts/discover.py --token ghp_xxx --domain ecommerce --max 20
+
+  # Preview queries without calling API
+  python dataset/scripts/discover.py --dry-run
+        """,
     )
     parser.add_argument(
         "--token",
         default="",
-        help="GitHub Personal Access Token (required for search API)",
+        help="GitHub Personal Access Token (required for API calls)",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_CATALOG,
-        help="Path to catalog YAML file",
+        help="Path to catalog YAML file (default: dataset/catalog/projects.yaml)",
     )
     parser.add_argument(
         "--domain",
-        choices=[d.value for d in ProjectDomain],
+        choices=[d.value for d in ProjectDomain if d != ProjectDomain.OTHER],
         default=None,
         help="Restrict discovery to a single domain stratum",
     )
@@ -562,45 +823,81 @@ def main() -> None:
         help="Override target project count per domain",
     )
     parser.add_argument(
+        "--top-up",
+        action="store_true",
+        dest="top_up",
+        help=(
+            "Only search domains that are below their target count. "
+            "Skips domains already at or above target. Requires --token."
+        ),
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print catalog coverage statistics and exit (no API calls required)",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=["stars", "updated", "forks"],
+        default="stars",
+        help="Primary sort field for GitHub search (default: stars)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print queries without calling the GitHub API",
+        help="Print queries that would be executed without calling the GitHub API",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    if not args.token and not args.dry_run:
-        print("Error: --token is required unless --dry-run is set", file=sys.stderr)
-        sys.exit(1)
-
-    print("\n♿ a11y-autofix Dataset Discovery\n" + "═" * 50)
+    print("\n♿  a11y-autofix Dataset Discovery\n" + "═" * 56)
 
     # Load existing catalog to avoid duplicates
     existing_entries, metadata = load_existing_catalog(args.output)
-    print(f"  Existing catalog: {len(existing_entries)} projects")
+    print(f"  Existing catalog: {len(existing_entries)} projects\n")
 
+    # ── Stats-only mode ───────────────────────────────────────────────────────
+    if args.stats:
+        print_stats(existing_entries)
+        return
+
+    # ── Dry-run mode ──────────────────────────────────────────────────────────
     if args.dry_run:
-        print("\n[dry-run] Queries that would be executed:\n")
-        for domain, queries in DOMAIN_QUERIES.items():
+        print("[dry-run] Queries that would be executed:\n")
+        for domain in ProjectDomain:
+            if domain == ProjectDomain.OTHER:
+                continue
             if args.domain and domain.value != args.domain:
                 continue
-            print(f"  [{domain.value}]")
+            queries = DOMAIN_QUERIES[domain]
+            target = args.max or DOMAIN_TARGETS.get(domain, 0)
+            current = sum(1 for e in existing_entries.values() if e.domain == domain)
+            gap = max(0, target - current)
+            print(f"  [{domain.value}] {current}/{target} (gap: {gap})")
             for q in queries:
-                print(f"    {q}")
+                print(f"    • {q}")
+            print()
         return
+
+    # ── API discovery mode ────────────────────────────────────────────────────
+    if not args.token:
+        print(
+            "Error: --token is required for API discovery.\n"
+            "       Use --stats or --dry-run to inspect the catalog without a token.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     client = GitHubDiscovery(args.token)
     all_new: list[ProjectEntry] = []
 
-    domains_to_search = (
-        [ProjectDomain(args.domain)] if args.domain
-        else list(ProjectDomain)
-    )
+    # Determine which domains to search
+    if args.domain:
+        domains_to_search = [ProjectDomain(args.domain)]
+    else:
+        domains_to_search = [d for d in ProjectDomain if d != ProjectDomain.OTHER]
 
     for domain in domains_to_search:
-        if domain == ProjectDomain.OTHER:
-            continue
-
         target = args.max or DOMAIN_TARGETS.get(domain, 5)
         current_count = sum(
             1 for e in existing_entries.values() if e.domain == domain
@@ -608,10 +905,18 @@ def main() -> None:
         remaining = max(0, target - current_count)
 
         if remaining == 0:
-            print(f"\n  [{domain.value}] Already at target ({current_count}/{target}). Skipping.")
+            print(f"  [{domain.value}] ✅ Already at target ({current_count}/{target}). Skipping.")
             continue
 
-        print(f"\n  [{domain.value}] Searching for {remaining} more project(s) (have {current_count}/{target})")
+        # In top-up mode, only search domains that are below target
+        if args.top_up and remaining == 0:
+            continue
+
+        print(
+            f"\n  [{domain.value.upper()}] "
+            f"Searching for {remaining} more project(s) "
+            f"(have {current_count}/{target})"
+        )
 
         new = discover_domain(
             client,
@@ -619,6 +924,7 @@ def main() -> None:
             existing_ids=set(existing_entries.keys()),
             target=remaining,
             verbose=args.verbose,
+            sort=args.sort,
         )
         all_new.extend(new)
         print(f"  [{domain.value}] Found {len(new)} new projects")
@@ -626,7 +932,8 @@ def main() -> None:
     client.close()
 
     if not all_new:
-        print("\nNo new projects discovered.")
+        print("\n  ℹ️  No new projects discovered.")
+        print_stats(existing_entries)
         return
 
     # Merge with existing catalog
@@ -634,7 +941,10 @@ def main() -> None:
         existing_entries[entry.id] = entry
 
     save_catalog(existing_entries, args.output, metadata)
-    print(f"\n✓ Added {len(all_new)} new projects. Total: {len(existing_entries)}")
+    print(f"\n  ✓ Added {len(all_new)} new projects. Total: {len(existing_entries)}")
+
+    # Print final stats
+    print_stats(existing_entries)
 
 
 if __name__ == "__main__":

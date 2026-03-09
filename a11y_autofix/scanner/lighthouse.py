@@ -18,16 +18,27 @@ log = structlog.get_logger(__name__)
 _AUDIT_TO_WCAG: dict[str, str] = {
     "color-contrast": "1.4.3",
     "image-alt": "1.1.1",
+    "input-image-alt": "1.1.1",
+    "object-alt": "1.1.1",
     "button-name": "4.1.2",
     "link-name": "4.1.2",
     "label": "1.3.1",
     "aria-required-attr": "4.1.2",
+    "aria-required-children": "4.1.2",
+    "aria-required-parent": "4.1.2",
+    "aria-roles": "4.1.2",
     "aria-valid-attr": "4.1.2",
     "aria-valid-attr-value": "4.1.2",
+    "aria-hidden-focus": "4.1.2",
+    "aria-input-field-name": "4.1.2",
+    "aria-toggle-field-name": "4.1.2",
     "document-title": "2.4.2",
     "html-has-lang": "3.1.1",
+    "html-lang-valid": "3.1.1",
     "frame-title": "4.1.2",
     "duplicate-id": "4.1.1",
+    "duplicate-id-active": "4.1.1",
+    "duplicate-id-aria": "4.1.2",
     "tabindex": "2.4.3",
     "focus-traps": "2.1.2",
     "heading-order": "1.3.1",
@@ -35,19 +46,21 @@ _AUDIT_TO_WCAG: dict[str, str] = {
     "listitem": "1.3.1",
     "definition-list": "1.3.1",
     "dlitem": "1.3.1",
-    "input-image-alt": "1.1.1",
-    "object-alt": "1.1.1",
     "video-caption": "1.2.2",
     "audio-caption": "1.2.1",
     "meta-viewport": "1.4.4",
     "aria-hidden-body": "4.1.2",
-    "aria-hidden-focus": "4.1.2",
-    "aria-input-field-name": "4.1.2",
-    "aria-toggle-field-name": "4.1.2",
     "landmark-one-main": "1.3.6",
     "bypass": "2.4.1",
     "skip-link": "2.4.1",
+    "managed-focus": "2.4.3",
+    "interactive-element-affordance": "4.1.2",
+    "logical-tab-order": "2.4.3",
+    "offscreen-content-hidden": "4.1.2",
+    "use-landmarks": "1.3.6",
 }
+
+_PROCESS_TIMEOUT_S = 120
 
 
 class LighthouseRunner(BaseRunner):
@@ -55,7 +68,8 @@ class LighthouseRunner(BaseRunner):
     Runner para Google Lighthouse (https://developer.chrome.com/docs/lighthouse/).
 
     Foca na categoria 'accessibility' do Lighthouse para extrair findings
-    compatíveis com WCAG.
+    compatíveis com WCAG. Usa URL HTTP quando disponível para melhor
+    compatibilidade.
     """
 
     tool = ScanTool.LIGHTHOUSE
@@ -68,9 +82,9 @@ class LighthouseRunner(BaseRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate()
+            await asyncio.wait_for(proc.communicate(), timeout=15)
             return proc.returncode == 0
-        except FileNotFoundError:
+        except (FileNotFoundError, asyncio.TimeoutError):
             return False
 
     async def version(self) -> str:
@@ -81,29 +95,47 @@ class LighthouseRunner(BaseRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             if proc.returncode == 0:
                 return stdout.decode().strip()
-        except FileNotFoundError:
+        except (FileNotFoundError, asyncio.TimeoutError):
             pass
         return "unknown"
 
-    async def run(self, harness_path: Path, wcag: str) -> list[ToolFinding]:
+    async def run(
+        self,
+        harness_path: Path,
+        wcag: str,
+        harness_url: str | None = None,
+    ) -> list[ToolFinding]:
         """
         Executa Lighthouse na categoria accessibility.
 
         Args:
             harness_path: Caminho do arquivo HTML harness.
             wcag: Nível WCAG (usado para filtrar resultados).
+            harness_url: URL HTTP para acessar o harness (preferido).
 
         Returns:
             Lista de ToolFinding.
         """
         version = await self.version()
-        url = f"file://{harness_path.resolve()}"
+
+        # Preferir URL HTTP local; fallback para file://
+        url = harness_url or f"file://{harness_path.resolve()}"
+        log.debug("lighthouse_scanning", url=url[:80])
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             output_path = Path(tmp.name)
+
+        chrome_flags = (
+            "--headless "
+            "--no-sandbox "
+            "--disable-dev-shm-usage "
+            "--disable-gpu "
+            "--disable-web-security "
+            "--allow-file-access-from-files"
+        )
 
         proc = await asyncio.create_subprocess_exec(
             "lighthouse",
@@ -112,17 +144,21 @@ class LighthouseRunner(BaseRunner):
             "--output=json",
             f"--output-path={output_path}",
             "--quiet",
-            "--chrome-flags=--headless --no-sandbox --disable-dev-shm-usage",
+            f"--chrome-flags={chrome_flags}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
         try:
-            _, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+            _, _ = await asyncio.wait_for(proc.communicate(), timeout=_PROCESS_TIMEOUT_S)
         except asyncio.TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             output_path.unlink(missing_ok=True)
-            raise RuntimeError("Lighthouse timeout after 90s")
+            log.warning("lighthouse_timeout", timeout_s=_PROCESS_TIMEOUT_S)
+            return []
 
         try:
             raw = output_path.read_text(encoding="utf-8")
@@ -143,30 +179,34 @@ class LighthouseRunner(BaseRunner):
         )
 
         for audit_ref in audit_refs:
+            if not isinstance(audit_ref, dict):
+                continue
             audit_id = audit_ref.get("id", "")
             audit = all_audits.get(audit_id, {})
             if not isinstance(audit, dict):
                 continue
 
-            # Pular audits que passaram ou não são aplicáveis
-            if audit.get("score") in (1, None):
+            # Pular audits que passaram (score=1) ou não aplicáveis (score=None)
+            score = audit.get("score")
+            if score is None or score >= 1.0:
                 continue
 
             details = audit.get("details", {})
             items = details.get("items", []) if isinstance(details, dict) else []
+            wcag_criteria = _AUDIT_TO_WCAG.get(audit_id)
 
             if not items:
-                # Criar finding genérico mesmo sem items
+                # Criar finding genérico mesmo sem items específicos
                 finding = ToolFinding(
                     tool=self.tool,
                     tool_version=version,
                     rule_id=audit_id,
-                    wcag_criteria=_AUDIT_TO_WCAG.get(audit_id),
+                    wcag_criteria=wcag_criteria,
                     message=audit.get("description", ""),
                     selector="",
                     context="",
-                    impact=self._score_to_impact(audit.get("score")),
-                    help_url=f"https://web.dev/{audit_id}/",
+                    impact=self._score_to_impact(score),
+                    help_url=f"https://web.dev/articles/{audit_id}/",
                 )
                 findings.append(finding)
                 continue
@@ -179,12 +219,12 @@ class LighthouseRunner(BaseRunner):
                     tool=self.tool,
                     tool_version=version,
                     rule_id=audit_id,
-                    wcag_criteria=_AUDIT_TO_WCAG.get(audit_id),
+                    wcag_criteria=wcag_criteria,
                     message=audit.get("description", ""),
                     selector=node.get("selector", ""),
-                    context=node.get("snippet", ""),
-                    impact=self._score_to_impact(audit.get("score")),
-                    help_url=f"https://web.dev/{audit_id}/",
+                    context=node.get("snippet", "")[:500],
+                    impact=self._score_to_impact(score),
+                    help_url=f"https://web.dev/articles/{audit_id}/",
                 )
                 findings.append(finding)
 
@@ -192,7 +232,7 @@ class LighthouseRunner(BaseRunner):
         return findings
 
     def _score_to_impact(self, score: object) -> str:
-        """Converte score Lighthouse (0–1) para impacto."""
+        """Converte score Lighthouse (0–1) para impacto axe-core."""
         if score is None or score == 0:
             return "critical"
         s = float(score)  # type: ignore[arg-type]

@@ -2,20 +2,22 @@
 """
 Multi-tool accessibility scanning script for the a11y-autofix benchmark corpus.
 
-For each snapshotted project in the catalog:
-  1. Runs the a11y-autofix MultiToolScanner on all component files
-  2. Applies the DetectionProtocol (deduplication, confidence, WCAG mapping)
-  3. Saves per-project scan results (full JSON audit trail + summary)
-  4. Updates catalog entries with FindingSummary statistics
-  5. Emits a consolidated dataset-level findings JSONL for analysis
+Para cada projeto no catálogo (status = snapshotted):
+  1. Descobre todos os arquivos .tsx/.jsx do projeto
+  2. Executa o MultiToolScanner (pa11y + axe + playwright+axe + ESLint jsx-a11y)
+  3. Aplica o DetectionProtocol (deduplicação, consenso, mapeamento WCAG)
+  4. Salva resultados por projeto (JSON) e por finding (JSONL)
+  5. Atualiza o catálogo com estatísticas de scan
+  6. Emite dataset_findings.jsonl consolidado para análise
 
 Usage:
-    python dataset/scripts/scan.py --catalog dataset/catalog/projects.yaml
-    python dataset/scripts/scan.py --project saleor__storefront
-    python dataset/scripts/scan.py --workers 2 --timeout 90
+    python dataset/scripts/scan.py                              # scan todos pendentes
+    python dataset/scripts/scan.py --project saleor__storefront # só um projeto
+    python dataset/scripts/scan.py --workers 2 --timeout 120   # paralelo
+    python dataset/scripts/scan.py --force                     # re-scana escaneados
+    python dataset/scripts/scan.py --max-files 10              # teste rápido
 
-References:
-    Protocol: dataset/PROTOCOL.md §7
+Protocol ref: dataset/PROTOCOL.md §7
 """
 
 from __future__ import annotations
@@ -47,29 +49,27 @@ from dataset.schema.models import (
 
 DEFAULT_CATALOG = DATASET_ROOT / "catalog" / "projects.yaml"
 
-# WCAG criterion → principle mapping
 CRITERION_TO_PRINCIPLE: dict[str, str] = {
-    "1": "perceivable", "2": "operable", "3": "understandable", "4": "robust",
+    "1": "perceivable",
+    "2": "operable",
+    "3": "understandable",
+    "4": "robust",
 }
 
 
 def wcag_to_principle(criterion: str | None) -> str:
     if not criterion:
         return "unknown"
-    first_char = criterion.split(".")[0] if criterion else ""
+    first_char = criterion.split(".")[0] if "." in criterion else criterion[:1]
     return CRITERION_TO_PRINCIPLE.get(first_char, "unknown")
 
 
 def build_findings_summary(issues: list[Any]) -> FindingSummary:
-    """
-    Aggregate a list of A11yIssue objects into a FindingSummary.
-    Accepts the Pydantic A11yIssue model from a11y_autofix.config.
-    """
+    """Agrega lista de A11yIssue em FindingSummary."""
     summary = FindingSummary()
     summary.total_issues = len(issues)
 
     for issue in issues:
-        # Confidence breakdown
         conf = getattr(issue, "confidence", None)
         if conf is not None:
             conf_val = conf.value if hasattr(conf, "value") else str(conf)
@@ -80,19 +80,15 @@ def build_findings_summary(issues: list[Any]) -> FindingSummary:
             else:
                 summary.low_confidence += 1
 
-        # By issue type
         itype = issue.issue_type.value if hasattr(issue.issue_type, "value") else str(issue.issue_type)
         summary.by_type[itype] = summary.by_type.get(itype, 0) + 1
 
-        # By WCAG principle
         principle = wcag_to_principle(issue.wcag_criteria)
         summary.by_principle[principle] = summary.by_principle.get(principle, 0) + 1
 
-        # By impact
         impact = getattr(issue, "impact", "moderate") or "moderate"
         summary.by_impact[impact] = summary.by_impact.get(impact, 0) + 1
 
-        # By criterion
         if issue.wcag_criteria:
             crit = issue.wcag_criteria
             summary.by_criterion[crit] = summary.by_criterion.get(crit, 0) + 1
@@ -101,7 +97,7 @@ def build_findings_summary(issues: list[Any]) -> FindingSummary:
 
 
 def issue_to_scan_finding(issue: Any, project_id: str, pinned_commit: str) -> ScanFinding:
-    """Convert an A11yIssue to a ScanFinding for the dataset findings JSONL."""
+    """Converte A11yIssue em ScanFinding para o JSONL do dataset."""
     return ScanFinding(
         finding_id=issue.issue_id,
         project_id=project_id,
@@ -134,14 +130,23 @@ def issue_to_scan_finding(issue: Any, project_id: str, pinned_commit: str) -> Sc
 
 async def scan_project(
     entry: ProjectEntry,
-    scan_timeout: int = 90,
+    scan_timeout: int = 120,
     min_consensus: int = 1,
     force: bool = False,
+    max_files: int | None = None,
 ) -> tuple[ProjectEntry, list[ScanFinding]]:
     """
-    Execute the a11y-autofix multi-tool scanner on a snapshotted project.
+    Executa o MultiToolScanner completo em um projeto snapshotado.
 
-    Returns updated entry with scan summary and list of ScanFindings.
+    Args:
+        entry: Entrada do projeto no catálogo.
+        scan_timeout: Timeout por arquivo em segundos.
+        min_consensus: Mínimo de ferramentas para HIGH confidence.
+        force: Forçar re-scan mesmo se já escaneado.
+        max_files: Limitar número de arquivos por projeto (para testes).
+
+    Returns:
+        Tupla (entry atualizado, lista de ScanFinding).
     """
     from a11y_autofix.config import Settings
     from a11y_autofix.scanner.orchestrator import MultiToolScanner
@@ -153,36 +158,39 @@ async def scan_project(
 
     summary_path = result_dir / "summary.json"
     if not force and summary_path.exists() and entry.status == ProjectStatus.SCANNED:
-        print(f"  [{entry.id}] Already scanned. Skipping (use --force to re-scan).")
+        print(f"  [{entry.id}] Já escaneado (use --force para re-escanear).")
         return entry, []
 
     if not project_dir.exists():
-        print(f"  [{entry.id}] Snapshot not found. Run snapshot.py first.", file=sys.stderr)
-        entry.scan.status = "error"
+        print(f"  [{entry.id}] ⚠️  Snapshot não encontrado. Execute snapshot.py.", file=sys.stderr)
+        entry.scan = ProjectScanSummary(status="error")
         entry.scan.error_message = "Snapshot directory not found"
         return entry, []
 
-    # Build settings with loose consensus (collect all findings for annotation)
+    # Configurações: todas as ferramentas habilitadas
+    # Lighthouse desabilitado (muito lento para bulk scanning)
     settings = Settings(
         use_pa11y=True,
         use_axe=True,
-        use_lighthouse=False,  # too slow for bulk scanning
+        use_lighthouse=False,
         use_playwright=True,
+        use_eslint=True,
         min_tool_consensus=min_consensus,
         scan_timeout=scan_timeout,
         max_concurrent_scans=2,
     )
     scanner = MultiToolScanner(settings)
 
-    # Discover component files
+    # Descobrir arquivos de componentes React (excluindo testes, stories, etc.)
     files: list[Path] = []
-    for rel_path in entry.scan_paths:
+    scan_paths = entry.scan_paths if entry.scan_paths else ["."]
+    for rel_path in scan_paths:
         scan_dir = project_dir / rel_path.rstrip("/")
         if scan_dir.exists():
             found = find_react_files(scan_dir, recursive=True)
             files.extend(found)
 
-    # Deduplicate
+    # Deduplificar preservando ordem
     seen: set[Path] = set()
     unique_files: list[Path] = []
     for f in files:
@@ -191,84 +199,98 @@ async def scan_project(
             unique_files.append(f)
 
     if not unique_files:
-        print(f"  [{entry.id}] No component files found in scan_paths.")
-        entry.scan.status = "error"
+        print(f"  [{entry.id}] ⚠️  Nenhum arquivo .tsx/.jsx encontrado em {scan_paths}")
+        entry.scan = ProjectScanSummary(status="error")
         entry.scan.error_message = "No component files found"
         return entry, []
 
-    print(f"  [{entry.id}] Scanning {len(unique_files)} files ...")
+    if max_files:
+        unique_files = unique_files[:max_files]
+        print(f"  [{entry.id}] (limitado a {max_files} arquivos)")
+
+    print(f"  [{entry.id}] 🔍 Escaneando {len(unique_files)} arquivo(s)...")
     t0 = time.perf_counter()
 
-    # Execute scan
     try:
         scan_results = await scanner.scan_files(unique_files, wcag="WCAG2AA")
     except Exception as e:
-        print(f"  [{entry.id}] Scan error: {e}", file=sys.stderr)
-        entry.scan.status = "error"
-        entry.scan.error_message = str(e)[:300]
+        print(f"  [{entry.id}] ❌ Erro no scan: {e}", file=sys.stderr)
+        entry.scan = ProjectScanSummary(status="error")
+        entry.scan.error_message = str(e)[:500]
         return entry, []
 
     duration = time.perf_counter() - t0
 
-    # Aggregate findings
+    # Agregar findings
     all_issues = [issue for sr in scan_results for issue in sr.issues]
 
-    # Build summary
+    # Construir sumário
     summary = build_findings_summary(all_issues)
     summary.files_scanned = len(unique_files)
     summary.files_with_issues = sum(1 for sr in scan_results if sr.has_issues)
     summary.scan_duration_seconds = round(duration, 2)
     summary.scan_date = datetime.now(tz=timezone.utc).isoformat()
 
-    # Collect tool info from results
+    # Coletar ferramentas e versões usadas
+    tools_seen: set[str] = set()
     for sr in scan_results:
         for tool in sr.tools_used:
             tool_name = tool.value if hasattr(tool, "value") else str(tool)
-            if tool_name not in summary.tools_succeeded:
+            if tool_name not in tools_seen:
                 summary.tools_succeeded.append(tool_name)
+                tools_seen.add(tool_name)
         summary.tool_versions.update(sr.tool_versions)
 
-    # Build ScanFinding records
+    # Construir ScanFinding records para o JSONL
     scan_findings = [
         issue_to_scan_finding(issue, entry.id, entry.snapshot.pinned_commit)
         for sr in scan_results
         for issue in sr.issues
     ]
 
-    # Save per-project results
-    # Full audit trail (list of ScanResult JSON)
-    full_results = [sr.model_dump(mode="json") for sr in scan_results]
+    # ── Persistir resultados ───────────────────────────────────────────────────
+
+    # Audit trail completo (JSON)
+    full_results = []
+    for sr in scan_results:
+        try:
+            full_results.append(sr.model_dump(mode="json"))
+        except Exception:
+            full_results.append({"file": str(sr.file), "error": "serialization_error"})
+
     (result_dir / "scan_results.json").write_text(
         json.dumps(full_results, indent=2, default=str, ensure_ascii=False),
         encoding="utf-8",
     )
-
-    # Summary
     (result_dir / "summary.json").write_text(
         json.dumps(summary.model_dump(), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-
-    # Per-finding JSONL (one finding per line)
-    with open(result_dir / "findings.jsonl", "w", encoding="utf-8") as f:
+    with open(result_dir / "findings.jsonl", "w", encoding="utf-8") as fp:
         for finding in scan_findings:
-            f.write(finding.model_dump_json() + "\n")
+            fp.write(finding.model_dump_json() + "\n")
 
-    # Update catalog entry
+    # Atualizar entrada do catálogo
     entry.scan = ProjectScanSummary(
-        status="success" if scan_findings else "no_issues",
+        status="success" if all_issues else "no_issues",
         findings=summary,
     )
     entry.status = ProjectStatus.SCANNED
 
+    tools_str = ", ".join(summary.tools_succeeded) if summary.tools_succeeded else "nenhuma"
     print(
-        f"  [{entry.id}] ✓ {summary.total_issues} issues "
-        f"({summary.high_confidence} high-conf) in {duration:.1f}s"
+        f"  [{entry.id}] ✅ {summary.total_issues} issues "
+        f"({summary.high_confidence} high) | "
+        f"{len(unique_files)} arquivos | "
+        f"{duration:.1f}s | "
+        f"tools: {tools_str}"
     )
     return entry, scan_findings
 
 
 def load_catalog(path: Path) -> tuple[list[ProjectEntry], dict[str, Any]]:
+    if not path.exists():
+        return [], {}
     with open(path) as f:
         data = yaml.safe_load(f) or {}
     entries = []
@@ -276,7 +298,7 @@ def load_catalog(path: Path) -> tuple[list[ProjectEntry], dict[str, Any]]:
         try:
             entries.append(ProjectEntry(**raw))
         except Exception as e:
-            print(f"Warning: could not parse {raw.get('id', '?')}: {e}", file=sys.stderr)
+            print(f"  ⚠️  Aviso: {raw.get('id', '?')}: {e}", file=sys.stderr)
     return entries, data.get("metadata", {})
 
 
@@ -286,6 +308,8 @@ def save_catalog(entries: list[ProjectEntry], path: Path, metadata: dict[str, An
         "metadata": {
             **metadata,
             "last_modified": datetime.now(tz=timezone.utc).date().isoformat(),
+            "total_projects": len(entries),
+            "scanned": sum(1 for e in entries if e.status == ProjectStatus.SCANNED),
         },
     }
     with open(path, "w") as f:
@@ -293,109 +317,133 @@ def save_catalog(entries: list[ProjectEntry], path: Path, metadata: dict[str, An
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    print("\n♿ a11y-autofix Dataset Scanner\n" + "═" * 50)
+    print("\n♿  a11y-autofix Dataset Scanner")
+    print("=" * 56)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     entries, metadata = load_catalog(args.catalog)
-    print(f"  Loaded {len(entries)} projects from catalog")
+    print(f"  Catálogo: {len(entries)} projetos")
 
-    targets = (
-        [e for e in entries if e.id == args.project]
-        if args.project
-        else [e for e in entries if e.status == ProjectStatus.SNAPSHOTTED or
-              (args.force and e.status == ProjectStatus.SCANNED)]
-    )
+    if args.project:
+        targets = [e for e in entries if e.id == args.project]
+        if not targets:
+            print(f"  ❌ Projeto '{args.project}' não encontrado.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        targets = [
+            e for e in entries
+            if e.status == ProjectStatus.SNAPSHOTTED
+            or (args.force and e.status == ProjectStatus.SCANNED)
+        ]
 
     if not targets:
-        print("  No projects to scan (run snapshot.py first).")
+        scanned = sum(1 for e in entries if e.status == ProjectStatus.SCANNED)
+        print(f"  ℹ️  Nenhum projeto para escanear.")
+        print(f"     ({scanned} já escaneados / {len(entries)} total)")
+        print(f"     Execute snapshot.py primeiro, ou use --force.")
         return
 
-    print(f"  Targets: {len(targets)} projects\n")
+    print(f"  Targets:  {len(targets)} projetos")
+    print(f"  Workers:  {args.workers} paralelos")
+    print(f"  Timeout:  {args.timeout}s/arquivo")
+    print(f"  Consenso: ≥{args.min_consensus} tool(s) → HIGH confidence")
+    if args.max_files:
+        print(f"  Limite:   {args.max_files} arquivos/projeto")
+    print("")
 
     entry_index = {e.id: e for e in entries}
     all_findings: list[ScanFinding] = []
     sem = asyncio.Semaphore(args.workers)
 
-    async def scan_with_sem(entry: ProjectEntry) -> tuple[ProjectEntry, list[ScanFinding]]:
+    async def scan_with_sem(e: ProjectEntry) -> tuple[ProjectEntry, list[ScanFinding]]:
         async with sem:
             return await scan_project(
-                entry,
+                e,
                 scan_timeout=args.timeout,
-                min_consensus=1,
+                min_consensus=args.min_consensus,
                 force=args.force,
+                max_files=args.max_files,
             )
 
+    t0 = time.perf_counter()
     results = await asyncio.gather(*[scan_with_sem(e) for e in targets], return_exceptions=True)
+    total_dur = time.perf_counter() - t0
 
     for result in results:
         if isinstance(result, Exception):
-            print(f"  Scan failed: {result}", file=sys.stderr)
+            print(f"  ❌ Scan falhou: {result}", file=sys.stderr)
             continue
         updated_entry, findings = result
         entry_index[updated_entry.id] = updated_entry
         all_findings.extend(findings)
 
-    # Write consolidated dataset findings JSONL
+    # Consolidated findings JSONL
     consolidated_path = RESULTS_DIR / "dataset_findings.jsonl"
     mode = "a" if consolidated_path.exists() and not args.force else "w"
     with open(consolidated_path, mode, encoding="utf-8") as f:
         for finding in all_findings:
             f.write(finding.model_dump_json() + "\n")
 
-    # Write dataset statistics
-    total_issues = sum(
-        e.scan.findings.total_issues for e in entry_index.values()
-        if e.status == ProjectStatus.SCANNED
-    )
-    high_conf = sum(
-        e.scan.findings.high_confidence for e in entry_index.values()
-        if e.status == ProjectStatus.SCANNED
-    )
-    stats = {
-        "total_projects_scanned": sum(
-            1 for e in entry_index.values() if e.status == ProjectStatus.SCANNED
-        ),
-        "total_issues": total_issues,
-        "high_confidence_issues": high_conf,
-        "low_confidence_issues": total_issues - high_conf,
-        "by_type": {},
-        "by_principle": {},
-        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
-    }
+    # Dataset stats
+    all_entries = list(entry_index.values())
+    scanned_entries = [e for e in all_entries if e.status == ProjectStatus.SCANNED]
+    total_issues = sum(e.scan.findings.total_issues for e in scanned_entries)
+    high_conf = sum(e.scan.findings.high_confidence for e in scanned_entries)
+    medium_conf = sum(e.scan.findings.medium_confidence for e in scanned_entries)
 
-    for entry in entry_index.values():
-        if entry.status != ProjectStatus.SCANNED:
-            continue
-        for k, v in entry.scan.findings.by_type.items():
-            stats["by_type"][k] = stats["by_type"].get(k, 0) + v
-        for k, v in entry.scan.findings.by_principle.items():
-            stats["by_principle"][k] = stats["by_principle"].get(k, 0) + v
+    by_type: dict[str, int] = {}
+    by_principle: dict[str, int] = {}
+    for e in scanned_entries:
+        for k, v in e.scan.findings.by_type.items():
+            by_type[k] = by_type.get(k, 0) + v
+        for k, v in e.scan.findings.by_principle.items():
+            by_principle[k] = by_principle.get(k, 0) + v
 
     (RESULTS_DIR / "dataset_stats.json").write_text(
-        json.dumps(stats, indent=2, ensure_ascii=False),
+        json.dumps({
+            "total_projects_in_catalog": len(all_entries),
+            "total_projects_scanned": len(scanned_entries),
+            "total_issues": total_issues,
+            "high_confidence_issues": high_conf,
+            "medium_confidence_issues": medium_conf,
+            "low_confidence_issues": total_issues - high_conf - medium_conf,
+            "high_conf_rate_pct": round(high_conf / max(total_issues, 1) * 100, 1),
+            "by_type": dict(sorted(by_type.items(), key=lambda x: -x[1])),
+            "by_principle": dict(sorted(by_principle.items(), key=lambda x: -x[1])),
+            "scan_date": datetime.now(tz=timezone.utc).isoformat(),
+            "total_scan_seconds": round(total_dur, 2),
+        }, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    save_catalog(list(entry_index.values()), args.catalog, metadata)
+    save_catalog(all_entries, args.catalog, metadata)
 
-    scanned = sum(1 for e in entry_index.values() if e.status == ProjectStatus.SCANNED)
-    print(f"\n{'═' * 50}")
-    print(f"  Scanned: {scanned} projects  |  Total findings: {len(all_findings)}")
-    print(f"  High-confidence: {high_conf} ({high_conf/max(total_issues,1)*100:.1f}%)")
-    print(f"  Consolidated findings: {consolidated_path}")
+    # Resumo
+    print("\n" + "=" * 56)
+    print(f"  ✅ Concluído em {total_dur:.1f}s")
+    print(f"  Projetos escaneados:  {len(scanned_entries)}/{len(all_entries)}")
+    print(f"  Findings (sessão):    {len(all_findings)}")
+    print(f"  Total no corpus:      {total_issues} issues")
+    print(f"  High confidence:      {high_conf} ({round(high_conf/max(total_issues,1)*100,1)}%)")
+    print(f"  Dataset JSONL:        {consolidated_path}")
+    print(f"\n  Relatório: python dataset/scripts/findings_report.py\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Scan snapshotted projects for accessibility violations"
+        description="Scan de acessibilidade multi-ferramenta para o corpus a11y-autofix",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
-    parser.add_argument("--project", default=None, help="Scan only this project ID")
-    parser.add_argument("--workers", type=int, default=1, help="Concurrent projects (default 1)")
-    parser.add_argument("--timeout", type=int, default=90, help="Per-file tool timeout (seconds)")
-    parser.add_argument("--force", action="store_true", help="Re-scan already scanned projects")
+    parser.add_argument("--project", default=None, help="ID exato do projeto a escanear")
+    parser.add_argument("--workers", type=int, default=1, help="Projetos em paralelo (default: 1)")
+    parser.add_argument("--timeout", type=int, default=120, help="Timeout por arquivo em segundos")
+    parser.add_argument("--min-consensus", type=int, default=1, dest="min_consensus",
+                        help="Mínimo de tools para HIGH confidence (default: 1)")
+    parser.add_argument("--force", action="store_true", help="Re-escanear projetos já escaneados")
+    parser.add_argument("--max-files", type=int, default=None, dest="max_files",
+                        help="Limitar arquivos por projeto (útil para testes)")
     args = parser.parse_args()
-
     asyncio.run(main_async(args))
 
 

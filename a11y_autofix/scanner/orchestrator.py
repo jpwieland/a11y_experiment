@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from a11y_autofix.scanner.lighthouse import LighthouseRunner
 from a11y_autofix.scanner.pa11y import Pa11yRunner
 from a11y_autofix.scanner.playwright_axe import PlaywrightAxeRunner
 from a11y_autofix.utils.files import build_html_harness
+from a11y_autofix.utils.http_server import HarnessServer
 
 log = structlog.get_logger(__name__)
 
@@ -64,11 +66,19 @@ class MultiToolScanner:
     Orquestra múltiplas ferramentas de acessibilidade em paralelo.
 
     Para cada arquivo:
-    1. Gera HTML harness temporário
-    2. Executa todos os runners disponíveis em paralelo (asyncio.gather)
-    3. Coleta findings de cada runner
-    4. Aplica o protocolo científico de detecção (deduplicação + confiança)
-    5. Retorna ScanResult com metadados completos
+    1. Gera HTML harness temporário (produção min builds para CDN rápido)
+    2. Inicia servidor HTTP local para servir o harness (evita file:// issues)
+    3. Executa todos os runners disponíveis em paralelo (asyncio.gather)
+    4. ESLint roda diretamente no fonte (não precisa do harness)
+    5. Coleta findings de cada runner
+    6. Aplica o protocolo científico de detecção (deduplicação + confiança)
+    7. Retorna ScanResult com metadados completos
+
+    Arquitetura HTTP:
+        O harness é servido via http://127.0.0.1:PORT/ em vez de file://.
+        Isso resolve os timeouts de CDN: os scripts externos (React, Babel)
+        carregam normalmente via HTTP, sem as restrições de segurança do
+        protocolo file://.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -123,11 +133,15 @@ class MultiToolScanner:
 
         file_hash = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
 
-        # Gerar harness HTML temporário
-        harness_html = build_html_harness(content, file.name)
-        harness_path = self._write_temp_harness(harness_html)
+        # Criar diretório temporário dedicado para este scan
+        harness_dir = Path(tempfile.mkdtemp(prefix="a11y_harness_"))
 
         try:
+            # Gerar harness HTML e escrevê-lo no diretório temporário
+            harness_html = build_html_harness(content, file.name)
+            harness_path = harness_dir / "harness.html"
+            harness_path.write_text(harness_html, encoding="utf-8")
+
             # Descobrir runners disponíveis (harness-based)
             available: list[BaseRunner] = []
             for runner in self._runners:
@@ -137,9 +151,13 @@ class MultiToolScanner:
                     else:
                         log.debug("runner_unavailable", tool=runner.tool.value)
                 except Exception as e:
-                    log.warning("runner_availability_check_failed", tool=runner.tool.value, error=str(e))
+                    log.warning(
+                        "runner_availability_check_failed",
+                        tool=runner.tool.value,
+                        error=str(e),
+                    )
 
-            # Verificar disponibilidade do ESLint (source-based)
+            # Verificar disponibilidade do ESLint (source-based, não precisa de harness)
             eslint_available = False
             if self._eslint_runner:
                 try:
@@ -147,7 +165,11 @@ class MultiToolScanner:
                     if not eslint_available:
                         log.debug("runner_unavailable", tool=ScanTool.ESLINT.value)
                 except Exception as e:
-                    log.warning("runner_availability_check_failed", tool=ScanTool.ESLINT.value, error=str(e))
+                    log.warning(
+                        "runner_availability_check_failed",
+                        tool=ScanTool.ESLINT.value,
+                        error=str(e),
+                    )
 
             if not available and not eslint_available:
                 log.warning("no_runners_available", file=str(file))
@@ -174,46 +196,79 @@ class MultiToolScanner:
                 except Exception:
                     versions[ScanTool.ESLINT.value] = "unknown"
 
-            # Executar harness runners + ESLint em paralelo
-            harness_tasks = [runner.safe_run(harness_path, wcag) for runner in available]
+            # Iniciar servidor HTTP local para servir o harness
+            # Isso evita timeouts de CDN em contexto file://
+            # O servidor é iniciado apenas se houver runners harness-based
+            if available:
+                with HarnessServer(harness_dir) as http_server:
+                    http_url = http_server.url_for("harness.html")
+                    log.debug("harness_server_started", url=http_url, port=http_server.port)
 
-            async def _no_eslint() -> list[ToolFinding]:
-                return []
+                    # Executar harness runners em paralelo via HTTP
+                    harness_tasks = [
+                        runner.safe_run(harness_path, wcag, harness_url=http_url)
+                        for runner in available
+                    ]
 
-            eslint_task = (
-                self._eslint_runner.safe_run_on_source(file, wcag)
-                if eslint_available and self._eslint_runner
-                else _no_eslint()
-            )
+                    async def _no_eslint() -> list[ToolFinding]:
+                        return []
 
-            all_results = await asyncio.gather(
-                *harness_tasks,
-                eslint_task,
-                return_exceptions=True,
-            )
+                    eslint_task = (
+                        self._eslint_runner.safe_run_on_source(file, wcag)
+                        if eslint_available and self._eslint_runner
+                        else _no_eslint()
+                    )
 
-            harness_results = all_results[:-1]
+                    all_results = await asyncio.gather(
+                        *harness_tasks,
+                        eslint_task,
+                        return_exceptions=True,
+                    )
+            else:
+                # Só ESLint disponível (não precisa de servidor HTTP)
+                async def _no_eslint() -> list[ToolFinding]:
+                    return []
+
+                eslint_task = (
+                    self._eslint_runner.safe_run_on_source(file, wcag)
+                    if eslint_available and self._eslint_runner
+                    else _no_eslint()
+                )
+                all_results = await asyncio.gather(eslint_task, return_exceptions=True)
+
+            # Separar resultados harness vs eslint
+            harness_results = all_results[:-1] if available else []
             eslint_result = all_results[-1]
 
             # Mapear findings por tool
             findings_by_tool: dict[ScanTool, list[ToolFinding]] = {}
             for runner, result in zip(available, harness_results):
                 if isinstance(result, Exception):
-                    log.warning("runner_exception", tool=runner.tool.value, error=str(result))
+                    log.warning(
+                        "runner_exception",
+                        tool=runner.tool.value,
+                        error=str(result),
+                    )
                     findings_by_tool[runner.tool] = []
                 else:
                     findings_by_tool[runner.tool] = result  # type: ignore[assignment]
 
             if eslint_available:
                 if isinstance(eslint_result, Exception):
-                    log.warning("runner_exception", tool=ScanTool.ESLINT.value, error=str(eslint_result))
+                    log.warning(
+                        "runner_exception",
+                        tool=ScanTool.ESLINT.value,
+                        error=str(eslint_result),
+                    )
                     findings_by_tool[ScanTool.ESLINT] = []
                 else:
                     findings_by_tool[ScanTool.ESLINT] = eslint_result or []  # type: ignore[assignment]
 
-            all_tools = [r.tool for r in available] + ([ScanTool.ESLINT] if eslint_available else [])
+            all_tools = [r.tool for r in available] + (
+                [ScanTool.ESLINT] if eslint_available else []
+            )
 
-            # Aplicar protocolo científico
+            # Aplicar protocolo científico de detecção
             protocol = DetectionProtocol(self.settings)
             scan_result = protocol.run(
                 file=file,
@@ -236,7 +291,8 @@ class MultiToolScanner:
             return scan_result
 
         finally:
-            harness_path.unlink(missing_ok=True)
+            # Limpar diretório temporário em qualquer caso
+            shutil.rmtree(harness_dir, ignore_errors=True)
 
     async def scan_file_extended(self, file: Path, wcag: str) -> MultiToolScanResult:
         """
@@ -271,10 +327,14 @@ class MultiToolScanner:
             return MultiToolScanResult(consensus=consensus)
 
         file_hash = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-        harness_html = build_html_harness(content, file.name)
-        harness_path = self._write_temp_harness(harness_html)
+
+        harness_dir = Path(tempfile.mkdtemp(prefix="a11y_harness_ext_"))
 
         try:
+            harness_html = build_html_harness(content, file.name)
+            harness_path = harness_dir / "harness.html"
+            harness_path.write_text(harness_html, encoding="utf-8")
+
             available: list[BaseRunner] = []
             for runner in self._runners:
                 try:
@@ -302,10 +362,16 @@ class MultiToolScanner:
                 except Exception:
                     versions[runner.tool.value] = "unknown"
 
-            raw_results = await asyncio.gather(
-                *[runner.safe_run(harness_path, wcag) for runner in available],
-                return_exceptions=True,
-            )
+            with HarnessServer(harness_dir) as http_server:
+                http_url = http_server.url_for("harness.html")
+
+                raw_results = await asyncio.gather(
+                    *[
+                        runner.safe_run(harness_path, wcag, harness_url=http_url)
+                        for runner in available
+                    ],
+                    return_exceptions=True,
+                )
 
             findings_by_tool: dict[ScanTool, list[ToolFinding]] = {}
             for runner, result in zip(available, raw_results):
@@ -334,7 +400,7 @@ class MultiToolScanner:
             )
 
         finally:
-            harness_path.unlink(missing_ok=True)
+            shutil.rmtree(harness_dir, ignore_errors=True)
 
     async def scan_files(self, files: list[Path], wcag: str) -> list[ScanResult]:
         """
@@ -364,11 +430,3 @@ class MultiToolScanner:
             except UnicodeDecodeError:
                 continue
         return "", f"Cannot decode: {file}"
-
-    def _write_temp_harness(self, html: str) -> Path:
-        """Escreve harness HTML em arquivo temporário."""
-        with tempfile.NamedTemporaryFile(
-            suffix=".html", delete=False, mode="w", encoding="utf-8"
-        ) as f:
-            f.write(html)
-            return Path(f.name)
