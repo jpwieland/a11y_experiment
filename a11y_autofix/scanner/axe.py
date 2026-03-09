@@ -1,10 +1,21 @@
-"""Runner para axe-core CLI."""
+"""Runner para axe-core CLI (@axe-core/cli).
+
+Notas de portabilidade:
+- @axe-core/cli usa ChromeDriver/Selenium (não Playwright).
+  O chromedriver bundled dentro do próprio pacote é descoberto
+  automaticamente para evitar problemas de PATH em diferentes máquinas.
+- Flag correta é --chrome-options com lista separada por vírgulas
+  e sem o prefixo '--' em cada argumento.
+- Retry sem --chrome-options se o primeiro conjunto falhar.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import structlog
@@ -15,6 +26,54 @@ from a11y_autofix.scanner.base import BaseRunner
 log = structlog.get_logger(__name__)
 
 _PROCESS_TIMEOUT_S = 90
+
+# Opções Chrome passadas via --chrome-options (sem '--', separadas por vírgula)
+_CHROME_OPTIONS = "no-sandbox,disable-dev-shm-usage,disable-gpu"
+
+
+def _find_chromedriver() -> str | None:
+    """
+    Localiza o executável chromedriver de forma portável.
+
+    Ordem de busca:
+    1. PATH do sistema
+    2. Chromedriver bundled com @axe-core/cli (npm global)
+    3. Chromedriver bundled com @axe-core/cli (node_modules local)
+
+    O @axe-core/cli instala o chromedriver como dependência própria,
+    garantindo que estará disponível junto ao pacote em qualquer máquina.
+    """
+    # 1. PATH do sistema
+    p = shutil.which("chromedriver")
+    if p:
+        return p
+
+    # 2. Bundled com @axe-core/cli via npm global
+    try:
+        npm_root = subprocess.check_output(
+            ["npm", "root", "-g"], text=True, timeout=10
+        ).strip()
+        candidates = [
+            Path(npm_root) / "@axe-core" / "cli" / "node_modules"
+            / "chromedriver" / "bin" / "chromedriver",
+            Path(npm_root) / "@axe-core" / "cli" / "node_modules"
+            / "chromedriver" / "lib" / "chromedriver" / "chromedriver",
+        ]
+        for cand in candidates:
+            if cand.exists():
+                return str(cand)
+    except Exception:
+        pass
+
+    # 3. node_modules local (quando instalado por projeto)
+    local = (
+        Path("node_modules") / "@axe-core" / "cli" / "node_modules"
+        / "chromedriver" / "bin" / "chromedriver"
+    )
+    if local.exists():
+        return str(local)
+
+    return None
 
 
 class AxeRunner(BaseRunner):
@@ -83,32 +142,71 @@ class AxeRunner(BaseRunner):
 
         tags = self._wcag_to_axe_tags(wcag)
 
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "--yes", "@axe-core/cli",
-            url,
-            "--stdout",
-            "--tags", ",".join(tags),
-            "--chromium-args='--no-sandbox --disable-dev-shm-usage --disable-gpu "
-            "--disable-web-security --allow-file-access-from-files'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # Localizar chromedriver (bundled com @axe-core/cli ou no PATH)
+        chromedriver_path = _find_chromedriver()
+        log.debug("axe_chromedriver", path=chromedriver_path or "not found")
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_PROCESS_TIMEOUT_S
+        async def _run_axe(extra_args: list[str]) -> tuple[str, str, int]:
+            """Executa @axe-core/cli e retorna (stdout, stderr, returncode)."""
+            cmd = [
+                "npx", "--yes", "@axe-core/cli",
+                url,
+                "--stdout",
+                "--tags", ",".join(tags),
+                *extra_args,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-        except asyncio.TimeoutError:
             try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            log.warning("axe_process_timeout", timeout_s=_PROCESS_TIMEOUT_S)
+                out, err = await asyncio.wait_for(
+                    proc.communicate(), timeout=_PROCESS_TIMEOUT_S
+                )
+                return (
+                    out.decode(errors="replace"),
+                    err.decode(errors="replace"),
+                    proc.returncode or 0,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                log.warning("axe_process_timeout", timeout_s=_PROCESS_TIMEOUT_S)
+                return "", "", -1
+
+        # Tentativa 1: com --chrome-options e --chromedriver-path (se disponível)
+        extra: list[str] = ["--chrome-options", _CHROME_OPTIONS]
+        if chromedriver_path:
+            extra += ["--chromedriver-path", chromedriver_path]
+
+        output, stderr_text, returncode = await _run_axe(extra)
+
+        # Tentativa 2: sem --chrome-options (alguns ambientes rejeitam a flag)
+        if not output.strip() or returncode not in (0, 1):
+            log.debug("axe_retry_no_chrome_options",
+                      reason=stderr_text[:120] if stderr_text.strip() else "empty output")
+            retry_extra: list[str] = []
+            if chromedriver_path:
+                retry_extra = ["--chromedriver-path", chromedriver_path]
+            output, stderr_text, returncode = await _run_axe(retry_extra)
+
+        if returncode == -1:
             return []
 
-        output = stdout.decode(errors="replace")
         if not output.strip():
-            log.debug("axe_empty_output", stderr=stderr.decode(errors="replace")[:200])
+            stderr_short = stderr_text.strip()[:300]
+            # Detectar mismatch de versão ChromeDriver/Chrome para log útil
+            if "ChromeDriver only supports Chrome" in stderr_short:
+                log.warning(
+                    "axe_chromedriver_version_mismatch",
+                    hint="Execute: npx browser-driver-manager install chrome",
+                    detail=stderr_short,
+                )
+            else:
+                log.debug("axe_empty_output", stderr=stderr_short)
             return []
 
         try:

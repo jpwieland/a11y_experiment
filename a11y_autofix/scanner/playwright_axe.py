@@ -249,11 +249,12 @@ class PlaywrightAxeRunner(BaseRunner):
                     return []
 
                 # ── Passo 4: Executar análise axe-core ──────────────────────
+                # page.evaluate() não aceita timeout= como kwarg no Playwright Python.
+                # Usamos set_default_timeout() para configurar o timeout da página
+                # antes da chamada; PlaywrightTimeout será levantado se excedido.
                 try:
-                    result_json: str = await page.evaluate(
-                        _AXE_RUN_SCRIPT,
-                        timeout=_AXE_RUN_TIMEOUT_MS,
-                    )
+                    page.set_default_timeout(_AXE_RUN_TIMEOUT_MS)
+                    result_json: str = await page.evaluate(_AXE_RUN_SCRIPT)
                     data: dict = json.loads(result_json)
                 except PlaywrightTimeout:
                     log.warning("playwright_axe_run_timeout")
