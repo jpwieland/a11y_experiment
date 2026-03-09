@@ -269,7 +269,17 @@ fi
 hdr "PASSO 7: Playwright (Python)"
 
 if python3 -c "import playwright" &>/dev/null 2>&1; then
-    PW_VER=$(python3 -c "import playwright; print(getattr(playwright,'__version__','?'))" 2>/dev/null || echo "?")
+    # playwright Python package não expõe __version__; usar importlib.metadata
+    PW_VER=$(python3 -c "
+try:
+    from importlib.metadata import version as _v
+    print(_v('playwright'))
+except Exception:
+    import subprocess, sys
+    r = subprocess.run([sys.executable,'-m','playwright','--version'],
+                      capture_output=True,text=True)
+    print((r.stdout or r.stderr).strip().split()[-1] if (r.stdout or r.stderr).strip() else '?')
+" 2>/dev/null || echo "?")
     ok "playwright Python: $PW_VER"
 
     # Verificar se chromium está instalado
@@ -306,50 +316,133 @@ fi
 # ─── PASSO 8: Testes funcionais ───────────────────────────────────────────────
 hdr "PASSO 8: Testes funcionais"
 
-# ── 8a: pa11y via HTTP simples ────────────────────────────────────────────────
+# ── 8a: pa11y via servidor HTTP local ────────────────────────────────────────
 if [[ -n "$PA11Y_CMD" ]] || command -v pa11y &>/dev/null || npx pa11y --version &>/dev/null 2>&1; then
-    info "Testando pa11y com arquivo HTML simples..."
+    info "Testando pa11y com servidor HTTP local..."
     TMP_DIR=$(mktemp -d)
     TMP_HTML="$TMP_DIR/test.html"
+
+    # HTML com múltiplas violações óbvias de acessibilidade
     cat > "$TMP_HTML" << 'EOF'
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head><title>Test</title></head>
 <body>
   <img src="test.jpg">
-  <button>Click</button>
-  <a href="">Empty link</a>
+  <button></button>
+  <input type="text" name="q">
+  <a href="#"></a>
+  <div onclick="void(0)">click me</div>
 </body>
 </html>
 EOF
 
-    # Determinar comando pa11y resolvido (usa $PA11Y_CMD se disponível)
+    # Determinar comando pa11y (usa o resolvido ou fallback)
     _PA11Y_TEST_CMD="${PA11Y_CMD:-pa11y}"
 
-    # Tentar pa11y com --timeout aumentado (CDN pode ser lento)
-    PA11Y_OUT=$($_PA11Y_TEST_CMD --reporter json \
-                      --timeout 60000 \
-                      --wait 500 \
-                      --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
-                      "file://$TMP_HTML" 2>/dev/null || \
-               npx pa11y --reporter json \
-                         --timeout 60000 \
-                         --wait 500 \
-                         --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
-                         "file://$TMP_HTML" 2>/dev/null || echo "[]")
-    rm -rf "$TMP_DIR"
+    # Detectar versão major do pa11y para escolher flags corretas
+    _PA11Y_MAJOR=$(${_PA11Y_TEST_CMD} --version 2>/dev/null | grep -oP '^\d+' || echo "6")
+    [[ -z "$_PA11Y_MAJOR" ]] && _PA11Y_MAJOR=6
+    info "pa11y major version detectada: $_PA11Y_MAJOR"
+
+    # Servir via HTTP local (evita restrições file://)
+    # Python HTTP server na porta aleatória, capturando a porta via log
+    TMP_LOG=$(mktemp)
+    python3 -m http.server 0 --directory "$TMP_DIR" >"$TMP_LOG" 2>&1 &
+    _HTTP_PID=$!
+    sleep 0.5  # Aguardar servidor iniciar
+    _HTTP_PORT=$(python3 -c "
+import socket, sys
+# Tenta detectar a porta que o servidor está usando
+# Fallback: re-lançar e detectar porta
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+port = s.getsockname()[1]
+s.close()
+# Tenta encontrar no log
+import re
+try:
+    log = open('$TMP_LOG').read()
+    m = re.search(r'Serving HTTP on .+ port (\d+)', log)
+    if m:
+        print(m.group(1))
+    else:
+        print('')
+except Exception:
+    print('')
+" 2>/dev/null)
+
+    # Fallback: descobrir a porta a partir do processo
+    if [[ -z "$_HTTP_PORT" ]]; then
+        _HTTP_PORT=$(python3 -c "
+import subprocess, re, sys
+try:
+    out = subprocess.check_output(['ss','-tlnp'], text=True, stderr=subprocess.DEVNULL)
+    for line in out.splitlines():
+        if 'python' in line.lower():
+            m = re.search(r':(\d{4,5})\s', line)
+            if m: print(m.group(1)); break
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$_HTTP_PORT" ]]; then
+        # Último recurso: porta fixa conhecida
+        _HTTP_PORT=18765
+        kill "$_HTTP_PID" 2>/dev/null || true
+        python3 -m http.server "$_HTTP_PORT" --directory "$TMP_DIR" >/dev/null 2>&1 &
+        _HTTP_PID=$!
+        sleep 0.5
+    fi
+
+    _TEST_URL="http://127.0.0.1:${_HTTP_PORT}/test.html"
+    info "Servidor HTTP na porta $_HTTP_PORT → $_TEST_URL"
+
+    # Construir flags de acordo com a versão do pa11y
+    # pa11y 6.x: suporta --wait e --chromium-flags
+    # pa11y 7+/9+: chromium-flags removidas; usar apenas --timeout e --no-chromium (se disponível)
+    PA11Y_OUT=""
+    if [[ "$_PA11Y_MAJOR" -le 6 ]]; then
+        PA11Y_OUT=$(${_PA11Y_TEST_CMD} \
+            --reporter json --standard WCAG2AA \
+            --timeout 60000 --wait 500 \
+            --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
+            "$_TEST_URL" 2>/tmp/pa11y_test_err.txt || echo "")
+    else
+        # pa11y 7+: sem --chromium-flags e sem --wait como flag separada
+        PA11Y_OUT=$(${_PA11Y_TEST_CMD} \
+            --reporter json --standard WCAG2AA \
+            --timeout 60000 \
+            "$_TEST_URL" 2>/tmp/pa11y_test_err.txt || echo "")
+    fi
+
+    # Fallback: tentar sem nenhuma flag extra além do reporter
+    if [[ -z "$PA11Y_OUT" ]] || ! echo "$PA11Y_OUT" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null 2>&1; then
+        info "Retentando pa11y com flags mínimas..."
+        PA11Y_OUT=$(${_PA11Y_TEST_CMD} \
+            --reporter json \
+            "$_TEST_URL" 2>/tmp/pa11y_test_err.txt || echo "[]")
+    fi
+
+    kill "$_HTTP_PID" 2>/dev/null || true
+    rm -rf "$TMP_DIR" "$TMP_LOG" 2>/dev/null || true
 
     if echo "$PA11Y_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" &>/dev/null 2>&1; then
         COUNT=$(echo "$PA11Y_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))")
         if [[ "$COUNT" -gt 0 ]]; then
             ok "pa11y funcional: $COUNT issues detectados no HTML de teste ✓"
         else
-            warn "pa11y rodou mas encontrou 0 issues (inesperado no HTML de teste)"
+            warn "pa11y encontrou 0 issues no HTML de teste (esperado ≥1)"
+            [[ -s /tmp/pa11y_test_err.txt ]] && info "stderr: $(head -3 /tmp/pa11y_test_err.txt)"
+            info "Saída JSON bruta: ${PA11Y_OUT:0:200}"
         fi
     else
-        warn "pa11y rodou mas saída não é JSON válido"
-        info "Saída: ${PA11Y_OUT:0:150}"
+        warn "pa11y não produziu JSON válido"
+        info "stdout: ${PA11Y_OUT:0:200}"
+        [[ -s /tmp/pa11y_test_err.txt ]] && info "stderr: $(head -3 /tmp/pa11y_test_err.txt)"
     fi
+    rm -f /tmp/pa11y_test_err.txt
 else
     warn "pa11y indisponível — pulando teste funcional"
 fi
@@ -546,14 +639,35 @@ printf "  %-30s" "axe-core (npm local):"
     || echo -e "${YELLOW}⚠️  não encontrado (CDN será usado)${NC}"
 
 printf "  %-30s" "Playwright (Python):"
-python3 -c "import playwright; print(playwright.__version__)" &>/dev/null 2>&1 \
-    && echo -e "${GREEN}✅ $(python3 -c "import playwright; print(playwright.__version__)" 2>/dev/null)${NC}" \
-    || echo -e "${YELLOW}⚠️  não instalado${NC}"
+_PW_RESUMO=$(python3 -c "
+try:
+    from importlib.metadata import version as _v
+    print(_v('playwright'))
+except Exception:
+    import subprocess, sys
+    r = subprocess.run([sys.executable, '-m', 'playwright', '--version'],
+                      capture_output=True, text=True)
+    out = (r.stdout or r.stderr or '').strip()
+    print(out.split()[-1] if out else '')
+" 2>/dev/null || echo "")
+if [[ -n "$_PW_RESUMO" && "$_PW_RESUMO" != "?" ]]; then
+    echo -e "${GREEN}✅ $_PW_RESUMO${NC}"
+else
+    echo -e "${YELLOW}⚠️  não instalado${NC}"
+fi
 
 printf "  %-30s" "ChromeDriver:"
-command -v chromedriver &>/dev/null \
-    && echo -e "${GREEN}✅ $(chromedriver --version 2>&1 | head -1)${NC}" \
-    || echo -e "${YELLOW}⚠️  não encontrado${NC}"
+_CD_VER=""
+if command -v chromedriver &>/dev/null; then
+    _CD_VER=$(chromedriver --version 2>&1 | command head -1)
+elif npx --no-install chromedriver --version &>/dev/null 2>&1; then
+    _CD_VER=$(npx --no-install chromedriver --version 2>&1 | command head -1)
+fi
+if [[ -n "$_CD_VER" ]]; then
+    echo -e "${GREEN}✅ $_CD_VER${NC}"
+else
+    echo -e "${YELLOW}⚠️  não no PATH (Playwright usa Chromium embutido — ok)${NC}"
+fi
 
 echo ""
 echo -e "${BLUE}─────────────────────────────────────────────────${NC}"

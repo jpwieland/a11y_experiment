@@ -3,8 +3,9 @@
 Estratégia de robustez:
 - Tenta pa11y, npx pa11y, npx --yes pa11y em ordem até encontrar um que funcione
 - Timeout aumentado para 60s (CDN pode ser lento)
-- --wait reduzido para 500ms (Babel renderiza síncronamente)
-- --chromium-flags para permitir CDN em contexto file:// quando necessário
+- Detecção automática de versão major: pa11y 6.x usa --wait/--chromium-flags;
+  pa11y 7+ removeu essas flags (migração de puppeteer → playwright interno)
+- Retry com flags mínimas se o primeiro conjunto falhar
 - Usa URL HTTP local quando fornecida pelo orquestrador (evita file://)
 """
 
@@ -158,51 +159,87 @@ class Pa11yRunner(BaseRunner):
         url = harness_url or f"file://{harness_path.resolve()}"
         log.debug("pa11y_scanning", url=url[:80])
 
-        # Construir comando pa11y completo
-        pa11y_cmd = [
-            *cmd,
-            "--reporter", "json",
-            "--standard", wcag,
-            "--timeout", "60000",          # 60s timeout de navegação (CDN pode ser lento)
-            "--wait", "500",               # 500ms após load (React/Babel renderizam sync via Babel)
-            "--include-warnings",          # Incluir warnings além de errors
-            "--chromium-flags", _CHROMIUM_FLAGS,
-            url,
-        ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *pa11y_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
+        # Detectar versão major para selecionar flags compatíveis.
+        # pa11y 6.x: suporta --wait e --chromium-flags (puppeteer API exposta).
+        # pa11y 7+: flags de chromium removidas; migração para playwright interno.
+        pa11y_major = 0
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_PROCESS_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            log.warning("pa11y_process_timeout", timeout_s=_PROCESS_TIMEOUT_S)
-            return []
+            pa11y_major = int(version.split(".")[0])
+        except (ValueError, IndexError):
+            pass
 
-        stderr_text = stderr.decode(errors="replace")
-        output = stdout.decode(errors="replace")
+        if pa11y_major > 0 and pa11y_major <= 6:
+            # pa11y 6.x: usa flags de chromium e --wait
+            pa11y_cmd = [
+                *cmd,
+                "--reporter", "json",
+                "--standard", wcag,
+                "--timeout", "60000",
+                "--wait", "500",
+                "--include-warnings",
+                "--chromium-flags", _CHROMIUM_FLAGS,
+                url,
+            ]
+        else:
+            # pa11y 7+ (incluindo 9.x): flags mínimas e seguras
+            pa11y_cmd = [
+                *cmd,
+                "--reporter", "json",
+                "--standard", wcag,
+                "--timeout", "60000",
+                "--include-warnings",
+                url,
+            ]
+
+        log.debug("pa11y_cmd", major=pa11y_major, cmd=pa11y_cmd[:4])
+
+        async def _run_pa11y(pa_cmd: list[str]) -> tuple[str, str, int]:
+            """Executa pa11y e retorna (stdout, stderr, returncode)."""
+            proc = await asyncio.create_subprocess_exec(
+                *pa_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(), timeout=_PROCESS_TIMEOUT_S
+                )
+                return out.decode(errors="replace"), err.decode(errors="replace"), proc.returncode or 0
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                log.warning("pa11y_process_timeout", timeout_s=_PROCESS_TIMEOUT_S)
+                return "", "", -1
+
+        output, stderr_text, returncode = await _run_pa11y(pa11y_cmd)
+
+        # Retry com flags absolutamente mínimas se o primeiro conjunto falhou.
+        # Critério: returncode inválido, saída vazia, ou JSON inválido.
+        if returncode == -1 or (
+            returncode not in (0, 2)
+            or not output.strip()
+            or not output.strip().startswith("[")
+        ):
+            minimal_cmd = [*cmd, "--reporter", "json", url]
+            log.debug("pa11y_retry_minimal_flags")
+            output2, stderr_text2, returncode2 = await _run_pa11y(minimal_cmd)
+            if output2.strip() and output2.strip().startswith("["):
+                output, stderr_text, returncode = output2, stderr_text2, returncode2
+                log.debug("pa11y_retry_succeeded")
 
         # pa11y retorna código 2 quando há issues (não é erro de execução)
-        if proc.returncode not in (0, 2):
+        if returncode == -1:
+            return []
+
+        if returncode not in (0, 2):
             log.warning(
                 "pa11y_non_zero_exit",
-                code=proc.returncode,
+                code=returncode,
                 stderr=stderr_text[:300],
             )
             return []
-
-        # pa11y pode retornar stderr com avisos não-críticos mesmo com código 0/2
-        if stderr_text.strip() and proc.returncode not in (0, 2):
-            log.debug("pa11y_stderr", text=stderr_text[:200])
 
         if not output.strip():
             return []
