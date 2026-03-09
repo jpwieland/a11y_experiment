@@ -26,7 +26,9 @@ import argparse
 import asyncio
 import json
 import sys
+import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -134,6 +136,7 @@ async def scan_project(
     min_consensus: int = 1,
     force: bool = False,
     max_files: int | None = None,
+    on_file_done: Callable | None = None,
 ) -> tuple[ProjectEntry, list[ScanFinding]]:
     """
     Executa o MultiToolScanner completo em um projeto snapshotado.
@@ -157,7 +160,17 @@ async def scan_project(
     result_dir.mkdir(parents=True, exist_ok=True)
 
     summary_path = result_dir / "summary.json"
-    if not force and summary_path.exists() and entry.status == ProjectStatus.SCANNED:
+    # Considera já escaneado se:
+    #   a) catálogo diz SCANNED, ou
+    #   b) summary.json existe (projeto concluído antes de um Ctrl+C salvar o catálogo)
+    already_done = (
+        entry.status == ProjectStatus.SCANNED
+        or summary_path.exists()
+    )
+    if not force and already_done:
+        # Garante que o status em memória está correto para o resumo final
+        if entry.status != ProjectStatus.SCANNED and summary_path.exists():
+            entry.status = ProjectStatus.SCANNED
         print(f"  [{entry.id}] Já escaneado (use --force para re-escanear).")
         return entry, []
 
@@ -212,7 +225,9 @@ async def scan_project(
     t0 = time.perf_counter()
 
     try:
-        scan_results = await scanner.scan_files(unique_files, wcag="WCAG2AA")
+        scan_results = await scanner.scan_files(
+            unique_files, wcag="WCAG2AA", on_file_done=on_file_done
+        )
     except Exception as e:
         print(f"  [{entry.id}] ❌ Erro no scan: {e}", file=sys.stderr)
         entry.scan = ProjectScanSummary(status="error")
@@ -355,27 +370,115 @@ async def main_async(args: argparse.Namespace) -> None:
     all_findings: list[ScanFinding] = []
     sem = asyncio.Semaphore(args.workers)
 
+    # ── Graceful shutdown (Ctrl+C) ─────────────────────────────────────────────
+    # Ao receber SIGINT:
+    #   1. Sinaliza para não iniciar novos projetos
+    #   2. Aguarda projetos em andamento terminarem
+    #   3. Salva o catálogo antes de sair
+    import signal as _signal
+    _shutdown = asyncio.Event()
+    _scanned_count = 0
+
+    def _handle_sigint() -> None:
+        if not _shutdown.is_set():
+            print(
+                "\n\n  ⚠️  Ctrl+C detectado — concluindo projetos em andamento "
+                "e salvando progresso...",
+                file=sys.stderr,
+            )
+            _shutdown.set()
+
+    try:
+        asyncio.get_event_loop().add_signal_handler(_signal.SIGINT, _handle_sigint)
+    except (NotImplementedError, RuntimeError):
+        # Windows não suporta add_signal_handler; fallback silencioso
+        pass
+
+    # ── Salva catálogo incremental (thread-safe) ───────────────────────────────
+    _catalog_lock = threading.Lock()
+
+    def _save_catalog_incremental() -> None:
+        with _catalog_lock:
+            save_catalog(list(entry_index.values()), args.catalog, metadata)
+
+    # ── Live findings writer ───────────────────────────────────────────────────
+    # Grava findings em tempo real no live_findings.jsonl após cada arquivo.
+    # O script watch_scan.py lê esse arquivo para exibir progresso ao vivo.
+    live_path = RESULTS_DIR / "live_findings.jsonl"
+    live_path.write_text("")          # limpa/cria o arquivo ao iniciar
+    _live_lock = threading.Lock()     # protege escrita concorrente
+
+    def _on_file_done(result: Any) -> None:
+        """Callback chamado pelo orchestrator após cada arquivo ser escaneado."""
+        from a11y_autofix.config import Confidence
+        lines = []
+        for issue in result.issues:
+            lines.append(json.dumps({
+                "file":          result.file.name,
+                "wcag_criteria": issue.wcag_criteria,
+                "issue_type":    issue.issue_type.value
+                                 if hasattr(issue.issue_type, "value")
+                                 else str(issue.issue_type),
+                "impact":        issue.impact,
+                "confidence":    issue.confidence.value
+                                 if hasattr(issue.confidence, "value")
+                                 else str(issue.confidence),
+                "found_by":      [t.value if hasattr(t, "value") else str(t)
+                                  for t in issue.found_by],
+                "ts":            time.time(),
+            }))
+        if lines:
+            with _live_lock:
+                with open(live_path, "a", encoding="utf-8") as fp:
+                    fp.write("\n".join(lines) + "\n")
+
     async def scan_with_sem(e: ProjectEntry) -> tuple[ProjectEntry, list[ScanFinding]]:
+        # Não inicia novo projeto se shutdown foi solicitado
+        if _shutdown.is_set():
+            return e, []
         async with sem:
-            return await scan_project(
+            if _shutdown.is_set():
+                return e, []
+            result = await scan_project(
                 e,
                 scan_timeout=args.timeout,
                 min_consensus=args.min_consensus,
                 force=args.force,
                 max_files=args.max_files,
+                on_file_done=_on_file_done,
             )
+            # Salvar catálogo imediatamente após cada projeto concluído
+            updated_entry, findings = result
+            entry_index[updated_entry.id] = updated_entry
+            all_findings.extend(findings)
+            _save_catalog_incremental()
+            scanned = sum(
+                1 for en in entry_index.values()
+                if en.status == ProjectStatus.SCANNED
+            )
+            remaining = len(targets) - scanned
+            print(
+                f"  [{updated_entry.id}] 💾 Progresso salvo "
+                f"({scanned} escaneados, ~{max(0, remaining)} restantes)"
+            )
+            return result
 
     t0 = time.perf_counter()
     results = await asyncio.gather(*[scan_with_sem(e) for e in targets], return_exceptions=True)
     total_dur = time.perf_counter() - t0
 
+    # Resultados já foram acumulados em all_findings dentro de scan_with_sem;
+    # aqui só tratamos erros de Exception (falhas inesperadas)
     for result in results:
         if isinstance(result, Exception):
             print(f"  ❌ Scan falhou: {result}", file=sys.stderr)
-            continue
-        updated_entry, findings = result
-        entry_index[updated_entry.id] = updated_entry
-        all_findings.extend(findings)
+
+    if _shutdown.is_set():
+        print(
+            "\n  ✋ Scan interrompido. Para continuar: python dataset/scripts/scan.py",
+            file=sys.stderr,
+        )
+        sys.exit(0)
 
     # Consolidated findings JSONL
     consolidated_path = RESULTS_DIR / "dataset_findings.jsonl"

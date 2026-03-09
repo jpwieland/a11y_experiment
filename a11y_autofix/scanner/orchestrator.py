@@ -7,6 +7,7 @@ import hashlib
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -402,13 +403,21 @@ class MultiToolScanner:
         finally:
             shutil.rmtree(harness_dir, ignore_errors=True)
 
-    async def scan_files(self, files: list[Path], wcag: str) -> list[ScanResult]:
+    async def scan_files(
+        self,
+        files: list[Path],
+        wcag: str,
+        on_file_done: Callable[[ScanResult], None] | None = None,
+    ) -> list[ScanResult]:
         """
         Escaneia múltiplos arquivos com controle de concorrência.
 
         Args:
             files: Lista de arquivos a escanear.
             wcag: Nível WCAG alvo.
+            on_file_done: Callback opcional chamado após cada arquivo ser
+                          escaneado, recebendo o ScanResult. Útil para
+                          progresso em tempo real.
 
         Returns:
             Lista de ScanResult na mesma ordem dos arquivos.
@@ -417,7 +426,10 @@ class MultiToolScanner:
 
         async def scan_with_sem(f: Path) -> ScanResult:
             async with sem:
-                return await self.scan_file(f, wcag)
+                result = await self.scan_file(f, wcag)
+                if on_file_done is not None:
+                    on_file_done(result)
+                return result
 
         results = await asyncio.gather(*[scan_with_sem(f) for f in files])
         return list(results)

@@ -1,0 +1,7 @@
+{"file": "Button.tsx", "wcag_criteria": "4.1.2", "issue_type": "aria", "impact": "serious", "confidence": "high", "found_by": ["playwright+axe", "pa11y"], "ts": 1773068082.907085}
+{"file": "Button.tsx", "wcag_criteria": "2.1.1", "issue_type": "keyboard", "impact": "serious", "confidence": "high", "found_by": ["playwright+axe", "eslint"], "ts": 1773068082.9070861}
+{"file": "Form.tsx", "wcag_criteria": "1.3.1", "issue_type": "label", "impact": "serious", "confidence": "high", "found_by": ["pa11y", "playwright+axe"], "ts": 1773068082.9070861}
+{"file": "Form.tsx", "wcag_criteria": "4.1.2", "issue_type": "aria", "impact": "critical", "confidence": "high", "found_by": ["playwright+axe"], "ts": 1773068082.9070861}
+{"file": "NavBar.tsx", "wcag_criteria": "2.4.7", "issue_type": "focus", "impact": "moderate", "confidence": "medium", "found_by": ["playwright+axe"], "ts": 1773068082.907087}
+{"file": "NavBar.tsx", "wcag_criteria": "1.1.1", "issue_type": "alt-text", "impact": "critical", "confidence": "high", "found_by": ["pa11y", "playwright+axe", "axe-core"], "ts": 1773068082.907087}
+{"file": "Card.tsx", "wcag_criteria": "1.4.3", "issue_type": "contrast", "impact": "serious", "confidence": "medium", "found_by": ["playwright+axe"], "ts": 1773068082.907087}
