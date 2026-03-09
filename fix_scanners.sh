@@ -23,7 +23,7 @@ ok()   { echo -e "${GREEN}  ✅ $*${NC}"; }
 fail() { echo -e "${RED}  ❌ $*${NC}"; }
 warn() { echo -e "${YELLOW}  ⚠️  $*${NC}"; }
 info() { echo -e "${BLUE}  ℹ️  $*${NC}"; }
-head() { echo -e "\n${CYAN}══════════════════════════════════════════════${NC}"; \
+hdr()  { echo -e "\n${CYAN}══════════════════════════════════════════════${NC}"; \
          echo -e "${CYAN}  $*${NC}"; \
          echo -e "${CYAN}══════════════════════════════════════════════${NC}"; }
 
@@ -71,7 +71,7 @@ npm_install_global() {
 }
 
 # ─── PASSO 1: Node.js e npm ───────────────────────────────────────────────────
-head "PASSO 1: Node.js e npm"
+hdr "PASSO 1: Node.js e npm"
 
 if command -v node &>/dev/null; then
     NODE_VER=$(node --version)
@@ -96,11 +96,11 @@ info "npm bin:    $NPM_BIN"
 info "npm root:   $NPM_ROOT"
 
 # ─── PASSO 2: PATH ───────────────────────────────────────────────────────────
-head "PASSO 2: PATH do npm"
+hdr "PASSO 2: PATH do npm"
 ensure_npm_in_path
 
 # ─── PASSO 3: pa11y ──────────────────────────────────────────────────────────
-head "PASSO 3: pa11y"
+hdr "PASSO 3: pa11y"
 
 PA11Y_CMD=""
 if command -v pa11y &>/dev/null; then
@@ -134,7 +134,7 @@ else
 fi
 
 # ─── PASSO 4: axe-core (npm local para Playwright runner) ────────────────────
-head "PASSO 4: axe-core (npm)"
+hdr "PASSO 4: axe-core (npm)"
 
 AXE_PATH=""
 if [[ -n "$NPM_ROOT" ]]; then
@@ -169,7 +169,7 @@ else
 fi
 
 # ─── PASSO 5: ESLint + plugins ───────────────────────────────────────────────
-head "PASSO 5: ESLint + jsx-a11y"
+hdr "PASSO 5: ESLint + jsx-a11y"
 
 ESLINT_OK=false
 JSXA11Y_OK=false
@@ -222,7 +222,7 @@ if [[ "$ESLINT_OK" == "false" ]] || [[ "$JSXA11Y_OK" == "false" ]] || [[ "$TS_PA
 fi
 
 # ─── PASSO 6: Chrome / Chromium ───────────────────────────────────────────────
-head "PASSO 6: Chrome/Chromium"
+hdr "PASSO 6: Chrome/Chromium"
 
 CHROME_CMD=""
 CHROME_VER=""
@@ -266,7 +266,7 @@ else
 fi
 
 # ─── PASSO 7: Playwright (Python) ────────────────────────────────────────────
-head "PASSO 7: Playwright (Python)"
+hdr "PASSO 7: Playwright (Python)"
 
 if python3 -c "import playwright" &>/dev/null 2>&1; then
     PW_VER=$(python3 -c "import playwright; print(getattr(playwright,'__version__','?'))" 2>/dev/null || echo "?")
@@ -304,7 +304,7 @@ else
 fi
 
 # ─── PASSO 8: Testes funcionais ───────────────────────────────────────────────
-head "PASSO 8: Testes funcionais"
+hdr "PASSO 8: Testes funcionais"
 
 # ── 8a: pa11y via HTTP simples ────────────────────────────────────────────────
 if [[ -n "$PA11Y_CMD" ]] || command -v pa11y &>/dev/null || npx pa11y --version &>/dev/null 2>&1; then
@@ -323,8 +323,11 @@ if [[ -n "$PA11Y_CMD" ]] || command -v pa11y &>/dev/null || npx pa11y --version 
 </html>
 EOF
 
+    # Determinar comando pa11y resolvido (usa $PA11Y_CMD se disponível)
+    _PA11Y_TEST_CMD="${PA11Y_CMD:-pa11y}"
+
     # Tentar pa11y com --timeout aumentado (CDN pode ser lento)
-    PA11Y_OUT=$(pa11y --reporter json \
+    PA11Y_OUT=$($_PA11Y_TEST_CMD --reporter json \
                       --timeout 60000 \
                       --wait 500 \
                       --chromium-flags "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
@@ -512,7 +515,7 @@ else
 fi
 
 # ─── RESUMO FINAL ─────────────────────────────────────────────────────────────
-head "RESUMO FINAL"
+hdr "RESUMO FINAL"
 
 echo ""
 printf "  %-30s" "pa11y:"
