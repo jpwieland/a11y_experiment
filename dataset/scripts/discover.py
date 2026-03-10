@@ -52,11 +52,14 @@ GITHUB_API = "https://api.github.com"
 SEARCH_ENDPOINT = f"{GITHUB_API}/search/repositories"
 DEFAULT_CATALOG = DATASET_ROOT / "catalog" / "projects.yaml"
 
-# Cutoff: projects not updated in the last 24 months are excluded (criterion IC2)
-ACTIVITY_CUTOFF = datetime.now(tz=timezone.utc) - timedelta(days=730)
+# Cutoff: projects not updated in the last 36 months are excluded (criterion IC2)
+# Relaxed from 24 → 36 months to include older but still-maintained projects.
+ACTIVITY_CUTOFF = datetime.now(tz=timezone.utc) - timedelta(days=1095)
 
 # Minimum stars (criterion IC1)
-MIN_STARS = 100
+# Relaxed from 100 → 50 to capture a wider set of real-world projects,
+# including domain-specific tools that naturally attract fewer stars.
+MIN_STARS = 50
 
 # OSI-approved licenses acceptable under criterion IC3
 ACCEPTABLE_LICENSES: frozenset[str] = frozenset({
@@ -258,17 +261,19 @@ DOMAIN_QUERIES: dict[ProjectDomain, list[str]] = {
 }
 
 # Target project counts per domain stratum.
-# Total target ≈ 560; after ~25% IC4/IC6/IC7 failures → ~420 included (QM2: ≥ 400).
-# Each domain ≈ 60-90 repos → max ≈ 90/420 ≈ 21% — close but domains with lower targets
-# help keep max stratum ≤ 20% (QM3).
+# Total target ≈ 770; after ~20% IC4/IC6/IC7 failures → ~615 candidates.
+# With relaxed IC1 (≥50 ★) and IC2 (36 months), pass rate improves.
+# Each domain target kept ≤ 130 so that no stratum exceeds 20% of final
+# corpus after failures — satisfying QM3 (max_stratum_fraction ≤ 0.20).
+# Goal: reach QM2 ≥ 400 included projects after all screening steps.
 DOMAIN_TARGETS: dict[ProjectDomain, int] = {
-    ProjectDomain.ECOMMERCE: 90,
-    ProjectDomain.GOVERNMENT: 60,
-    ProjectDomain.HEALTHCARE: 60,
-    ProjectDomain.EDUCATION: 80,
-    ProjectDomain.DEVELOPER_TOOLS: 90,
-    ProjectDomain.DASHBOARD: 90,
-    ProjectDomain.SOCIAL: 90,
+    ProjectDomain.ECOMMERCE:       120,  # was 90
+    ProjectDomain.GOVERNMENT:       90,  # was 60
+    ProjectDomain.HEALTHCARE:       90,  # was 60
+    ProjectDomain.EDUCATION:       110,  # was 80
+    ProjectDomain.DEVELOPER_TOOLS: 120,  # was 90
+    ProjectDomain.DASHBOARD:       120,  # was 90
+    ProjectDomain.SOCIAL:          120,  # was 90
 }
 
 
@@ -289,7 +294,7 @@ def classify_size(file_count: int) -> ProjectSize:
 
 
 def is_active(pushed_at: str) -> bool:
-    """IC2: Last commit within 24 months."""
+    """IC2: Last commit within 36 months."""
     try:
         dt = datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
         return dt >= ACTIVITY_CUTOFF

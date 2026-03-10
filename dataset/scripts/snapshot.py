@@ -158,19 +158,59 @@ def is_predominantly_generated(repo_dir: Path, scan_paths: list[str]) -> bool:
     return (generated / total) > 0.30
 
 
-# Common alternative scan paths to try when the default yields 0 component files
+# Common alternative scan paths to try when the default yields < MIN_COMPONENT_FILES.
+# Ordered from most to least common in real-world React/TypeScript projects.
+# Expanded to recover projects with non-standard directory layouts.
 FALLBACK_SCAN_PATHS: list[list[str]] = [
+    # Standard React project roots
     ["src/"],
     ["app/"],
     ["apps/"],
+    # Monorepo / multi-package structures
     ["packages/"],
+    ["libs/"],
+    ["lib/"],
+    # Component-focused directories
     ["components/"],
+    ["src/components/"],
+    ["src/pages/"],
+    ["src/views/"],
+    ["src/features/"],
+    ["src/modules/"],
+    # Framework-specific (Next.js, Remix, etc.)
+    ["pages/"],
+    ["views/"],
+    ["layouts/"],
+    ["features/"],
+    ["modules/"],
+    # Multi-app / workspace structures
     ["frontend/src/"],
+    ["frontend/"],
     ["web/src/"],
+    ["web/"],
     ["client/src/"],
+    ["client/"],
     ["ui/src/"],
-    [""],  # repo root
+    ["ui/"],
+    # Design system / widget libraries
+    ["core/"],
+    ["shared/"],
+    ["design-system/"],
+    ["widgets/"],
+    ["atoms/"],
+    ["organisms/"],
+    # Backend-with-frontend patterns
+    ["resources/js/"],
+    ["assets/js/"],
+    ["static/js/"],
+    # Absolute last resort: repo root
+    [""],
 ]
+
+
+# Minimum component files required to include a project (criterion IC4).
+# Relaxed from 10 → 5 to recover projects with focused, smaller component sets.
+MIN_COMPONENT_FILES = 5
 
 
 def find_best_scan_paths(
@@ -180,10 +220,12 @@ def find_best_scan_paths(
 ) -> tuple[list[str], int]:
     """
     Return the scan_paths and file count that yield the most component files.
-    Falls back to common alternative paths when the configured paths give < 10 files.
+    Falls back to common alternative paths when the configured paths give
+    fewer than MIN_COMPONENT_FILES files, trying every candidate in
+    FALLBACK_SCAN_PATHS until the threshold is met or all paths are exhausted.
     """
     count = count_tsx_files(repo_dir, configured_paths, exclude_paths)
-    if count >= 10:
+    if count >= MIN_COMPONENT_FILES:
         return configured_paths, count
 
     best_paths = configured_paths
@@ -195,7 +237,7 @@ def find_best_scan_paths(
         if c > best_count:
             best_count = c
             best_paths = candidate
-        if best_count >= 10:
+        if best_count >= MIN_COMPONENT_FILES:
             break
 
     return best_paths, best_count
@@ -284,14 +326,14 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
         print(f"  [{entry.id}] scan_paths adjusted: {entry.scan_paths} → {effective_scan_paths}")
         entry.scan_paths = effective_scan_paths
 
-    # IC4: Minimum 10 component files
-    if file_count < 10:
+    # IC4: Minimum component files (threshold defined by MIN_COMPONENT_FILES)
+    if file_count < MIN_COMPONENT_FILES:
         print(f"  [{entry.id}] IC4 FAIL: only {file_count} component files found")
         entry.status = ProjectStatus.EXCLUDED
         entry.screening.ic4_component_files = InclusionStatus.FAIL
         entry.screening.exclusion_criterion = "IC4"
         entry.screening.exclusion_reason = (
-            f"Insufficient component files: {file_count} < 10"
+            f"Insufficient component files: {file_count} < {MIN_COMPONENT_FILES}"
         )
         return entry
 
