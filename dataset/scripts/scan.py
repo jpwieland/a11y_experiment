@@ -532,6 +532,17 @@ async def main_async(args: argparse.Namespace) -> None:
     print(f"\n  Relatório: python dataset/scripts/findings_report.py\n")
 
 
+def cmd_status(catalog: Path, pending: bool, domain: str | None) -> None:
+    """Exibe o status atual do corpus sem iniciar nenhum scan."""
+    from dataset.scripts.scan_status import build_display, load_entries
+    from rich.console import Console
+    import time
+
+    entries = load_entries(catalog)
+    ts = time.strftime("%H:%M:%S")
+    Console().print(build_display(entries, domain, pending, ts))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Scan de acessibilidade multi-ferramenta para o corpus a11y-autofix",
@@ -546,7 +557,19 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Re-escanear projetos já escaneados")
     parser.add_argument("--max-files", type=int, default=None, dest="max_files",
                         help="Limitar arquivos por projeto (útil para testes)")
+    # ── flags de status (não inicia scan) ─────────────────────────────────────
+    parser.add_argument("--status", action="store_true",
+                        help="Exibir status do corpus e sair (não escaneia)")
+    parser.add_argument("--pending", action="store_true",
+                        help="Com --status: listar projetos ainda na fila")
+    parser.add_argument("--domain", default=None,
+                        help="Com --status: filtrar por domínio (ex: ecommerce)")
     args = parser.parse_args()
+
+    if args.status:
+        cmd_status(args.catalog, args.pending, args.domain)
+        return
+
     asyncio.run(main_async(args))
 
 
