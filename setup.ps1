@@ -22,6 +22,14 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# Forcar UTF-8 no console Windows para suportar emojis e caixas Unicode
+# nos scripts Python (Rich, box-drawing chars, simbolos de acessibilidade)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8           = "1"   # Python 3.7+: forca UTF-8 em stdin/stdout/stderr
+$env:PYTHONIOENCODING     = "utf-8"
+
 # ── Caminhos ──────────────────────────────────────────────────
 $ProjectRoot   = $PSScriptRoot
 $VenvDir       = Join-Path $ProjectRoot ".venv"
@@ -99,8 +107,12 @@ function RunCmd {
     Write-Log $line
     $eap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Cmd @CmdArgs 2>&1 | Out-File -Append -FilePath $LogFile -Encoding UTF8 }
-    catch { Write-Log "  [aviso] $($_.Exception.Message)" }
+    try {
+        & $Cmd @CmdArgs 2>&1 | ForEach-Object {
+            $s = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+            Add-Content -Path $LogFile -Value $s -Encoding UTF8
+        }
+    } catch { Write-Log "  [aviso] $($_.Exception.Message)" }
     finally { $ErrorActionPreference = $eap }
 }
 
@@ -111,8 +123,14 @@ function RunVisible {
     Write-Log $line
     $eap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Cmd @CmdArgs 2>&1 | Tee-Object -Append -FilePath $LogFile | Out-Host }
-    catch { Write-Log "  [aviso] $($_.Exception.Message)" }
+    try {
+        & $Cmd @CmdArgs 2>&1 | ForEach-Object {
+            # Converter ErrorRecord (stderr) em string simples para nao gerar NativeCommandError
+            $s = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+            $s | Out-Host
+            Add-Content -Path $LogFile -Value $s -Encoding UTF8
+        }
+    } catch { Write-Log "  [aviso] $($_.Exception.Message)" }
     finally { $ErrorActionPreference = $eap }
 }
 

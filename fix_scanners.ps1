@@ -13,7 +13,14 @@ param(
     [switch]$CheckOnly
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"  # Comandos npm/Python gravam em stderr sem ser erros reais
+
+# UTF-8 no console para suportar saida Unicode dos scripts Python
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8           = "1"
+$env:PYTHONIOENCODING     = "utf-8"
 
 # ── Cores ────────────────────────────────────────────────────
 function Ok   { param([string]$M); Write-Host "  [OK] $M" -ForegroundColor Green }

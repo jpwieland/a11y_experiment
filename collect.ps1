@@ -26,6 +26,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# UTF-8 no console para suportar saida Unicode dos scripts Python
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8           = "1"
+$env:PYTHONIOENCODING     = "utf-8"
+
 # ── Caminhos ──────────────────────────────────────────────────
 $ProjectRoot  = $PSScriptRoot
 $VenvPython   = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -153,10 +160,18 @@ function Run-Phase {
     $line = "  `$ $VenvPython $($CmdArgs -join ' ')"
     Write-Host $line -ForegroundColor DarkGray
     Add-Content $LogFile $line
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        & $VenvPython @CmdArgs 2>&1 | Tee-Object -Append -FilePath $LogFile | Out-Host
+        & $VenvPython @CmdArgs 2>&1 | ForEach-Object {
+            $s = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+            $s | Out-Host
+            Add-Content -Path $LogFile -Value $s -Encoding UTF8
+        }
+        $ErrorActionPreference = $eap
         return ($LASTEXITCODE -eq 0)
     } catch {
+        $ErrorActionPreference = $eap
         return $false
     }
 }
