@@ -93,19 +93,27 @@ function Has {
 }
 
 function RunCmd {
-    param([string]$Cmd, [string[]]$Args)
-    $line = "    `$ $Cmd $($Args -join ' ')"
+    param([string]$Cmd, [string[]]$CmdArgs)
+    $line = "    `$ $Cmd $($CmdArgs -join ' ')"
     Write-Host $line -ForegroundColor DarkGray
     Write-Log $line
-    & $Cmd @Args 2>&1 | Out-File -Append -FilePath $LogFile -Encoding UTF8
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Cmd @CmdArgs 2>&1 | Out-File -Append -FilePath $LogFile -Encoding UTF8 }
+    catch { Write-Log "  [aviso] $($_.Exception.Message)" }
+    finally { $ErrorActionPreference = $eap }
 }
 
 function RunVisible {
-    param([string]$Cmd, [string[]]$Args)
-    $line = "    `$ $Cmd $($Args -join ' ')"
+    param([string]$Cmd, [string[]]$CmdArgs)
+    $line = "    `$ $Cmd $($CmdArgs -join ' ')"
     Write-Host $line -ForegroundColor DarkGray
     Write-Log $line
-    & $Cmd @Args 2>&1 | Tee-Object -Append -FilePath $LogFile
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Cmd @CmdArgs 2>&1 | Tee-Object -Append -FilePath $LogFile | Out-Host }
+    catch { Write-Log "  [aviso] $($_.Exception.Message)" }
+    finally { $ErrorActionPreference = $eap }
 }
 
 # ── Inicializar log ───────────────────────────────────────────

@@ -99,16 +99,16 @@ except Exception as e:
 # ── Banner ────────────────────────────────────────────────────
 "" | Out-File -FilePath $LogFile -Force
 Write-Host ""
-Write-Host "*** a11y-autofix --Coleta do Dataset ***" -ForegroundColor Cyan
+Write-Host "*** a11y-autofix -- Coleta do Dataset ***" -ForegroundColor Cyan
 Write-Host ("=" * 60)
 Write-Host "Projeto  : $ProjectRoot"
 Write-Host "Catalogo : $Catalog"
 Write-Host "Log      : $LogFile"
 Write-Host "Data     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-if ($DryRun) { Write-Host "MODO SIMULACAO --nada sera executado" -ForegroundColor Yellow }
+if ($DryRun) { Write-Host "MODO SIMULACAO -- nada sera executado" -ForegroundColor Yellow }
 Write-Host ""
 
-# ── --status: mostrar estado e sair ──────────────────────────
+# ── -- status: mostrar estado e sair ──────────────────────────
 if ($Status) {
     Section "Estado Atual do Catalogo"
     Count-Status
@@ -180,7 +180,7 @@ sys.exit(0 if n > 0 else 1)
 
 # ── Funcoes de fase ───────────────────────────────────────────
 function Run-Discover {
-    Section "1/6 . Discover --busca no GitHub"
+    Section "1/6 . Discover -- busca no GitHub"
     if ([string]::IsNullOrEmpty($Token)) {
         Die "GITHUB_TOKEN nao definido.
   Defina no ambiente: `$env:GITHUB_TOKEN = 'ghp_...'
@@ -193,16 +193,16 @@ function Run-Discover {
         "--token", $Token,
         "--output", $Catalog
     )
-    if (-not $ok) { Warn "Discovery terminou com erro --verifique o log"; return $false }
+    if (-not $ok) { Warn "Discovery terminou com erro -- verifique o log"; return $false }
     Ok "Discovery concluida"
     Count-Status
     return $true
 }
 
 function Run-Snapshot {
-    Section "2/6 . Snapshot --clone e pin de commit"
+    Section "2/6 . Snapshot -- clone e pin de commit"
     if (-not (Has-ProjectsAt "pending")) {
-        Warn "Nenhum projeto com status 'pending' --fase ignorada"
+        Warn "Nenhum projeto com status 'pending' -- fase ignorada"
         return $true
     }
     Info "Clonando repos e registrando SHA... (workers=$Workers)"
@@ -218,9 +218,9 @@ function Run-Snapshot {
 }
 
 function Run-Scan {
-    Section "3/6 . Scan --pa11y + axe-core + lighthouse"
+    Section "3/6 . Scan -- pa11y + axe-core + lighthouse"
     if (-not (Has-ProjectsAt "snapshotted")) {
-        Warn "Nenhum projeto com status 'snapshotted' --fase ignorada"
+        Warn "Nenhum projeto com status 'snapshotted' -- fase ignorada"
         return $true
     }
     Info "Escaneando acessibilidade... (workers=$Workers, timeout=${ScanTimeout}s)"
@@ -237,9 +237,9 @@ function Run-Scan {
 }
 
 function Run-Annotate {
-    Section "4/6 . Annotate --ground truth"
+    Section "4/6 . Annotate -- ground truth"
     if (-not (Has-ProjectsAt "scanned")) {
-        Warn "Nenhum projeto com status 'scanned' --fase ignorada"
+        Warn "Nenhum projeto com status 'scanned' -- fase ignorada"
         return $true
     }
     Info "Auto-aceitando achados com consenso >=2..."
@@ -250,7 +250,7 @@ function Run-Annotate {
     ) | Out-Null
 
     if (-not [string]::IsNullOrEmpty($Annotator)) {
-        Info "Anotacao manual --pass 1 (annotator: $Annotator)"
+        Info "Anotacao manual -- pass 1 (annotator: $Annotator)"
         Run-Phase "annotate-pass1" @(
             "dataset\scripts\annotate.py",
             "--catalog", $Catalog,
@@ -258,7 +258,7 @@ function Run-Annotate {
             "--pass", "1"
         ) | Out-Null
     } else {
-        Warn "Anotacao manual ignorada --sem -Annotator"
+        Warn "Anotacao manual ignorada -- sem -Annotator"
     }
 
     Ok "Anotacao concluida"
@@ -267,23 +267,23 @@ function Run-Annotate {
 }
 
 function Run-Validate {
-    Section "5/6 . Validate --metricas QM1-QM8"
+    Section "5/6 . Validate -- metricas QM1-QM8"
     Info "Verificando qualidade do dataset..."
     Run-Phase "validate" @(
         "dataset\scripts\validate.py",
         "--catalog", $Catalog
     ) | Out-Null
-    Ok "Validacao concluida --veja: dataset\results\dataset_validation_report.json"
+    Ok "Validacao concluida -- veja: dataset\results\dataset_validation_report.json"
     return $true
 }
 
 function Run-Profile {
-    Section "6/6 . Profile --estatisticas do dataset"
+    Section "6/6 . Profile -- estatisticas do dataset"
     Run-Phase "profile" @(
         "dataset\scripts\describe_dataset.py",
         "--catalog", $Catalog
     ) | Out-Null
-    Ok "Perfil gerado --veja: dataset\results\dataset_profile.json"
+    Ok "Perfil gerado -- veja: dataset\results\dataset_profile.json"
     return $true
 }
 
@@ -319,7 +319,7 @@ if ($FailedPhases.Count -gt 0) {
 }
 
 if ($DryRun) {
-    Write-Host "Simulacao concluida --nenhum arquivo foi modificado." -ForegroundColor Yellow
+    Write-Host "Simulacao concluida -- nenhum arquivo foi modificado." -ForegroundColor Yellow
 } else {
     Ok "Pipeline concluido"
     Info "Resultados em: dataset\results\"
