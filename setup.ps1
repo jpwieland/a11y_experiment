@@ -19,16 +19,17 @@ param(
     [switch]$CI
 )
 
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+# Nao usar "Stop" — scripts npm (.ps1 wrappers) herdam e nao tratam stderr de node.exe
+$ErrorActionPreference = "Continue"
+$ProgressPreference    = "SilentlyContinue"
 
-# Forcar UTF-8 no console Windows para suportar emojis e caixas Unicode
-# nos scripts Python (Rich, box-drawing chars, simbolos de acessibilidade)
+# UTF-8 no console: suporta emojis e box-drawing dos scripts Python/Rich
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
 $OutputEncoding           = [System.Text.Encoding]::UTF8
-$env:PYTHONUTF8           = "1"   # Python 3.7+: forca UTF-8 em stdin/stdout/stderr
+$env:PYTHONUTF8           = "1"        # Python 3.7+: UTF-8 em stdin/stdout/stderr
 $env:PYTHONIOENCODING     = "utf-8"
+$env:NODE_NO_WARNINGS     = "1"        # Suprime DeprecationWarning do Node.js (puppeteer, url.parse etc.)
 
 # ── Caminhos ──────────────────────────────────────────────────
 $ProjectRoot   = $PSScriptRoot

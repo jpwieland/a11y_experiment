@@ -24,7 +24,7 @@ param(
     [switch]$Status
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"  # Evita NativeCommandError de wrappers npm herdarem Stop
 
 # UTF-8 no console para suportar saida Unicode dos scripts Python
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -32,6 +32,7 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding           = [System.Text.Encoding]::UTF8
 $env:PYTHONUTF8           = "1"
 $env:PYTHONIOENCODING     = "utf-8"
+$env:NODE_NO_WARNINGS     = "1"
 
 # ── Caminhos ──────────────────────────────────────────────────
 $ProjectRoot  = $PSScriptRoot

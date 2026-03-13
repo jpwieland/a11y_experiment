@@ -28,7 +28,15 @@ param(
     [switch]$DryRun
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"  # Evita NativeCommandError de wrappers npm
+
+# UTF-8 no console
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8           = "1"
+$env:PYTHONIOENCODING     = "utf-8"
+$env:NODE_NO_WARNINGS     = "1"
 
 # ── Helpers ───────────────────────────────────────────────────
 function Info    { param([string]$M); Write-Host "  --> $M" -ForegroundColor Cyan }
