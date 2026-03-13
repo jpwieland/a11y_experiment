@@ -1,5 +1,6 @@
+#Requires -Version 5.1
 # ============================================================
-#  reset_all.ps1 — limpa todos os artefatos do dataset (Windows)
+#  reset_all.ps1 -- limpa todos os artefatos do dataset (Windows)
 #  Equivalente ao reset_all.sh para PowerShell
 #
 #  O QUE E APAGADO:
@@ -73,9 +74,9 @@ $ExperimentResultDir = Join-Path $ScriptDir "experiment-results"
 
 # ── Cabecalho ─────────────────────────────────────────────────
 Write-Host ""
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 Write-Host "  a11y-autofix -- reset_all" -ForegroundColor Cyan
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 if ($DryRun) {
     Write-Host "`n  Modo DRY-RUN: nada sera apagado de verdade." -ForegroundColor Yellow
 }
@@ -94,7 +95,7 @@ if (Test-Path $Catalog) {
         Ok "Backup criado: $backupPath  ($nProjects projetos preservados)"
     }
 } else {
-    Info "Catalogo nao encontrado — sera criado do zero pelo discover.py"
+    Info "Catalogo nao encontrado -- sera criado do zero pelo discover.py"
 }
 
 # ── 2. Reset do catalogo ──────────────────────────────────────
@@ -154,7 +155,7 @@ if (Test-Path $ResultsDir) {
         }
     }
 } else {
-    Info "dataset\results\ nao existe — sera criado pelos scripts"
+    Info "dataset\results\ nao existe -- sera criado pelos scripts"
 }
 
 DryTruncate $CollectLog "dataset\collect.log"
@@ -191,14 +192,14 @@ if (-not $DryRun) {
 
 # ── Resumo ────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 if ($DryRun) {
-    Write-Host "  DRY-RUN concluido — nada foi alterado." -ForegroundColor Yellow
+    Write-Host "  DRY-RUN concluido -- nada foi alterado." -ForegroundColor Yellow
     Write-Host "  Execute sem -DryRun para aplicar o reset."
 } else {
     Write-Host "  Reset concluido com sucesso." -ForegroundColor Green
 }
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Proximos passos:"
 Write-Host "  1. Descoberta  ->  `$env:GITHUB_TOKEN = 'ghp_...'"

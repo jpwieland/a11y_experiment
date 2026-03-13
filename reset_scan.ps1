@@ -1,5 +1,6 @@
+#Requires -Version 5.1
 # ============================================================
-#  reset_scan.ps1 — reset parcial do pipeline de scan (Windows)
+#  reset_scan.ps1 -- reset parcial do pipeline de scan (Windows)
 #  Equivalente ao reset_scan.sh para PowerShell
 #
 #  Mantém snapshots e reseta APENAS resultados de scan.
@@ -47,14 +48,14 @@ if (-not (Test-Path $Catalog)) {
 
 # ── Cabecalho ─────────────────────────────────────────────────
 Write-Host ""
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 Write-Host "  a11y-autofix -- reset_scan (parcial)" -ForegroundColor Cyan
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Projeto  : $ScriptDir"
 Write-Host "  Catalogo : $Catalog"
 Write-Host "  Data     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-if ($DryRun) { Write-Host "`n  MODO DRY-RUN — nada sera modificado" -ForegroundColor Yellow }
+if ($DryRun) { Write-Host "`n  MODO DRY-RUN -- nada sera modificado" -ForegroundColor Yellow }
 Write-Host ""
 
 # ── Estado atual ──────────────────────────────────────────────
@@ -233,10 +234,10 @@ print(f'  Prontos para scan  : {snapshotted} projetos')
 
 # ── Resumo ────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host ("=" * 50) -ForegroundColor Cyan
 
 if ($DryRun) {
-    Write-Host "  DRY-RUN concluido — nenhum arquivo foi modificado." -ForegroundColor Yellow
+    Write-Host "  DRY-RUN concluido -- nenhum arquivo foi modificado." -ForegroundColor Yellow
     Write-Host "  Execute sem -DryRun para aplicar o reset."
 } else {
     Write-Host "  Reset parcial concluido com sucesso." -ForegroundColor Green

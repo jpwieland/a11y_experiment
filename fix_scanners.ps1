@@ -1,5 +1,6 @@
+#Requires -Version 5.1
 # ============================================================
-#  fix_scanners.ps1 — Instala, valida e repara ferramentas de scan
+#  fix_scanners.ps1 -- Instala, valida e repara ferramentas de scan
 #  Equivalente ao fix_scanners.sh para Windows (PowerShell)
 #
 #  Uso:
@@ -86,7 +87,7 @@ if (Has "pa11y") {
             $Pa11yCmd = "pa11y"
             Ok "pa11y instalado: $(pa11y --version 2>$null)"
         } else {
-            Fail "Falha ao instalar pa11y — tente: npm install -g pa11y"
+            Fail "Falha ao instalar pa11y -- tente: npm install -g pa11y"
         }
     } else {
         Fail "Instale: npm install -g pa11y"
@@ -194,7 +195,7 @@ if (-not $EslintOk -or -not $JsxA11yOk -or -not $TsParserOk) {
 Hdr "PASSO 5: Playwright (Python)"
 
 if (-not (Test-Path $VenvPython)) {
-    Warn ".venv nao encontrado — usando python do sistema"
+    Warn ".venv nao encontrado --usando python do sistema"
     $PyCmd = "python"
 } else {
     $PyCmd = $VenvPython
