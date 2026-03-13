@@ -343,14 +343,18 @@ if (-not (Has "node")) {
     function Install-NpmTool {
         param([string]$Pkg, [string]$Bin)
         if (Has $Bin) {
-            $ver = (& $Bin --version 2>$null | Select-Object -First 1).Trim()
+            # Captura stdout e stderr; filtra ErrorRecord para evitar InvokeMethodOnNull
+            $verOut = & $Bin --version 2>&1 |
+                      Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+                      Select-Object -First 1
+            $ver = if ($null -ne $verOut) { "$verOut".Trim() } else { "" }
             Pass "$Pkg  ($ver)"
         } else {
             Info "Instalando $Pkg..."
-            try {
-                RunCmd "npm" @("install","-g",$Pkg)
+            RunCmd "npm" @("install","-g",$Pkg)
+            if (Has $Bin) {
                 Pass "$Pkg instalado"
-            } catch {
+            } else {
                 Warn "Falha ao instalar $Pkg"
                 Warn "  Tente manualmente: npm install -g $Pkg"
             }
