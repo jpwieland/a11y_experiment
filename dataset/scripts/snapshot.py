@@ -248,17 +248,58 @@ def find_best_scan_paths(
 
 def _rmtree_safe(path: Path, entry_id: str = "") -> bool:
     """
-    Remove a directory tree robustly, handling Windows read-only files.
+    Remove a directory tree robustly on all platforms, including Windows.
 
-    Strategy (tried in order):
-      1. On Windows: use ``rd /s /q`` via cmd.exe — handles read-only .git packs.
-      2. Fallback: shutil.rmtree with an onerror handler that clears read-only bits.
-      3. If both fail: print a warning and return False so the caller can skip.
+    Windows git clones contain read-only files inside .git/objects/pack/ that
+    cause PermissionError (WinError 5) with a plain shutil.rmtree call.
 
-    Returns True on success, False if the directory could not be removed.
+    Strategy (three layers):
+      1. Pre-chmod: walk the entire tree and clear the read-only bit from every
+         file BEFORE calling rmtree.  This is more reliable than reacting to
+         errors one-by-one inside an onerror callback.
+      2. shutil.rmtree with an onerror handler as a safety net for any file
+         that is still read-only (e.g. race condition after chmod).
+      3. Windows nuclear fallback: ``cmd /c rd /s /q`` via subprocess, which
+         bypasses Python's permission model entirely.
+
+    Returns True on success, False if the directory could not be removed
+    (caller should skip the project rather than abort the whole run).
     """
+    if not path.exists():
+        return True
+
+    # ── Layer 1: pre-chmod every file/dir to writable ────────────────────────
+    # Iterating bottom-up (files before dirs) is not required here; we just
+    # need every entry to be writable before the delete pass.
+    for item in path.rglob("*"):
+        try:
+            item.chmod(stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except Exception:
+            pass  # best-effort; rmtree will catch what remains
+    try:
+        path.chmod(stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+    except Exception:
+        pass
+
+    # ── Layer 2: shutil.rmtree with onerror safety net ───────────────────────
+    def _on_error(func: object, fpath: str, _excinfo: object) -> None:
+        """Last-resort: chmod then retry the failed operation."""
+        try:
+            os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD)
+            if callable(func):
+                func(fpath)  # type: ignore[operator]
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+        if not path.exists():
+            return True
+    except Exception:
+        pass  # fall through to Layer 3
+
+    # ── Layer 3: Windows native rd /s /q ─────────────────────────────────────
     if sys.platform == "win32":
-        # Windows: rd /s /q is the most reliable way to delete read-only git repos
         result = subprocess.run(
             ["cmd", "/c", "rd", "/s", "/q", str(path)],
             capture_output=True,
@@ -266,31 +307,23 @@ def _rmtree_safe(path: Path, entry_id: str = "") -> bool:
         )
         if result.returncode == 0 and not path.exists():
             return True
-        # rd failed (e.g. file locked by antivirus) — fall through to shutil
         print(
-            f"  [{entry_id}] rd /s /q failed (rc={result.returncode}): "
-            f"{result.stderr.strip()!r} — trying shutil fallback ...",
+            f"  [{entry_id}] rd /s /q also failed (rc={result.returncode}): "
+            f"{result.stderr.strip()!r}",
             file=sys.stderr,
         )
 
-    # Portable fallback: onerror clears read-only attribute before retry
-    def _on_error(func: object, fpath: str, _excinfo: object) -> None:
-        try:
-            os.chmod(fpath, stat.S_IWRITE)
-            if callable(func):
-                func(fpath)  # type: ignore[operator]
-        except Exception:
-            pass  # best-effort
-
-    try:
-        shutil.rmtree(path, onerror=_on_error)
-        return True
-    except Exception as exc:
+    if path.exists():
         print(
-            f"  [{entry_id}] shutil.rmtree failed: {exc} — skipping project.",
+            f"  [{entry_id}] Could not delete '{path}' — "
+            "file may be locked by antivirus or another process. "
+            "Skipping project. To fix manually run: "
+            "Remove-Item -Recurse -Force <path>",
             file=sys.stderr,
         )
         return False
+
+    return True
 
 
 def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
