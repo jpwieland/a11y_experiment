@@ -10,8 +10,13 @@
 
 [CmdletBinding()]
 param(
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    # Aceita --check-only (estilo Linux/bash) como alias de -CheckOnly
+    [Parameter(ValueFromRemainingArguments=$true)]
+    [string[]]$ExtraArgs
 )
+# Suporte ao estilo Linux: .\fix_scanners.ps1 --check-only
+if ($ExtraArgs -contains "--check-only") { $CheckOnly = $true }
 
 $ErrorActionPreference = "Continue"  # npm/node gravam stderr sem ser erros reais
 

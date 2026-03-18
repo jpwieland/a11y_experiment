@@ -576,7 +576,11 @@ def main() -> None:
         print(f"\n  ESLint jsx-a11y: {len(eslint_rules_found)}/{len(_ESLINT_RULES_WCAG)} regras com findings")
     elif scan_findings or gt_findings:
         print(f"\n  {_YELLOW}⚠️  Nenhuma regra jsx-a11y encontrada nos findings.{_RESET}")
-        print(f"     Verifique se o ESLint está funcionando: bash fix_scanners.sh --check-only")
+        import sys as _sys
+        if _sys.platform == "win32":
+            print(f"     Verifique se o ESLint está funcionando: .\\fix_scanners.ps1 -CheckOnly")
+        else:
+            print(f"     Verifique se o ESLint está funcionando: bash fix_scanners.sh --check-only")
 
     print()
 
