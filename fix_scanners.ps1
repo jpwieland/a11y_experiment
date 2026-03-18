@@ -89,7 +89,9 @@ Hdr "PASSO 2: pa11y"
 $Pa11yCmd = ""
 if (Has "pa11y") {
     $Pa11yCmd = "pa11y"
-    $ver = (pa11y --version 2>$null).Trim()
+    # pa11y --version pode emitir para stderr no Windows → capturar ambos os streams
+    $rawVer = try { (pa11y --version 2>&1) } catch { $null }
+    $ver = if ($rawVer) { "$rawVer".Trim() } else { "(versao desconhecida)" }
     Ok "pa11y: $ver"
 } else {
     Warn "pa11y nao encontrado"
@@ -155,9 +157,11 @@ $TsParserOk = $false
 $EslintMajor = 0
 
 try {
-    $eslintVer = (npx eslint --version 2>$null).Trim()
-    if ($eslintVer) {
-        $EslintMajor = [int]($eslintVer -replace '^v(\d+).*','$1')
+    # ESLint 10 pode emitir para stderr — capturar ambos os streams
+    $rawEslintCheck = npx eslint --version 2>&1
+    $eslintVer = if ($rawEslintCheck) { "$rawEslintCheck".Trim() } else { "" }
+    if ($eslintVer -match "^\d|^v\d") {
+        $EslintMajor = [int]($eslintVer -replace '^v?(\d+).*','$1')
         Ok "ESLint: $eslintVer (major: $EslintMajor)"
         $EslintOk = $true
     }
@@ -194,8 +198,16 @@ if (-not $EslintOk -or -not $JsxA11yOk -or -not $TsParserOk) {
         Info "Instalando ESLint + plugins..."
         npm install -g eslint eslint-plugin-jsx-a11y "@typescript-eslint/parser" "@typescript-eslint/eslint-plugin" 2>&1 | Select-Object -Last 5
         try {
-            $eslintVer = (npx eslint --version 2>$null).Trim()
-            Ok "ESLint instalado: $eslintVer"
+            # ESLint 10 pode emitir versao para stderr → capturar ambos os streams
+            $rawEslintVer = npx eslint --version 2>&1
+            if ($rawEslintVer) {
+                $EslintOk = $true
+                Ok "ESLint instalado: $("$rawEslintVer".Trim())"
+            } else {
+                # Instalado mas npx ainda nao encontra — PATH precisa de refresh
+                Ok "ESLint instalado (reinicie o terminal para atualizar o PATH)"
+                $EslintOk = $true
+            }
         } catch {
             Fail "Falha ao instalar ESLint"
         }
@@ -355,7 +367,9 @@ module.exports = [{ files: ["**/*.tsx"], plugins: { "jsx-a11y": jsxA11y }, langu
 
         $NpmRootG = (npm root -g 2>$null).Trim()
         $env:NODE_PATH = $NpmRootG
-        $eslintOut = npx eslint --format json --config $TmpCfg $TmpTsx 2>$null
+        # Capturar stderr para diagnóstico (não suprimir — ajuda a identificar plugin ausente)
+        $eslintOut  = npx eslint --format json --config $TmpCfg $TmpTsx 2>$null
+        $eslintErr  = npx eslint --format json --config $TmpCfg $TmpTsx 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
     } else {
         $TmpCfg = Join-Path $TmpDir2 ".eslintrc.json"
         @'
@@ -368,13 +382,22 @@ module.exports = [{ files: ["**/*.tsx"], plugins: { "jsx-a11y": jsxA11y }, langu
 }
 '@ | Out-File -FilePath $TmpCfg -Encoding UTF8
         $eslintOut = npx eslint --format json --no-eslintrc --config $TmpCfg $TmpTsx 2>$null
+        $eslintErr = $null
     }
 
-    $count = $eslintOut | python -c "import sys,json; d=json.load(sys.stdin); print(sum(len(f.get('messages',[])) for f in d))" 2>$null
+    $count = try {
+        $eslintOut | python -c "import sys,json; d=json.load(sys.stdin); print(sum(len(f.get('messages',[])) for f in d))" 2>$null
+    } catch { $null }
+
     if ($count -and [int]$count -gt 0) {
         Ok "ESLint jsx-a11y funcional: $count issues detectados no TSX de teste"
     } else {
         Warn "ESLint rodou mas encontrou 0 issues (esperado >= 1)"
+        if ($eslintErr) {
+            Warn "  Detalhe: $($eslintErr | Select-Object -First 2)"
+        }
+        Warn "  Verifique: NODE_PATH=$env:NODE_PATH"
+        Warn "  Confirme: npm list -g eslint-plugin-jsx-a11y"
     }
 } catch {
     Warn "ESLint teste falhou: $_"
@@ -433,7 +456,12 @@ asyncio.run(test())
 "@
 
 try {
-    $pwResult = & $PyCmd -c $pwTestScript 2>$null
+    # Escrever para arquivo temporário evita mangling de aspas duplas
+    # que ocorre ao passar scripts complexos via "python -c" no Windows
+    $pwTmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+    $pwTestScript | Out-File -FilePath $pwTmpPy -Encoding UTF8
+    $pwResult = & $PyCmd $pwTmpPy 2>$null
+    Remove-Item $pwTmpPy -ErrorAction SilentlyContinue
     if ($pwResult -match "^ok:(\d+)$") {
         $violations = $Matches[1]
         if ([int]$violations -gt 0) {
