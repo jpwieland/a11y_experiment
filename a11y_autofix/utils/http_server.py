@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import functools
 import http.server
+import sys
 import threading
 from pathlib import Path
 
 
 class _QuietHTTPHandler(http.server.SimpleHTTPRequestHandler):
-    """Handler silencioso — suprime todos os logs de acesso ao console."""
+    """Handler silencioso — suprime logs e responde favicon.ico sem erro."""
 
     def log_message(self, format: str, *args: object) -> None:
         """Suprime logs de acesso HTTP."""
@@ -25,6 +26,39 @@ class _QuietHTTPHandler(http.server.SimpleHTTPRequestHandler):
     def log_error(self, format: str, *args: object) -> None:
         """Suprime logs de erro HTTP."""
         pass
+
+    def do_GET(self) -> None:
+        """Intercepta favicon.ico (requisitado automaticamente por browsers/Chromium).
+
+        Sem este handler, o servidor retornaria 404 → tentaria escrever o body
+        de erro → conexão já fechada pelo cliente → BrokenPipeError no stderr.
+        Responder 204 No Content encerra a troca de forma limpa.
+        """
+        if self.path in ("/favicon.ico", "/favicon.png"):
+            self.send_response(204)  # No Content — sem body, sem erro
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+class _QuietHTTPServer(http.server.HTTPServer):
+    """HTTPServer que silencia erros de conexão benignos.
+
+    BrokenPipeError e ConnectionResetError ocorrem quando o cliente (pa11y,
+    Chromium) fecha a conexão antes de receber a resposta — comportamento
+    normal de browsers e ferramentas de scan. O handle_error() padrão do
+    Python imprime o traceback completo no stderr via traceback.print_exc(),
+    bypass­ando o log_error() do handler. Sobrescrevemos aqui para silenciá-los.
+    """
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        exc_type, _, _ = sys.exc_info()
+        # Erros de pipe/conexão são benignos: o cliente simplesmente fechou
+        # a conexão antes de receber a resposta (comportamento normal de browsers)
+        if exc_type in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        # Demais erros: delegar ao handler padrão (preserva rastreabilidade)
+        super().handle_error(request, client_address)
 
 
 class HarnessServer:
@@ -59,7 +93,7 @@ class HarnessServer:
             directory=str(directory),
         )
         # Porta 0 → sistema operacional escolhe porta livre automaticamente
-        self._server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        self._server = _QuietHTTPServer(("127.0.0.1", 0), handler)
         self._port: int = self._server.server_address[1]
         self._thread = threading.Thread(
             target=self._server.serve_forever,

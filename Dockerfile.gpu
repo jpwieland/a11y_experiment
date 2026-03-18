@@ -1,0 +1,134 @@
+# ─── GPU-enabled image: CUDA 12.1 + Python 3.11 + Node.js 20 ────────────────
+#
+# Requisitos do host:
+#   - NVIDIA driver >= 525
+#   - nvidia-container-toolkit instalado
+#   - docker run --gpus all ...
+#
+# Casos de uso:
+#   - Ollama com modelos grandes (32b+) em GPU
+#   - vLLM backend para inferência acelerada
+#   - Múltiplos modelos em paralelo com VRAM particionada
+#
+ARG CUDA_VERSION=12.1.1
+ARG CUDNN_VERSION=8
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS gpu-base
+
+LABEL maintainer="a11y-autofix"
+LABEL description="a11y-autofix GPU — inferência acelerada para LLMs locais"
+LABEL cuda.version="${CUDA_VERSION}"
+
+# ─── Variáveis de ambiente GPU ────────────────────────────────────────────────
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    # CUDA configuration
+    CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    # Ollama GPU settings
+    OLLAMA_NUM_GPU=-1 \
+    OLLAMA_GPU_MEMORY_FRACTION=0.85 \
+    # vLLM settings
+    VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    # Torch settings para optimizações GPU
+    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" \
+    OMP_NUM_THREADS=8
+
+# ─── Dependências do sistema ──────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
+    # Node.js setup
+    curl \
+    gnupg \
+    ca-certificates \
+    # Chromium para scanners
+    chromium-browser \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    # Build tools (para compilar extensões CUDA)
+    build-essential \
+    cmake \
+    git \
+    wget \
+    # Utilitários
+    jq \
+    htop \
+    nvtop \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configurar python3.11 como padrão
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# ─── Node.js 20 LTS ──────────────────────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── Ferramentas de acessibilidade (Node) ────────────────────────────────────
+RUN npm install -g \
+    pa11y@8.0.0 \
+    @axe-core/cli@4.9.1 \
+    lighthouse@12.2.1 \
+    eslint@8.57.0 \
+    eslint-plugin-jsx-a11y@6.8.0 \
+    && npm cache clean --force
+
+# ─── Python packages ─────────────────────────────────────────────────────────
+WORKDIR /workspace
+
+COPY pyproject.toml ./
+COPY a11y_autofix/ ./a11y_autofix/
+
+RUN pip3 install --upgrade pip setuptools wheel \
+    && pip3 install -e ".[dev]"
+
+# ─── Playwright browsers ─────────────────────────────────────────────────────
+RUN python3 -m playwright install chromium --with-deps 2>/dev/null || \
+    python3 -m playwright install chromium
+
+# ─── Copiar código fonte ──────────────────────────────────────────────────────
+COPY . .
+
+# ─── Configuração de ambiente GPU para o pipeline ─────────────────────────────
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright \
+    CHROMIUM_FLAGS="--no-sandbox --disable-dev-shm-usage" \
+    A11Y_CONTAINER=1 \
+    A11Y_GPU_ENABLED=1 \
+    # Performance máxima com GPU
+    MAX_CONCURRENT_SCANS=8 \
+    MAX_CONCURRENT_AGENTS=4 \
+    MAX_CONCURRENT_MODELS=2 \
+    SCAN_TIMEOUT=90 \
+    AGENT_TIMEOUT=600 \
+    # Ollama defaults para GPU
+    DEFAULT_BACKEND=ollama \
+    OLLAMA_BASE_URL=http://ollama:11434
+
+RUN mkdir -p /workspace/a11y-report /workspace/experiment-results
+
+EXPOSE 8080
+
+# Health check com verificação de GPU
+HEALTHCHECK --interval=30s --timeout=15s --start-period=10s --retries=3 \
+    CMD python3 -c "import a11y_autofix; print('ok')" && \
+        nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || exit 1
+
+ENTRYPOINT ["python3", "-m", "a11y_autofix.cli"]
+CMD ["--help"]

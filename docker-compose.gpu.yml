@@ -1,0 +1,205 @@
+# ─── GPU override para docker-compose.yml ────────────────────────────────────
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+#
+# Ou com alias:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml docker compose up
+#
+# Requisitos do host:
+#   - NVIDIA driver >= 525 (verificar: nvidia-smi)
+#   - nvidia-container-toolkit (verificar: docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi)
+#   - Docker Engine >= 24.0
+#
+# Detecção automática de GPU:
+#   O script scripts/docker_validate.sh detecta GPUs automaticamente e
+#   ativa este override se nvidia-smi estiver disponível.
+#
+
+version: "3.9"
+
+services:
+
+  # ── Ollama com suporte a GPU ──────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: a11y-ollama-gpu
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    environment:
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Fracionamento de memória GPU para múltiplos modelos
+      - CUDA_MEMORY_FRACTION=0.85
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 45s
+
+  # ── Scanners com acesso a GPU (para modelos de análise) ──────────────────
+  scanner-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      - A11Y_GPU_ENABLED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Paralelismo aumentado com GPU
+      - MAX_CONCURRENT_SCANS=8
+      - MAX_CONCURRENT_AGENTS=4
+      - SCAN_TIMEOUT=120
+      - AGENT_TIMEOUT=600
+      - OLLAMA_BASE_URL=http://ollama:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Pipeline com GPU ──────────────────────────────────────────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      - A11Y_GPU_ENABLED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - MAX_CONCURRENT_SCANS=8
+      - MAX_CONCURRENT_AGENTS=4
+      - MAX_CONCURRENT_MODELS=2
+      - SCAN_TIMEOUT=120
+      - AGENT_TIMEOUT=600
+      - OLLAMA_BASE_URL=http://ollama:11434
+      # Modelos maiores disponíveis com GPU
+      - DEFAULT_MODEL=qwen2.5-coder-14b
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Test runner com GPU ───────────────────────────────────────────────────
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      - A11Y_GPU_ENABLED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MAX_CONCURRENT_SCANS=8
+      - OLLAMA_BASE_URL=http://ollama:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── E2E tests com GPU ─────────────────────────────────────────────────────
+  e2e-test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      - A11Y_GPU_ENABLED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MAX_CONCURRENT_SCANS=8
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - E2E_OUTPUT_DIR=/workspace/a11y-report/e2e
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Experimentos com GPU (modelos grandes) ────────────────────────────────
+  experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      - A11Y_GPU_ENABLED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Modelos de 14b+ disponíveis com GPU
+      - MAX_CONCURRENT_MODELS=3
+      - MAX_CONCURRENT_AGENTS=4
+      - AGENT_TIMEOUT=600
+      - OLLAMA_BASE_URL=http://ollama:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── vLLM (opcional: para modelos muito grandes como 32b+) ────────────────
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: a11y-vllm
+    ports:
+      - "8000:8000"
+    volumes:
+      - ollama-models:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Configurar conforme VRAM disponível
+      - MODEL_NAME=${VLLM_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}
+      - MAX_MODEL_LEN=${VLLM_MAX_LEN:-8192}
+      - GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEM:-0.85}
+      - TENSOR_PARALLEL_SIZE=${VLLM_TP:-1}
+    command:
+      - --model
+      - "${VLLM_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}"
+      - --max-model-len
+      - "${VLLM_MAX_LEN:-8192}"
+      - --gpu-memory-utilization
+      - "${VLLM_GPU_MEM:-0.85}"
+      - --tensor-parallel-size
+      - "${VLLM_TP:-1}"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - llm-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
+    profiles: ["vllm"]

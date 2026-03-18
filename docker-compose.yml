@@ -1,0 +1,531 @@
+# ─── a11y-autofix — Docker Compose (CPU mode) ────────────────────────────────
+#
+# Arquitetura:
+#   scanner-{pa11y,axe,lighthouse,playwright} → contêineres isolados de scan
+#   validator      → pipeline de validação 4 camadas
+#   reporter       → geração de relatórios
+#   ollama         → backend LLM local
+#   experiment     → orquestrador de experimentos multi-modelo
+#
+# Uso:
+#   docker compose up --build                   # stack completo
+#   docker compose run --rm scanner-axe         # só axe
+#   docker compose run --rm experiment          # rodar experimentos
+#   docker compose run --rm test-runner         # testes completos
+#
+
+version: "3.9"
+
+# ─── Volumes compartilhados ───────────────────────────────────────────────────
+volumes:
+  workspace:          # código fonte montado
+  reports:            # relatórios gerados (JSON, HTML)
+  experiment-results: # resultados de experimentos
+  dataset:            # dataset de projetos React
+  ollama-models:      # modelos Ollama (persistidos)
+  scan-queue:         # fila de arquivos para scan paralelo
+  scan-results:       # resultados individuais de scan por ferramenta
+
+# ─── Redes isoladas ───────────────────────────────────────────────────────────
+networks:
+  scanner-net:        # rede isolada dos scanners (sem acesso externo)
+    driver: bridge
+    internal: false   # precisa de acesso HTTP para CDNs durante harness
+  llm-net:            # rede do backend LLM
+    driver: bridge
+    internal: true    # totalmente isolada
+  report-net:         # rede de relatórios
+    driver: bridge
+    internal: true
+
+# ─── Configuração comum ───────────────────────────────────────────────────────
+x-scan-defaults: &scan-defaults
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: runtime
+  volumes:
+    - workspace:/workspace:ro          # código fonte somente-leitura
+    - scan-results:/results            # escrita dos resultados
+    - /tmp/a11y-harness:/tmp/harness  # harness HTML temporário
+  environment:
+    - PYTHONUNBUFFERED=1
+    - SCAN_TIMEOUT=90
+    - A11Y_CONTAINER=1
+  networks:
+    - scanner-net
+  restart: "no"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - NET_BIND_SERVICE
+  tmpfs:
+    - /tmp:size=512m,mode=1777
+
+# ─── Serviços ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── Ollama: backend LLM local ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: a11y-ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - llm-net
+    environment:
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Scanner Pa11y (contêiner isolado) ────────────────────────────────────
+  scanner-pa11y:
+    <<: *scan-defaults
+    container_name: a11y-scanner-pa11y
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json, sys
+        from pathlib import Path
+        from a11y_autofix.config import Settings, ScanTool
+        from a11y_autofix.scanner.pa11y import Pa11yRunner
+
+        async def main():
+            runner = Pa11yRunner()
+            if not await runner.available():
+                print(json.dumps({"error": "pa11y not available"}))
+                sys.exit(1)
+            input_file = Path("/queue/target.tsx")
+            result = await runner.safe_run(input_file, "WCAG2AA")
+            out = [f.model_dump() for f in result]
+            Path("/results/pa11y.json").write_text(json.dumps(out, default=str))
+            print(f"pa11y: {len(out)} findings")
+
+        asyncio.run(main())
+    depends_on:
+      - ollama
+    profiles: ["scanner", "full"]
+
+  # ── Scanner axe-core (contêiner isolado) ─────────────────────────────────
+  scanner-axe:
+    <<: *scan-defaults
+    container_name: a11y-scanner-axe
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json, sys
+        from pathlib import Path
+        from a11y_autofix.config import Settings, ScanTool
+        from a11y_autofix.scanner.axe import AxeRunner
+
+        async def main():
+            runner = AxeRunner()
+            if not await runner.available():
+                print(json.dumps({"error": "axe not available"}))
+                sys.exit(1)
+            input_file = Path("/queue/target.tsx")
+            result = await runner.safe_run(input_file, "WCAG2AA")
+            out = [f.model_dump() for f in result]
+            Path("/results/axe.json").write_text(json.dumps(out, default=str))
+            print(f"axe-core: {len(out)} findings")
+
+        asyncio.run(main())
+    profiles: ["scanner", "full"]
+
+  # ── Scanner Lighthouse (contêiner isolado) ────────────────────────────────
+  scanner-lighthouse:
+    <<: *scan-defaults
+    container_name: a11y-scanner-lighthouse
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json, sys
+        from pathlib import Path
+        from a11y_autofix.scanner.lighthouse import LighthouseRunner
+
+        async def main():
+            runner = LighthouseRunner()
+            if not await runner.available():
+                print(json.dumps({"error": "lighthouse not available"}))
+                sys.exit(1)
+            input_file = Path("/queue/target.tsx")
+            result = await runner.safe_run(input_file, "WCAG2AA")
+            out = [f.model_dump() for f in result]
+            Path("/results/lighthouse.json").write_text(json.dumps(out, default=str))
+            print(f"lighthouse: {len(out)} findings")
+
+        asyncio.run(main())
+    profiles: ["scanner", "full"]
+
+  # ── Scanner Playwright+axe (contêiner isolado) ────────────────────────────
+  scanner-playwright:
+    <<: *scan-defaults
+    container_name: a11y-scanner-playwright
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCAN_TIMEOUT=90
+      - A11Y_CONTAINER=1
+      - PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json, sys
+        from pathlib import Path
+        from a11y_autofix.scanner.playwright_axe import PlaywrightAxeRunner
+
+        async def main():
+            runner = PlaywrightAxeRunner()
+            if not await runner.available():
+                print(json.dumps({"error": "playwright not available"}))
+                sys.exit(1)
+            input_file = Path("/queue/target.tsx")
+            result = await runner.safe_run(input_file, "WCAG2AA")
+            out = [f.model_dump() for f in result]
+            Path("/results/playwright.json").write_text(json.dumps(out, default=str))
+            print(f"playwright+axe: {len(out)} findings")
+
+        asyncio.run(main())
+    profiles: ["scanner", "full"]
+
+  # ── Scanner ESLint (contêiner isolado, somente fonte) ────────────────────
+  scanner-eslint:
+    <<: *scan-defaults
+    container_name: a11y-scanner-eslint
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json, sys
+        from pathlib import Path
+        from a11y_autofix.scanner.eslint import EslintRunner
+
+        async def main():
+            runner = EslintRunner()
+            if not await runner.available():
+                print(json.dumps({"error": "eslint not available"}))
+                sys.exit(1)
+            input_file = Path("/queue/target.tsx")
+            result = await runner.safe_run_on_source(input_file, "WCAG2AA")
+            out = [f.model_dump() for f in result]
+            Path("/results/eslint.json").write_text(json.dumps(out, default=str))
+            print(f"eslint-jsx-a11y: {len(out)} findings")
+
+        asyncio.run(main())
+    profiles: ["scanner", "full"]
+
+  # ── Orquestrador de Scan completo (protocolo científico) ─────────────────
+  scanner-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-scanner-orchestrator
+    volumes:
+      - workspace:/workspace:ro
+      - scan-results:/results
+      - reports:/workspace/a11y-report
+    networks:
+      - scanner-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+      - MAX_CONCURRENT_SCANS=4
+      - SCAN_TIMEOUT=90
+      - USE_PA11Y=true
+      - USE_AXE=true
+      - USE_LIGHTHOUSE=false
+      - USE_PLAYWRIGHT=true
+      - USE_ESLINT=true
+      - MIN_TOOL_CONSENSUS=2
+    command:
+      - python
+      - -c
+      - |
+        import asyncio, json
+        from pathlib import Path
+        from a11y_autofix.config import Settings
+        from a11y_autofix.scanner.orchestrator import MultiToolScanner
+
+        async def main():
+            settings = Settings()
+            scanner = MultiToolScanner(settings)
+            target_dir = Path("/workspace")
+            from a11y_autofix.utils.files import find_react_files
+            files = find_react_files(target_dir)
+            print(f"Encontrados {len(files)} arquivos React/TSX")
+            results = await scanner.scan_files(files, "WCAG2AA")
+            out = []
+            for r in results:
+                out.append({
+                    "file": str(r.file),
+                    "issues": len(r.issues),
+                    "high_conf": len(r.high_confidence_issues()),
+                    "tools": [t.value for t in r.tools_used],
+                    "scan_time": r.scan_time,
+                })
+            Path("/results/scan_summary.json").write_text(
+                json.dumps(out, indent=2, default=str)
+            )
+            total = sum(r["issues"] for r in out)
+            print(f"Total: {total} issues em {len(files)} arquivos")
+
+        asyncio.run(main())
+    depends_on:
+      - ollama
+    restart: "no"
+    profiles: ["orchestrator", "full"]
+
+  # ── Validador de patches (4 camadas) ─────────────────────────────────────
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-validator
+    volumes:
+      - scan-results:/results
+      - reports:/workspace/a11y-report
+    networks:
+      - report-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+    command:
+      - python
+      - -c
+      - |
+        import json
+        from pathlib import Path
+        from a11y_autofix.validation.pipeline import ValidationPipeline
+
+        pipeline = ValidationPipeline()
+        results_dir = Path("/results")
+        patches = list(results_dir.glob("patch_*.json"))
+        summary = []
+
+        for patch_file in patches:
+            data = json.loads(patch_file.read_text())
+            from a11y_autofix.config import A11yIssue
+            issues = [A11yIssue(**i) for i in data.get("issues", [])]
+            result = pipeline.validate(
+                patched_content=data["patched_content"],
+                original_content=data["original_content"],
+                issues=issues,
+                file_id=data.get("file_id", ""),
+                model_id=data.get("model_id", ""),
+            )
+            summary.append({
+                "file": data.get("file_id"),
+                "passed": result.passed,
+                "rejected_at_layer": result.rejected_at_layer,
+                "failure_reason": result.failure_reason,
+                "timings_ms": result.layer_timings_ms,
+            })
+
+        Path("/results/validation_summary.json").write_text(
+            json.dumps(summary, indent=2)
+        )
+        passed = sum(1 for s in summary if s["passed"])
+        print(f"Validação: {passed}/{len(summary)} patches aprovados")
+    restart: "no"
+    profiles: ["validator", "full"]
+
+  # ── Reporter (JSON + HTML) ────────────────────────────────────────────────
+  reporter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-reporter
+    volumes:
+      - scan-results:/results:ro
+      - reports:/workspace/a11y-report
+    networks:
+      - report-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+    command:
+      - python
+      - -c
+      - |
+        import json
+        from pathlib import Path
+        print("Reporter: processando resultados em /results...")
+        results_dir = Path("/results")
+        report_dir = Path("/workspace/a11y-report")
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        # Consolidar todos os JSONs de resultado
+        all_data = {}
+        for json_file in results_dir.glob("*.json"):
+            try:
+                all_data[json_file.stem] = json.loads(json_file.read_text())
+            except Exception as e:
+                print(f"  WARN: {json_file.name}: {e}")
+
+        # Salvar relatório consolidado
+        consolidated = report_dir / "consolidated_results.json"
+        consolidated.write_text(json.dumps(all_data, indent=2, default=str))
+        print(f"Relatório consolidado: {consolidated}")
+    restart: "no"
+    profiles: ["reporter", "full"]
+
+  # ── Pipeline completo (scan → fix → validate → report) ───────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-pipeline
+    volumes:
+      - ./:/workspace
+      - reports:/workspace/a11y-report
+      - experiment-results:/workspace/experiment-results
+    networks:
+      - scanner-net
+      - llm-net
+      - report-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+      - MAX_CONCURRENT_SCANS=4
+      - MAX_CONCURRENT_AGENTS=2
+      - SCAN_TIMEOUT=90
+      - AGENT_TIMEOUT=300
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DEFAULT_MODEL=qwen2.5-coder-7b
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: ["fix", "/workspace/tests/fixtures", "--wcag", "AA", "--dry-run"]
+    restart: "no"
+    profiles: ["pipeline", "full"]
+
+  # ── Test Runner (testes completos E2E) ───────────────────────────────────
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-test-runner
+    volumes:
+      - ./:/workspace
+      - reports:/workspace/a11y-report
+    networks:
+      - scanner-net
+      - llm-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MAX_CONCURRENT_SCANS=4
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command:
+      - pytest
+      - tests/
+      - -v
+      - --tb=short
+      - -m
+      - "not integration"
+      - --cov=a11y_autofix
+      - --cov-report=term-missing
+      - --cov-report=json:/workspace/a11y-report/coverage.json
+    restart: "no"
+    profiles: ["test", "full"]
+
+  # ── E2E Test Runner ───────────────────────────────────────────────────────
+  e2e-test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-e2e-tests
+    volumes:
+      - ./:/workspace
+      - reports:/workspace/a11y-report
+    networks:
+      - scanner-net
+      - llm-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MAX_CONCURRENT_SCANS=4
+      - E2E_OUTPUT_DIR=/workspace/a11y-report/e2e
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command:
+      - pytest
+      - tests/e2e/
+      - -v
+      - --tb=short
+      - -s
+    restart: "no"
+    profiles: ["e2e", "full"]
+
+  # ── Executor de Experimentos ──────────────────────────────────────────────
+  experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-experiment
+    volumes:
+      - ./:/workspace
+      - experiment-results:/workspace/experiment-results
+      - reports:/workspace/a11y-report
+    networks:
+      - scanner-net
+      - llm-net
+    environment:
+      - PYTHONUNBUFFERED=1
+      - A11Y_CONTAINER=1
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MAX_CONCURRENT_MODELS=2
+      - MAX_CONCURRENT_AGENTS=2
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: ["experiment", "experiments/qwen_vs_deepseek.yaml"]
+    restart: "no"
+    profiles: ["experiment"]
+
+  # ── Dataset Pipeline (coleta de projetos) ────────────────────────────────
+  dataset-discover:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: a11y-dataset-discover
+    volumes:
+      - ./dataset:/workspace/dataset
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    networks:
+      - scanner-net
+    command:
+      - python
+      - dataset/scripts/discover.py
+      - --limit
+      - "20"
+    restart: "no"
+    profiles: ["dataset"]

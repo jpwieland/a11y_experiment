@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -265,7 +266,28 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
     # Remove existing clone if forced
     if force and project_dir.exists():
         import shutil
-        shutil.rmtree(project_dir)
+        import stat
+
+        def _remove_readonly(func, path, _excinfo):
+            """Windows: remove read-only flag before retrying deletion."""
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass  # best-effort; if it still fails, rmtree will raise
+
+        try:
+            shutil.rmtree(project_dir, onerror=_remove_readonly)
+        except Exception as rm_err:
+            print(
+                f"  [{entry.id}] Could not remove existing directory "
+                f"(Windows lock?): {rm_err} — skipping project.",
+                file=sys.stderr,
+            )
+            entry.status = ProjectStatus.ERROR
+            entry.screening.exclusion_criterion = "RMTREE_ERROR"
+            entry.screening.exclusion_reason = str(rm_err)[:200]
+            return entry
 
     reusing_existing = False
 
