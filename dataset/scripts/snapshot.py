@@ -25,6 +25,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -244,6 +246,53 @@ def find_best_scan_paths(
     return best_paths, best_count
 
 
+def _rmtree_safe(path: Path, entry_id: str = "") -> bool:
+    """
+    Remove a directory tree robustly, handling Windows read-only files.
+
+    Strategy (tried in order):
+      1. On Windows: use ``rd /s /q`` via cmd.exe — handles read-only .git packs.
+      2. Fallback: shutil.rmtree with an onerror handler that clears read-only bits.
+      3. If both fail: print a warning and return False so the caller can skip.
+
+    Returns True on success, False if the directory could not be removed.
+    """
+    if sys.platform == "win32":
+        # Windows: rd /s /q is the most reliable way to delete read-only git repos
+        result = subprocess.run(
+            ["cmd", "/c", "rd", "/s", "/q", str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and not path.exists():
+            return True
+        # rd failed (e.g. file locked by antivirus) — fall through to shutil
+        print(
+            f"  [{entry_id}] rd /s /q failed (rc={result.returncode}): "
+            f"{result.stderr.strip()!r} — trying shutil fallback ...",
+            file=sys.stderr,
+        )
+
+    # Portable fallback: onerror clears read-only attribute before retry
+    def _on_error(func: object, fpath: str, _excinfo: object) -> None:
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            if callable(func):
+                func(fpath)  # type: ignore[operator]
+        except Exception:
+            pass  # best-effort
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+        return True
+    except Exception as exc:
+        print(
+            f"  [{entry_id}] shutil.rmtree failed: {exc} — skipping project.",
+            file=sys.stderr,
+        )
+        return False
+
+
 def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
     """
     Clone, pin, and annotate a single project entry.
@@ -265,28 +314,13 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
 
     # Remove existing clone if forced
     if force and project_dir.exists():
-        import shutil
-        import stat
-
-        def _remove_readonly(func, path, _excinfo):
-            """Windows: remove read-only flag before retrying deletion."""
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except Exception:
-                pass  # best-effort; if it still fails, rmtree will raise
-
-        try:
-            shutil.rmtree(project_dir, onerror=_remove_readonly)
-        except Exception as rm_err:
-            print(
-                f"  [{entry.id}] Could not remove existing directory "
-                f"(Windows lock?): {rm_err} — skipping project.",
-                file=sys.stderr,
-            )
+        if not _rmtree_safe(project_dir, entry_id=entry.id):
             entry.status = ProjectStatus.ERROR
             entry.screening.exclusion_criterion = "RMTREE_ERROR"
-            entry.screening.exclusion_reason = str(rm_err)[:200]
+            entry.screening.exclusion_reason = (
+                "Could not delete existing clone directory on Windows. "
+                "Try: Remove-Item -Recurse -Force <path>"
+            )
             return entry
 
     reusing_existing = False
@@ -392,7 +426,6 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
 
     # Compute clone size
     try:
-        import shutil
         total_bytes = sum(
             f.stat().st_size
             for f in project_dir.rglob("*")
