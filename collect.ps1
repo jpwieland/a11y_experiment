@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  a11y-autofix -- Coleta do Dataset (Windows)
 #  Equivalente ao collect.sh para PowerShell

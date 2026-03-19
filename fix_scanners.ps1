@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  fix_scanners.ps1 -- Instala, valida e repara ferramentas de scan
 #  Equivalente ao fix_scanners.sh para Windows (PowerShell)
@@ -157,7 +157,7 @@ $TsParserOk = $false
 $EslintMajor = 0
 
 try {
-    # ESLint 10 pode emitir para stderr — capturar ambos os streams
+    # ESLint 10 pode emitir para stderr -- capturar ambos os streams
     $rawEslintCheck = npx eslint --version 2>&1
     $eslintVer = if ($rawEslintCheck) { "$rawEslintCheck".Trim() } else { "" }
     if ($eslintVer -match "^\d|^v\d") {
@@ -204,7 +204,7 @@ if (-not $EslintOk -or -not $JsxA11yOk -or -not $TsParserOk) {
                 $EslintOk = $true
                 Ok "ESLint instalado: $("$rawEslintVer".Trim())"
             } else {
-                # Instalado mas npx ainda nao encontra — PATH precisa de refresh
+                # Instalado mas npx ainda nao encontra -- PATH precisa de refresh
                 Ok "ESLint instalado (reinicie o terminal para atualizar o PATH)"
                 $EslintOk = $true
             }
@@ -391,7 +391,7 @@ module.exports = [{ files: ["**/*.tsx","**/*.jsx"], plugins: { "jsx-a11y": jsxA1
         $eslintOut = npx eslint --format json --config $TmpCfg $TmpTsx 2>$eslintErrFile
     } else {
         # ESLint 8: formato legado .eslintrc.json
-        # NODE_PATH ja setado acima — resolve plugins globais sem precisar de node_modules local
+        # NODE_PATH ja setado acima -- resolve plugins globais sem precisar de node_modules local
         $TmpCfg = Join-Path $TmpDir2 ".eslintrc.json"
         @'
 {
@@ -421,7 +421,7 @@ module.exports = [{ files: ["**/*.tsx","**/*.jsx"], plugins: { "jsx-a11y": jsxA1
         if ($errContent) {
             Warn "  stderr ESLint: $($errContent | Select-Object -First 4 | Out-String)"
         } else {
-            Warn "  (nenhum stderr — plugin pode estar carregando mas sem regras ativas)"
+            Warn "  (nenhum stderr -- plugin pode estar carregando mas sem regras ativas)"
         }
         Warn "  NODE_PATH usado: $env:NODE_PATH"
         Warn "  Config usada  : $TmpCfg"

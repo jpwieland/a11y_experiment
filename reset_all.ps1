@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  reset_all.ps1 -- limpa todos os artefatos do dataset (Windows)
 #  Equivalente ao reset_all.sh para PowerShell

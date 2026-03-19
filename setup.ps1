@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  a11y-autofix -- Configuracao Completa do Ambiente (Windows)
 #  Suporte: Windows 10/11 com PowerShell 5.1+ ou PowerShell 7+

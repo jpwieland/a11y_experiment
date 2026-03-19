@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  reset_scan.ps1 -- reset parcial do pipeline de scan (Windows)
 #  Equivalente ao reset_scan.sh para PowerShell
