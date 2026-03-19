@@ -512,7 +512,7 @@ def verify_snapshot(entry: ProjectEntry) -> bool:
 
 
 def load_catalog(path: Path) -> tuple[list[ProjectEntry], dict[str, Any]]:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     entries = []
     for raw in data.get("projects", []):
@@ -531,7 +531,7 @@ def save_catalog(entries: list[ProjectEntry], path: Path, metadata: dict[str, An
             "last_modified": datetime.now(tz=timezone.utc).date().isoformat(),
         },
     }
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.dump(output, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 

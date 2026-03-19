@@ -589,7 +589,7 @@ def load_existing_catalog(path: Path) -> tuple[dict[str, ProjectEntry], dict[str
     if not path.exists():
         return {}, {}
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
     entries: dict[str, ProjectEntry] = {}
@@ -622,7 +622,7 @@ def save_catalog(
         },
     }
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.dump(output, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     print(f"  💾 Saved {len(entries)} entries to {path}")

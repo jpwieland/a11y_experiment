@@ -62,7 +62,7 @@ _DOMAIN_STYLE = {
 def load_entries(catalog: Path) -> list[ProjectEntry]:
     if not catalog.exists():
         return []
-    with open(catalog) as f:
+    with open(catalog, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     entries = []
     for raw in data.get("projects", []):

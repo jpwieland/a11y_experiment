@@ -80,7 +80,7 @@ def _freq_map(values: list[str]) -> dict[str, int]:
 
 
 def load_catalog(path: Path) -> tuple[list[ProjectEntry], dict[str, Any]]:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     entries = []
     for raw in data.get("projects", []):
