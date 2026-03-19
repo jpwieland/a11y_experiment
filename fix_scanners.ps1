@@ -155,14 +155,27 @@ $EslintOk = $false
 $JsxA11yOk = $false
 $TsParserOk = $false
 $EslintMajor = 0
+$EslintBin   = ""   # caminho real do binario ESLint (evita ambiguidade do npx)
 
 try {
-    # ESLint 10 pode emitir para stderr -- capturar ambos os streams
-    $rawEslintCheck = npx eslint --version 2>&1
+    # Encontrar o binario ESLint diretamente -- evita npx resolver versao diferente
+    $eslintCmdObj = Get-Command eslint -ErrorAction SilentlyContinue
+    if ($eslintCmdObj) {
+        $EslintBin = $eslintCmdObj.Source
+    } else {
+        $npmPfxG = (npm prefix -g 2>$null).Trim()
+        foreach ($ext in @(".cmd", ".ps1", "")) {
+            $c = Join-Path $npmPfxG "eslint$ext"
+            if (Test-Path $c) { $EslintBin = $c; break }
+        }
+    }
+
+    $rawEslintCheck = if ($EslintBin) { & $EslintBin --version 2>&1 } else { npx eslint --version 2>&1 }
     $eslintVer = if ($rawEslintCheck) { "$rawEslintCheck".Trim() } else { "" }
     if ($eslintVer -match "^\d|^v\d") {
         $EslintMajor = [int]($eslintVer -replace '^v?(\d+).*','$1')
-        Ok "ESLint: $eslintVer (major: $EslintMajor)"
+        $binLabel = if ($EslintBin) { " ($EslintBin)" } else { " (via npx)" }
+        Ok "ESLint: $eslintVer (major: $EslintMajor)$binLabel"
         $EslintOk = $true
     }
 } catch {
@@ -318,8 +331,6 @@ if ($Pa11yCmd -or (Has "pa11y")) {
             --reporter json `
             --standard WCAG2AA `
             --timeout 30000 `
-            --chromium-flag "--no-sandbox" `
-            --chromium-flag "--disable-dev-shm-usage" `
             $fileUri 2>$pa11yStdErr
 
         $count = try {
@@ -373,6 +384,10 @@ try {
     # Arquivo para capturar stderr do ESLint (auxilia diagnostico)
     $eslintErrFile = [System.IO.Path]::GetTempFileName()
 
+    # Usar o binario direto (detectado no passo 4); fallback para npx como ultimo recurso
+    $eslintExe  = if ($EslintBin) { $EslintBin } else { "npx" }
+    $eslintPfx  = if ($EslintBin) { @() } else { @("eslint") }   # "npx" precisa de "eslint" como 1o arg
+
     if ($EslintMajor -ge 9) {
         $TmpCfg = Join-Path $TmpDir2 "a11y_cfg.cjs"
         @"
@@ -388,7 +403,7 @@ const rules = Object.fromEntries(Object.entries(allRules).filter(([k]) => availa
 module.exports = [{ files: ["**/*.tsx","**/*.jsx"], plugins: { "jsx-a11y": jsxA11y }, languageOptions: langOpts, rules }];
 "@ | Out-File -FilePath $TmpCfg -Encoding UTF8
 
-        $eslintOut = npx eslint --format json --config $TmpCfg $TmpTsx 2>$eslintErrFile
+        $eslintOut = & $eslintExe @eslintPfx --format json --config $TmpCfg $TmpTsx 2>$eslintErrFile
     } else {
         # ESLint 8: formato legado .eslintrc.json
         # NODE_PATH ja setado acima -- resolve plugins globais sem precisar de node_modules local
@@ -406,7 +421,7 @@ module.exports = [{ files: ["**/*.tsx","**/*.jsx"], plugins: { "jsx-a11y": jsxA1
   }
 }
 '@ | Out-File -FilePath $TmpCfg -Encoding UTF8
-        $eslintOut = npx eslint --format json --no-eslintrc --config $TmpCfg $TmpTsx 2>$eslintErrFile
+        $eslintOut = & $eslintExe @eslintPfx --format json --no-eslintrc --config $TmpCfg $TmpTsx 2>$eslintErrFile
     }
 
     $count = try {
