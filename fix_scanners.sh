@@ -47,11 +47,14 @@ ensure_npm_in_path() {
         return 0
     fi
     warn "npm bin NÃO no PATH: $npm_bin"
-    if [[ "$CHECK_ONLY" == "true" ]]; then
-        fail "Adicione: export PATH=\"$npm_bin:\$PATH\""
-        return 1
-    fi
+    # Sempre exporta na sessão atual — sem gravar em .bashrc no modo check-only
     export PATH="$npm_bin:$PATH"
+    if [[ "$CHECK_ONLY" == "true" ]]; then
+        warn "PATH atualizado apenas para esta sessão (--check-only)"
+        info "Para persistir adicione ao ~/.bashrc:"
+        info "  export PATH=\"$npm_bin:\$PATH\""
+        return 0
+    fi
     local marker="# a11y-autofix npm PATH"
     local line="export PATH=\"$npm_bin:\$PATH\"  $marker"
     for rc in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
@@ -175,13 +178,25 @@ ESLINT_OK=false
 JSXA11Y_OK=false
 TS_PARSER_OK=false
 
-if npx eslint --version &>/dev/null 2>&1; then
-    ESLINT_VER=$(npx eslint --version 2>&1 | head -1)
+# Detectar eslint: tenta PATH atual, depois npm bin explícito, depois npx
+ESLINT_CMD=""
+if command -v eslint &>/dev/null; then
+    ESLINT_CMD="eslint"
+elif [[ -x "$NPM_BIN/eslint" ]]; then
+    ESLINT_CMD="$NPM_BIN/eslint"
+    export PATH="$NPM_BIN:$PATH"
+elif npx --no-install eslint --version &>/dev/null 2>&1; then
+    ESLINT_CMD="npx eslint"
+fi
+
+if [[ -n "$ESLINT_CMD" ]]; then
+    ESLINT_VER=$($ESLINT_CMD --version 2>&1 | head -1)
     ESLINT_MAJOR=$(echo "$ESLINT_VER" | grep -oP '\d+' | head -1)
-    ok "ESLint: $ESLINT_VER (major: $ESLINT_MAJOR)"
+    ok "ESLint: $ESLINT_VER  (cmd: $ESLINT_CMD  |  major: $ESLINT_MAJOR)"
     ESLINT_OK=true
 else
-    warn "ESLint não encontrado"
+    warn "ESLint não encontrado (PATH atual + $NPM_BIN + npx)"
+    info "npm prefix: $(npm config get prefix 2>/dev/null)  |  npm bin: $NPM_BIN"
     ESLINT_MAJOR=0
 fi
 
