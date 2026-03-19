@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Dashboard em tempo real do progresso de scan — combina catálogo + progresso
+Dashboard em tempo real do progresso de scan -- combina catalogo + progresso
 por arquivo + findings ao vivo.
 
 Inspirado no visual de scan_status.py, mas atualizado em tempo real

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-reset_consistent.py — sincroniza o catálogo com o estado real do disco.
+reset_consistent.py -- sincroniza o catalogo com o estado real do disco.
 
 Reconcilia discrepâncias entre o status no catálogo e os arquivos em
 dataset/snapshots/ e dataset/results/. Ideal para usar após um reset
@@ -120,12 +121,30 @@ def clear_results_dir() -> int:
 
 # ── Reset de projeto ──────────────────────────────────────────────────────────
 
-def compute_new_status(project: dict) -> str | None:
+def compute_new_status(project: dict, include_excluded: bool = False) -> str | None:
     """
     Calcula o novo status para um projeto baseado no estado do disco.
     Retorna None se o projeto não deve ser alterado.
+
+    include_excluded=True: re-habilita projetos excluídos por IC4 sem clone real.
+    Esses projetos têm component_file_count=0 e pinned_commit vazio, o que indica
+    que o IC4 rodou sem clonar o repo — exclusão falsa positiva sistematica.
     """
     old = project.get("status", "candidate")
+
+    if old == "excluded":
+        if not include_excluded:
+            return None
+        # Só re-habilitar se a exclusão foi por IC4 sem clone real
+        snap = project.get("snapshot") or {}
+        screening = project.get("screening") or {}
+        ic4 = screening.get("ic4_component_files") or {}
+        ic4_fail = (isinstance(ic4, dict) and ic4.get("status") == "fail") or ic4 == "fail"
+        never_cloned = not snap.get("pinned_commit")
+        if ic4_fail and never_cloned:
+            return "pending"
+        return None
+
     if old not in _RESET_STATUSES:
         return None
     return "snapshotted" if snapshot_exists(project["id"]) else "pending"
@@ -133,10 +152,18 @@ def compute_new_status(project: dict) -> str | None:
 
 def apply_reset(project: dict, new_status: str) -> None:
     """Aplica o reset in-place no dict do projeto."""
+    old_status = project.get("status")
     project["status"] = new_status
     project["scan"] = _EMPTY_SCAN.copy()
     if "annotation_summary" in project:
         project["annotation_summary"] = {}
+    # Se estava excluído, limpar screening para que snapshot.py re-avalie IC4
+    if old_status == "excluded":
+        project["screening"] = {}
+        snap = project.get("snapshot") or {}
+        # Zerar contagem de arquivos (será recontada no snapshot)
+        snap["component_file_count"] = 0
+        project["snapshot"] = snap
 
 
 # ── Exibição ──────────────────────────────────────────────────────────────────
@@ -186,6 +213,14 @@ def main() -> None:
                         help="Simula o reset sem modificar nenhum arquivo")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Executa sem pedir confirmação")
+    parser.add_argument(
+        "--include-excluded", action="store_true", dest="include_excluded",
+        help=(
+            "Re-habilita projetos excluídos por IC4 sem clone real "
+            "(falsos positivos: component_file_count=0 sem pinned_commit). "
+            "snapshot.py re-avaliará IC4 clonando de verdade."
+        ),
+    )
     args = parser.parse_args()
 
     console.print()
@@ -224,22 +259,30 @@ def main() -> None:
     # ── Calcular o que será alterado ──────────────────────────────────────
     changes: list[tuple[dict, str]] = []   # (project_dict, new_status)
     for p in projects:
-        new = compute_new_status(p)
+        new = compute_new_status(p, include_excluded=args.include_excluded)
         if new is not None and new != p.get("status"):
             changes.append((p, new))
 
-    to_snapshotted = sum(1 for _, ns in changes if ns == "snapshotted")
-    to_pending     = sum(1 for _, ns in changes if ns == "pending")
-    untouched      = total - len(changes)
+    to_snapshotted   = sum(1 for _, ns in changes if ns == "snapshotted")
+    to_pending       = sum(1 for _, ns in changes if ns == "pending")
+    excl_reactivated = sum(1 for p, ns in changes if p.get("status") == "excluded")
+    untouched        = total - len(changes)
 
     console.print(f"\n  [bold]O que será alterado:[/bold]")
     console.print(f"  [yellow]→ snapshotted[/yellow]  {to_snapshotted:>4}  projetos "
                   f"[dim](snapshot existe no disco)[/dim]")
     console.print(f"  [cyan]→ pending[/cyan]      {to_pending:>4}  projetos "
-                  f"[dim](sem snapshot no disco — precisam ser re-clonados)[/dim]")
+                  f"[dim](sem snapshot — precisam ser re-clonados)[/dim]")
+    if excl_reactivated:
+        console.print(f"  [magenta]  (incl. {excl_reactivated} excluídos re-habilitados — IC4 falso positivo)[/magenta]")
     console.print(f"  [dim]→ sem alteração[/dim]  {untouched:>4}  projetos "
                   f"[dim](excluded / candidate / pending já ok)[/dim]")
-    console.print(f"  [red]✗ results/[/red]       {n_result_files:>4}  arquivo(s) serão removidos\n")
+    console.print(f"  [red]✗ results/[/red]       {n_result_files:>4}  arquivo(s) serão removidos")
+    if args.include_excluded:
+        console.print(f"\n  [magenta bold]  --include-excluded ativo:[/magenta bold] "
+                      f"{excl_reactivated} excluídos por IC4 sem clone real serão re-habilitados")
+        console.print(f"  [dim]  snapshot.py re-avaliará IC4 clonando os repos de verdade[/dim]")
+    console.print()
 
     if not changes and n_result_files == 0:
         console.print("[green]  ✓ Catálogo já está consistente com o disco.[/green]\n")
@@ -297,13 +340,21 @@ def main() -> None:
     n_need_snap = by_status_after.get("pending", 0)
 
     console.print(f"\n  [bold]Próximos passos:[/bold]")
+    step = 1
     if n_need_snap:
-        console.print(f"  [cyan]1. Re-clonar {n_need_snap} projeto(s):[/cyan]")
+        console.print(f"  [cyan]{step}. Re-clonar {n_need_snap} projeto(s) (snapshot + IC4 real):[/cyan]")
         console.print(f"     python dataset/scripts/snapshot.py")
+        step += 1
     if n_ready:
-        console.print(f"  [green]{'2' if n_need_snap else '1'}. Escanear {n_ready} projeto(s) prontos:[/green]")
+        console.print(f"  [green]{step}. Escanear {n_ready} projeto(s) com snapshot pronto:[/green]")
         console.print(f"     bash collect.sh --from scan --workers 2")
+        step += 1
     console.print(f"  [dim]  (monitorar em outra aba: python dataset/scripts/live_progress.py)[/dim]")
+    if not args.include_excluded and by_status_after.get("excluded", 0):
+        n_excl = by_status_after.get("excluded", 0)
+        console.print(f"\n  [dim]  Dica: {n_excl} projetos excluídos por IC4 sem clone podem ser "
+                      f"falsos positivos.[/dim]")
+        console.print(f"  [dim]  Re-execute com --include-excluded para re-habilitá-los.[/dim]")
     console.print()
 
 
