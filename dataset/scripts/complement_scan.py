@@ -819,6 +819,32 @@ async def run(
             await asyncio.sleep(1)
             return
 
+        # ── Verificar se as ferramentas estão realmente disponíveis ──────
+        # Re-diagnosticar para garantir estado atual (pode ter sido corrigido acima)
+        diag_final = await diagnose()
+        still_unavailable = [
+            t for t in tools_to_add
+            if not diag_final.get(t, {}).get("ok")
+        ]
+        if still_unavailable:
+            with _state["lock"]:
+                _state["phase"] = "done"
+                _state["phase_label"] = (
+                    f"ABORTADO — ferramentas ainda indisponíveis: "
+                    f"{', '.join(still_unavailable)}. "
+                    f"Instale manualmente (veja instruções abaixo) e rode com --no-fix."
+                )
+            await asyncio.sleep(2)
+            print(f"\n{RED}{BOLD}Ferramentas não encontradas: {', '.join(still_unavailable)}{R}\n")
+            print(f"{YELLOW}Instale manualmente (terminal como Administrador no Windows):{R}\n")
+            if "eslint" in still_unavailable:
+                print(f"  npm install -g eslint eslint-plugin-jsx-a11y @typescript-eslint/parser")
+            if "pa11y" in still_unavailable:
+                print(f"  npm install -g pa11y")
+            print(f"\nDepois rode:")
+            print(f"  python dataset/scripts/complement_scan.py --no-fix --workers 3\n")
+            return
+
         # ── Fase 3: Planejamento ──────────────────────────────────────────
         with _state["lock"]:
             _state["phase"] = "planning"
