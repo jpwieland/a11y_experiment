@@ -163,10 +163,49 @@ function Run-Phase {
     Add-Content $LogFile $line
     $eap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $script:CurrentProject = ""
     try {
         & $VenvPython @CmdArgs 2>&1 | ForEach-Object {
             $s = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
-            $s | Out-Host
+
+            # ── Detectar projeto atual (ex: "  [owner__repo] ...") ───────────
+            if ($s -match '^\s*\[([\w._/-]+)\]') {
+                $proj = $Matches[1]
+                if ($proj -ne $script:CurrentProject) {
+                    $script:CurrentProject = $proj
+                    Write-Host ""
+                    Write-Host "  >> Projeto: $proj" -ForegroundColor White -BackgroundColor DarkBlue
+                }
+            }
+
+            # ── Classificar linha por conteudo ────────────────────────────────
+            $prominent = $false
+            $color = if ($s -match '❌|Traceback \(most recent|^\s*(CRITICAL|FATAL)') {
+                $prominent = $true
+                'Red'
+            } elseif ($s -match 'ERROR|Exception:|Scan falhou|\[ERRO\]|erro ao') {
+                'Red'
+            } elseif ($s -match '⚠️|WARNING|WARN|\[AVISO\]') {
+                'Yellow'
+            } elseif ($s -match '✅|Conclu[íi]d[oa]|\[OK\]|\bsucesso\b') {
+                'Green'
+            } elseif ($s -match '💾|Progresso salvo|escaneados') {
+                'DarkCyan'
+            } elseif ($s -match '^\s*\[([\w._/-]+)\]') {
+                'Cyan'
+            } else {
+                'DarkGray'
+            }
+
+            # Erros criticos recebem destaque extra (linha em branco antes/depois)
+            if ($prominent) {
+                Write-Host ""
+                Write-Host "  [!!] $s" -ForegroundColor Red
+                Write-Host ""
+            } else {
+                Write-Host $s -ForegroundColor $color
+            }
+
             Add-Content -Path $LogFile -Value $s -Encoding UTF8
         }
         $ErrorActionPreference = $eap
