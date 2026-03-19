@@ -285,49 +285,60 @@ asyncio.run(test())
 # ── PASSO 6: Testes funcionais ────────────────────────────────
 Hdr "PASSO 6: Testes funcionais"
 
-# 6a: pa11y com servidor HTTP local
+# 6a: pa11y via file:// (evita dependencia de servidor HTTP em background job)
 if ($Pa11yCmd -or (Has "pa11y")) {
-    Info "Testando pa11y com servidor HTTP local..."
+    Info "Testando pa11y com arquivo local (file://)..."
     $TmpDir  = Join-Path $env:TEMP "a11y_test_$(Get-Random)"
     $TmpHtml = Join-Path $TmpDir "test.html"
     New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 
+    # HTML com multiplas violacoes obvias (sem alt, botao vazio, input sem label, link vazio)
     @"
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head><title>Test</title></head>
 <body>
   <img src="test.jpg">
   <button></button>
   <input type="text" name="q">
-  <a href="#"></a>
+  <a href="#"> </a>
 </body>
 </html>
 "@ | Out-File -FilePath $TmpHtml -Encoding UTF8
 
-    # Iniciar servidor HTTP Python em porta aleatoria
-    $serverJob = Start-Job -ScriptBlock {
-        param($Dir)
-        & python -m http.server 18765 --directory $Dir 2>&1
-    } -ArgumentList $TmpDir
-
-    Start-Sleep -Milliseconds 800
+    # Converter para URI file:// (pa11y 9.x suporta file:// nativamente)
+    $fileUri = "file:///" + ($TmpHtml -replace '\\', '/')
 
     try {
         $Pa11yTest = if ($Pa11yCmd) { $Pa11yCmd } else { "pa11y" }
-        $pa11yOut = & $Pa11yTest --reporter json --standard WCAG2AA --timeout 30000 "http://127.0.0.1:18765/test.html" 2>$null
-        $count = ($pa11yOut | python -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>$null)
+
+        # Capturar stdout e stderr separadamente para diagnostico
+        $pa11yStdErr = [System.IO.Path]::GetTempFileName()
+        $pa11yOut = & $Pa11yTest `
+            --reporter json `
+            --standard WCAG2AA `
+            --timeout 30000 `
+            --chromium-flag "--no-sandbox" `
+            --chromium-flag "--disable-dev-shm-usage" `
+            $fileUri 2>$pa11yStdErr
+
+        $count = try {
+            $pa11yOut | & $PyCmd -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>$null
+        } catch { $null }
+
         if ($count -and [int]$count -gt 0) {
             Ok "pa11y funcional: $count issues detectados no HTML de teste"
         } else {
             Warn "pa11y encontrou 0 issues no HTML de teste (esperado >=1)"
-            Warn "  Resultado: $($pa11yOut | Select-Object -First 2)"
+            $errContent = Get-Content $pa11yStdErr -ErrorAction SilentlyContinue
+            if ($errContent) { Warn "  stderr: $($errContent | Select-Object -First 3 | Out-String)" }
+            if ($pa11yOut)   { Warn "  stdout: $($pa11yOut  | Select-Object -First 2 | Out-String)" }
+            Warn "  URI testada: $fileUri"
         }
     } catch {
         Warn "pa11y teste falhou: $_"
     } finally {
-        Stop-Job $serverJob -ErrorAction SilentlyContinue
-        Remove-Job $serverJob -ErrorAction SilentlyContinue
+        Remove-Item $pa11yStdErr   -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
     }
 }
@@ -350,27 +361,37 @@ export const BadComponent = () => (
 "@ | Out-File -FilePath $TmpTsx -Encoding UTF8
 
 try {
+    # NODE_PATH deve ser setado ANTES de qualquer branch ESLint 8 ou 9+
+    # Sem isso os plugins globais (jsx-a11y, @typescript-eslint/parser) nao sao
+    # encontrados e ESLint carrega 0 regras -> 0 issues sem erro aparente.
+    $NpmRootG = (npm root -g 2>$null).Trim()
+    if ($NpmRootG) {
+        $env:NODE_PATH = $NpmRootG
+        Info "NODE_PATH -> $NpmRootG"
+    }
+
+    # Arquivo para capturar stderr do ESLint (auxilia diagnostico)
+    $eslintErrFile = [System.IO.Path]::GetTempFileName()
+
     if ($EslintMajor -ge 9) {
         $TmpCfg = Join-Path $TmpDir2 "a11y_cfg.cjs"
         @"
 "use strict";
 let jsxA11y = { rules: {} }, tsParser = null;
-try { jsxA11y = require("eslint-plugin-jsx-a11y"); } catch(e) {}
+try { jsxA11y = require("eslint-plugin-jsx-a11y"); } catch(e) { process.stderr.write("[a11y] jsx-a11y nao encontrado: " + e.message + "\n"); }
 try { tsParser = require("@typescript-eslint/parser"); } catch(e) {}
 const langOpts = { parserOptions: { ecmaVersion: 2022, ecmaFeatures: { jsx: true }, sourceType: "module" } };
 if (tsParser) langOpts.parser = tsParser;
 const availableRules = new Set(Object.keys(jsxA11y.rules || {}));
-const allRules = { "jsx-a11y/alt-text": "error", "jsx-a11y/anchor-has-content": "error" };
+const allRules = { "jsx-a11y/alt-text": "error", "jsx-a11y/anchor-has-content": "error", "jsx-a11y/click-events-have-key-events": "error" };
 const rules = Object.fromEntries(Object.entries(allRules).filter(([k]) => availableRules.has(k.replace('jsx-a11y/',''))));
-module.exports = [{ files: ["**/*.tsx"], plugins: { "jsx-a11y": jsxA11y }, languageOptions: langOpts, rules }];
+module.exports = [{ files: ["**/*.tsx","**/*.jsx"], plugins: { "jsx-a11y": jsxA11y }, languageOptions: langOpts, rules }];
 "@ | Out-File -FilePath $TmpCfg -Encoding UTF8
 
-        $NpmRootG = (npm root -g 2>$null).Trim()
-        $env:NODE_PATH = $NpmRootG
-        # Capturar stderr para diagnóstico (não suprimir — ajuda a identificar plugin ausente)
-        $eslintOut  = npx eslint --format json --config $TmpCfg $TmpTsx 2>$null
-        $eslintErr  = npx eslint --format json --config $TmpCfg $TmpTsx 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
+        $eslintOut = npx eslint --format json --config $TmpCfg $TmpTsx 2>$eslintErrFile
     } else {
+        # ESLint 8: formato legado .eslintrc.json
+        # NODE_PATH ja setado acima — resolve plugins globais sem precisar de node_modules local
         $TmpCfg = Join-Path $TmpDir2 ".eslintrc.json"
         @'
 {
@@ -378,11 +399,14 @@ module.exports = [{ files: ["**/*.tsx"], plugins: { "jsx-a11y": jsxA11y }, langu
   "parser": "@typescript-eslint/parser",
   "parserOptions": { "ecmaVersion": 2022, "ecmaFeatures": {"jsx": true}, "sourceType": "module" },
   "plugins": ["jsx-a11y"],
-  "rules": { "jsx-a11y/alt-text": "error", "jsx-a11y/anchor-has-content": "error" }
+  "rules": {
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-has-content": "error",
+    "jsx-a11y/click-events-have-key-events": "error"
+  }
 }
 '@ | Out-File -FilePath $TmpCfg -Encoding UTF8
-        $eslintOut = npx eslint --format json --no-eslintrc --config $TmpCfg $TmpTsx 2>$null
-        $eslintErr = $null
+        $eslintOut = npx eslint --format json --no-eslintrc --config $TmpCfg $TmpTsx 2>$eslintErrFile
     }
 
     $count = try {
@@ -393,15 +417,20 @@ module.exports = [{ files: ["**/*.tsx"], plugins: { "jsx-a11y": jsxA11y }, langu
         Ok "ESLint jsx-a11y funcional: $count issues detectados no TSX de teste"
     } else {
         Warn "ESLint rodou mas encontrou 0 issues (esperado >= 1)"
-        if ($eslintErr) {
-            Warn "  Detalhe: $($eslintErr | Select-Object -First 2)"
+        $errContent = Get-Content $eslintErrFile -ErrorAction SilentlyContinue
+        if ($errContent) {
+            Warn "  stderr ESLint: $($errContent | Select-Object -First 4 | Out-String)"
+        } else {
+            Warn "  (nenhum stderr — plugin pode estar carregando mas sem regras ativas)"
         }
-        Warn "  Verifique: NODE_PATH=$env:NODE_PATH"
-        Warn "  Confirme: npm list -g eslint-plugin-jsx-a11y"
+        Warn "  NODE_PATH usado: $env:NODE_PATH"
+        Warn "  Config usada  : $TmpCfg"
+        Info "  Diagnostico manual: npx eslint --print-config $TmpTsx"
     }
 } catch {
     Warn "ESLint teste falhou: $_"
 } finally {
+    Remove-Item $eslintErrFile -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $TmpDir2 -ErrorAction SilentlyContinue
 }
 
