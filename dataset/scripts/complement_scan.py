@@ -445,24 +445,94 @@ async def complement_project(
 
     all_new_findings: list[Any] = []
 
+    # ── Integração com live_progress.py ──────────────────────────────────────
+    _progress_path = result_dir / "scan_progress.json"
+    _live_path     = RESULTS_DIR / "live_findings.jsonl"
+    _live_lock     = threading.Lock()
+    _scan_start    = datetime.now(tz=timezone.utc).isoformat()
+
+    def _write_progress(files_done: int, issues_so_far: int) -> None:
+        try:
+            _progress_path.write_text(
+                json.dumps({
+                    "project_id":    pid,
+                    "status":        "scanning",
+                    "total_files":   total_files,
+                    "files_done":    files_done,
+                    "issues_so_far": issues_so_far,
+                    "started_at":    _scan_start,
+                    "last_update":   datetime.now(tz=timezone.utc).isoformat(),
+                    "complement":    True,
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    _write_progress(0, 0)
+
     def _on_file_done(scan_result: Any) -> None:
         nonlocal new_by_tool
-        n = len(scan_result.issues) if scan_result.issues else 0
         for issue in (scan_result.issues or []):
             for tool in issue.found_by:
                 tv = tool.value if hasattr(tool, "value") else str(tool)
                 new_by_tool[tv] += 1
+
+        # Atualiza estado interno (display do complement_scan)
         with _state["lock"]:
             active = _state["active"].get(pid, {})
-            done = active.get("files_done", 0) + 1
+            done    = active.get("files_done", 0) + 1
+            iss_acc = active.get("issues_so_far", 0) + len(scan_result.issues or [])
             _state["active"][pid] = {
-                "pct": done / total_files * 100 if total_files else 100,
-                "files_done": done,
-                "files_total": total_files,
-                "new_by_tool": dict(new_by_tool),
+                "pct":           done / total_files * 100 if total_files else 100,
+                "files_done":    done,
+                "files_total":   total_files,
+                "issues_so_far": iss_acc,
+                "new_by_tool":   dict(new_by_tool),
             }
 
+        # Escreve scan_progress.json → live_progress.py lê isso
+        with _state["lock"]:
+            fd  = _state["active"].get(pid, {}).get("files_done", 0)
+            iss = _state["active"].get(pid, {}).get("issues_so_far", 0)
+        _write_progress(fd, iss)
+
+        # Appenda ao live_findings.jsonl → live_progress.py lê isso
+        lines = []
+        for issue in (scan_result.issues or []):
+            file_obj = getattr(scan_result, "file", None)
+            fname = file_obj.name if hasattr(file_obj, "name") else str(file_obj or "?")
+            lines.append(json.dumps({
+                "project_id":    pid,
+                "file":          fname,
+                "wcag_criteria": getattr(issue, "wcag_criteria", None),
+                "issue_type":    issue.issue_type.value
+                                 if hasattr(issue.issue_type, "value")
+                                 else str(issue.issue_type),
+                "impact":        getattr(issue, "impact", "moderate"),
+                "confidence":    issue.confidence.value
+                                 if hasattr(issue.confidence, "value")
+                                 else str(getattr(issue, "confidence", "low")),
+                "found_by":      [t.value if hasattr(t, "value") else str(t)
+                                  for t in (issue.found_by or [])],
+                "ts":            time.time(),
+                "complement":    True,
+            }, ensure_ascii=False))
+        if lines:
+            with _live_lock:
+                try:
+                    with open(_live_path, "a", encoding="utf-8") as fp:
+                        fp.write("\n".join(lines) + "\n")
+                except Exception:
+                    pass
+
     scan_results = await scanner.scan_files(files, "WCAG2AA", on_file_done=_on_file_done)
+
+    # Remove scan_progress.json → projeto sai do painel "Em andamento"
+    try:
+        _progress_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     for sr in scan_results:
         for issue in (sr.issues or []):
@@ -576,13 +646,17 @@ def _rewrite_summary(sm_path: Path, all_findings: list[dict],
             pass
 
     existing.update({
-        "total_issues":      len(all_findings),
-        "files_with_issues": len(files_set),
-        "by_criterion":      dict(by_criterion),
-        "by_type":           dict(by_type),
-        "by_impact":         dict(by_impact),
-        "by_principle":      dict(by_principle),
-        "tools_succeeded":   sorted(tools_succeeded),
+        "total_issues":       len(all_findings),
+        "files_with_issues":  len(files_set),
+        "by_criterion":       dict(by_criterion),
+        "by_type":            dict(by_type),
+        "by_impact":          dict(by_impact),
+        "by_principle":       dict(by_principle),
+        "tools_succeeded":    sorted(tools_succeeded),
+        # Atualiza scan_date para que live_progress.py ordene corretamente
+        # na lista de "Recém concluídos" após o complement scan
+        "scan_date":          datetime.now(tz=timezone.utc).isoformat(),
+        "complement_updated": True,
     })
     sm_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False),
                        encoding="utf-8")

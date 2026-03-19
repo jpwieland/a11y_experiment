@@ -260,20 +260,24 @@ def _build_active_panel(progress_items: list[dict]) -> Panel | Text:
         done_f     = item.get("files_done", 0)
         issues     = item.get("issues_so_far", 0)
         status     = item.get("status", "scanning")
-
-        # Calcula ETA
-        started    = item.get("started_at", "")
-        last_upd   = item.get("last_update", "")
+        is_complement = item.get("complement", False)
 
         pct_f = done_f / max(total_f, 1)
-        bar   = _progress_bar(done_f, total_f, width=16, style="bright_yellow")
+        bar   = _progress_bar(done_f, total_f, width=16,
+                              style="bright_cyan" if is_complement else "bright_yellow")
         bar.append(f" {pct_f:.0%}", style="dim white")
 
-        status_text = Text("scanning…", style="yellow") if status == "scanning" \
-                      else Text(status, style="dim red")
+        pid_text = Text()
+        if is_complement:
+            pid_text.append("[+] ", style="bright_cyan bold")
+        pid_text.append(pid[:26], style="white")
+
+        status_text = Text("complement…", style="bright_cyan") if is_complement \
+                      else (Text("scanning…", style="yellow") if status == "scanning"
+                            else Text(status, style="dim red"))
 
         tbl.add_row(
-            Text(pid[:30], style="white"),
+            pid_text,
             bar,
             f"{done_f}/{total_f}",
             str(issues) if issues else "—",
@@ -305,24 +309,36 @@ def _build_recent_panel(summaries: list[dict], show_n: int = 8) -> Panel:
         padding=(0, 1),
         expand=True,
     )
-    tbl.add_column("Projeto",       style="white",        min_width=28)
+    tbl.add_column("Projeto",       style="white",        min_width=26)
     tbl.add_column("Issues",        justify="right", style="yellow", width=7)
     tbl.add_column("High",          justify="right", style="green",  width=6)
-    tbl.add_column("Arquivos",      justify="right",               width=9)
+    tbl.add_column("Ferramentas",   style="dim cyan",              width=22)
     tbl.add_column("Duração",       justify="right", style="cyan",  width=9)
 
     for s in summaries[:show_n]:
-        pid      = s.get("_project_id", "?")
-        total_i  = s.get("total_issues", 0)
-        high_i   = s.get("high_confidence", 0)
-        files    = s.get("files_scanned", 0)
-        dur      = s.get("scan_duration_seconds", 0.0)
+        pid           = s.get("_project_id", "?")
+        total_i       = s.get("total_issues", 0)
+        high_i        = s.get("high_confidence", 0)
+        dur           = s.get("scan_duration_seconds", 0.0)
+        tools         = s.get("tools_succeeded", [])
+        is_complement = s.get("complement_updated", False)
+
+        pid_text = Text()
+        if is_complement:
+            pid_text.append("[+] ", style="bright_cyan bold")
+        pid_text.append(pid[:26], style="white")
+
+        tools_short = "+".join(
+            t.replace("playwright+axe", "axe")
+             .replace("eslint-jsx-a11y", "eslint")
+            for t in tools
+        ) or "—"
 
         tbl.add_row(
-            Text(pid[:30], style="white"),
+            pid_text,
             str(total_i) if total_i else "[dim]0[/dim]",
             str(high_i)  if high_i  else "[dim]—[/dim]",
-            str(files),
+            tools_short[:22],
             _fmt_dur(dur),
         )
 
@@ -341,29 +357,34 @@ def _build_findings_panel(findings: list[dict]) -> Panel:
             border_style="dim blue",
         )
 
-    by_wcag:   dict[str, int] = defaultdict(int)
-    by_impact: dict[str, int] = defaultdict(int)
-    by_conf:   dict[str, int] = defaultdict(int)
-    n_high = n_medium = n_low = 0
+    by_wcag:        dict[str, int] = defaultdict(int)
+    by_impact:      dict[str, int] = defaultdict(int)
+    by_tool:        dict[str, int] = defaultdict(int)
+    n_high = n_medium = n_low = n_complement = 0
 
     for f in findings:
         wcag = f.get("wcag_criteria") or "N/A"
         by_wcag[wcag] += 1
         by_impact[f.get("impact", "?")] += 1
         conf = f.get("confidence", "low")
-        by_conf[conf] += 1
         if conf == "high":
             n_high += 1
         elif conf == "medium":
             n_medium += 1
         else:
             n_low += 1
+        if f.get("complement"):
+            n_complement += 1
+        for t in (f.get("found_by") or []):
+            by_tool[str(t)] += 1
 
     total = len(findings)
 
     # Linha de resumo
     summary = Text("  ")
     summary.append(f"Total: {total}", style="bold yellow")
+    if n_complement:
+        summary.append(f"  (+{n_complement} complement)", style="bright_cyan")
     summary.append("  ", style="dim")
     summary.append(f"High: {n_high}", style="bold green")
     summary.append(f"  Med: {n_medium}", style="yellow")
@@ -398,10 +419,23 @@ def _build_findings_panel(findings: list[dict]) -> Panel:
         cnt = by_principle.get(pname, 0)
         p_row.append(f"  {pname[:4]}:{cnt}", style="dim cyan")
 
+    # Linha de ferramentas
+    tool_row = Text("  Ferramentas: ")
+    tool_labels = {
+        "playwright+axe":  ("axe",    "bright_blue"),
+        "pa11y":           ("pa11y",  "bright_cyan"),
+        "eslint-jsx-a11y": ("eslint", "bright_green"),
+        "lighthouse":      ("lh",     "yellow"),
+    }
+    for tool_key, (label, style) in tool_labels.items():
+        cnt = by_tool.get(tool_key, 0)
+        tool_row.append(f"  {label}:{cnt}", style=style if cnt else "dim")
+
     body = Table.grid(expand=True, padding=0)
     body.add_column()
     body.add_row(summary)
     body.add_row(imp_row)
+    body.add_row(tool_row)
     body.add_row(Text(""))
     body.add_row(wcag_row)
     body.add_row(p_row)
