@@ -221,15 +221,52 @@ async def scan_project(
         unique_files = unique_files[:max_files]
         print(f"  [{entry.id}] (limitado a {max_files} arquivos)")
 
+    # ── Tracking de progresso por arquivo ────────────────────────────────────
+    # Escreve scan_progress.json após cada arquivo para que live_progress.py
+    # possa exibir o andamento em tempo real.
+    _progress_path = result_dir / "scan_progress.json"
+    _files_done    = [0]
+    _issues_done   = [0]
+    _scan_start    = datetime.now(tz=timezone.utc).isoformat()
+
+    def _write_progress() -> None:
+        try:
+            _progress_path.write_text(
+                json.dumps({
+                    "project_id":  entry.id,
+                    "status":      "scanning",
+                    "total_files": len(unique_files),
+                    "files_done":  _files_done[0],
+                    "issues_so_far": _issues_done[0],
+                    "started_at":  _scan_start,
+                    "last_update": datetime.now(tz=timezone.utc).isoformat(),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    _write_progress()
+
+    _outer_on_file_done = on_file_done
+
+    def _progress_on_file_done(result: Any) -> None:
+        _files_done[0] += 1
+        _issues_done[0] += len(getattr(result, "issues", []))
+        _write_progress()
+        if _outer_on_file_done is not None:
+            _outer_on_file_done(result)
+
     print(f"  [{entry.id}] 🔍 Escaneando {len(unique_files)} arquivo(s)...")
     t0 = time.perf_counter()
 
     try:
         scan_results = await scanner.scan_files(
-            unique_files, wcag="WCAG2AA", on_file_done=on_file_done
+            unique_files, wcag="WCAG2AA", on_file_done=_progress_on_file_done
         )
     except Exception as e:
         print(f"  [{entry.id}] ❌ Erro no scan: {e}", file=sys.stderr)
+        _progress_path.unlink(missing_ok=True)
         entry.scan = ProjectScanSummary(status="error")
         entry.scan.error_message = str(e)[:500]
         return entry, []
@@ -281,6 +318,7 @@ async def scan_project(
         json.dumps(summary.model_dump(), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    _progress_path.unlink(missing_ok=True)  # scan concluído; live_progress.py lê summary.json
     with open(result_dir / "findings.jsonl", "w", encoding="utf-8") as fp:
         for finding in scan_findings:
             fp.write(finding.model_dump_json() + "\n")
@@ -408,29 +446,32 @@ async def main_async(args: argparse.Namespace) -> None:
     live_path.write_text("")          # limpa/cria o arquivo ao iniciar
     _live_lock = threading.Lock()     # protege escrita concorrente
 
-    def _on_file_done(result: Any) -> None:
-        """Callback chamado pelo orchestrator após cada arquivo ser escaneado."""
-        from a11y_autofix.config import Confidence
-        lines = []
-        for issue in result.issues:
-            lines.append(json.dumps({
-                "file":          result.file.name,
-                "wcag_criteria": issue.wcag_criteria,
-                "issue_type":    issue.issue_type.value
-                                 if hasattr(issue.issue_type, "value")
-                                 else str(issue.issue_type),
-                "impact":        issue.impact,
-                "confidence":    issue.confidence.value
-                                 if hasattr(issue.confidence, "value")
-                                 else str(issue.confidence),
-                "found_by":      [t.value if hasattr(t, "value") else str(t)
-                                  for t in issue.found_by],
-                "ts":            time.time(),
-            }))
-        if lines:
-            with _live_lock:
-                with open(live_path, "a", encoding="utf-8") as fp:
-                    fp.write("\n".join(lines) + "\n")
+    def _make_live_cb(project_id: str) -> Callable:
+        """Retorna um callback por-projeto para escrita no live_findings.jsonl.
+        Inclui project_id para que live_progress.py possa filtrar por projeto."""
+        def _cb(result: Any) -> None:
+            lines = []
+            for issue in result.issues:
+                lines.append(json.dumps({
+                    "project_id":  project_id,
+                    "file":          result.file.name,
+                    "wcag_criteria": issue.wcag_criteria,
+                    "issue_type":    issue.issue_type.value
+                                     if hasattr(issue.issue_type, "value")
+                                     else str(issue.issue_type),
+                    "impact":        issue.impact,
+                    "confidence":    issue.confidence.value
+                                     if hasattr(issue.confidence, "value")
+                                     else str(issue.confidence),
+                    "found_by":      [t.value if hasattr(t, "value") else str(t)
+                                      for t in issue.found_by],
+                    "ts":            time.time(),
+                }))
+            if lines:
+                with _live_lock:
+                    with open(live_path, "a", encoding="utf-8") as fp:
+                        fp.write("\n".join(lines) + "\n")
+        return _cb
 
     async def scan_with_sem(e: ProjectEntry) -> tuple[ProjectEntry, list[ScanFinding]]:
         # Não inicia novo projeto se shutdown foi solicitado
@@ -445,7 +486,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 min_consensus=args.min_consensus,
                 force=args.force,
                 max_files=args.max_files,
-                on_file_done=_on_file_done,
+                on_file_done=_make_live_cb(e.id),
             )
             # Salvar catálogo imediatamente após cada projeto concluído
             updated_entry, findings = result
