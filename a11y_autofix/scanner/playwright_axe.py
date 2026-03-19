@@ -32,12 +32,33 @@ _AXE_RUN_TIMEOUT_MS = 30_000     # 30s para execução do axe-core
 _RENDER_WAIT_MS = 600            # 600ms após React carregar (renderização)
 
 # Script para executar axe-core e retornar resultados como JSON
+#
+# Tags incluídas: wcag2a/aa, wcag21a/aa, wcag22aa + best-practice
+# (best-practice inclui regras úteis: heading-order, label-content-name-mismatch, etc.)
+#
+# Regras DESABILITADAS — page-level false positives em harness de componente isolado:
+#   - page-has-heading-one : componentes não são páginas; nunca têm <h1> de página
+#   - landmark-one-main    : o harness já provê role="main"; componentes não precisam
+#   - skip-link / bypass   : mecanismo de navegação de página, irrelevante em componente
+#   - region               : conteúdo já está dentro do role="main" do harness
+#   - document-title       : o harness já define <title>; regra não se aplica ao componente
+#
+# Essas regras geravam ~99% dos findings (1 por arquivo) ao mapear para WCAG 2.4.6
+# via fallback em detection.py, contaminando todo o dataset com falsos positivos.
 _AXE_RUN_SCRIPT = """
 async () => {
   const results = await window.axe.run(document, {
     runOnly: {
       type: 'tag',
       values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice']
+    },
+    rules: {
+      'page-has-heading-one': { enabled: false },
+      'landmark-one-main':    { enabled: false },
+      'skip-link':            { enabled: false },
+      'bypass':               { enabled: false },
+      'region':               { enabled: false },
+      'document-title':       { enabled: false },
     },
     reporter: 'v2',
     resultTypes: ['violations', 'incomplete']

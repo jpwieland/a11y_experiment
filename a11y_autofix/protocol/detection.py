@@ -192,13 +192,34 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
     "jsx-a11y/anchor-is-valid": IssueType.ARIA,
 }
 
+# ─── Regras de NÍVEL DE PÁGINA — excluídas do dataset ────────────────────────
+# Estas regras do axe-core (best-practice) verificam propriedades da PÁGINA como
+# um todo, não de componentes individuais. Em harness de componente isolado elas
+# geram falsos positivos sistemáticos (1 por arquivo), contaminando o dataset.
+#
+# A exclusão principal ocorre no scanner (playwright_axe.py), mas este set atua
+# como rede de segurança: se alguma ferramenta emitir esses rule_ids, eles são
+# descartados em DetectionProtocol._group_findings() antes de qualquer mapeamento.
+PAGE_LEVEL_RULES_EXCLUDED: frozenset[str] = frozenset({
+    "page-has-heading-one",   # componentes não são páginas; nunca têm <h1> de página
+    "landmark-one-main",      # harness já provê role="main"
+    "skip-link",              # mecanismo de navegação de página inteira
+    "bypass",                 # idem
+    "region",                 # conteúdo está dentro do role="main" do harness
+    "document-title",         # harness já define <title>
+})
+
 # ─── Mapeamento rule_id → WCAG criterion (fallback para regras sem wcag_criteria) ─
 # Usado quando a ferramenta não fornece wcag_criteria (ex: regras best-practice do
 # axe-core que não têm tag wcag* — page-has-heading-one, region, etc.).
 # Prioridade: wcag_criteria da ferramenta > este dicionário > None.
+#
+# Nota: as regras listadas em PAGE_LEVEL_RULES_EXCLUDED são filtradas antes de
+# chegar aqui, então os mapeamentos correspondentes nunca serão usados em produção.
+# Mantidos para documentar a intenção e para uso em ferramentas de análise ad-hoc.
 RULE_TO_WCAG_CRITERION: dict[str, str] = {
     # ── axe-core best-practice (sem tag wcag nativa) ─────────────────────────
-    "page-has-heading-one":     "2.4.6",   # Headings and Labels (AA)
+    "page-has-heading-one":     "2.4.6",   # Headings and Labels (AA) — page-level, filtrado
     "region":                   "1.3.1",   # Info and Relationships (A)
     "landmark-one-main":        "1.3.6",   # Identify Purpose (AAA) / best-practice
     "heading-order":            "1.3.1",   # Info and Relationships (A)
@@ -365,11 +386,22 @@ class DetectionProtocol:
 
         Chave de deduplicação: selector + wcag_criteria
         (normalizado para comparação case-insensitive).
+
+        Filtra automaticamente regras de nível de página (PAGE_LEVEL_RULES_EXCLUDED)
+        que geram falsos positivos sistemáticos em harness de componente isolado.
         """
         groups: dict[str, tuple[list[ToolFinding], list[ScanTool]]] = {}
 
         for tool, findings in findings_by_tool.items():
             for finding in findings:
+                # Descartar regras de nível de página — falsos positivos em componente
+                if finding.rule_id.lower() in PAGE_LEVEL_RULES_EXCLUDED:
+                    log.debug(
+                        "detection_page_level_rule_skipped",
+                        rule_id=finding.rule_id,
+                        file=str(file.name),
+                    )
+                    continue
                 key = self._dedup_key(finding)
                 if key not in groups:
                     groups[key] = ([], [])
