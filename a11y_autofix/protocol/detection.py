@@ -147,6 +147,7 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
     "html-xml-lang-mismatch": IssueType.SEMANTIC,
     "landmark-one-main": IssueType.SEMANTIC,
     "page-has-heading-one": IssueType.SEMANTIC,
+    "empty-heading": IssueType.SEMANTIC,
     "region": IssueType.SEMANTIC,
     "skip-link": IssueType.KEYBOARD,
     "duplicate-id": IssueType.SEMANTIC,
@@ -189,6 +190,54 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
     "jsx-a11y/role-has-required-aria-props": IssueType.ARIA,
     "jsx-a11y/role-supports-aria-props": IssueType.ARIA,
     "jsx-a11y/anchor-is-valid": IssueType.ARIA,
+}
+
+# ─── Mapeamento rule_id → WCAG criterion (fallback para regras sem wcag_criteria) ─
+# Usado quando a ferramenta não fornece wcag_criteria (ex: regras best-practice do
+# axe-core que não têm tag wcag* — page-has-heading-one, region, etc.).
+# Prioridade: wcag_criteria da ferramenta > este dicionário > None.
+RULE_TO_WCAG_CRITERION: dict[str, str] = {
+    # ── axe-core best-practice (sem tag wcag nativa) ─────────────────────────
+    "page-has-heading-one":     "2.4.6",   # Headings and Labels (AA)
+    "region":                   "1.3.1",   # Info and Relationships (A)
+    "landmark-one-main":        "1.3.6",   # Identify Purpose (AAA) / best-practice
+    "heading-order":            "1.3.1",   # Info and Relationships (A)
+    "skip-link":                "2.4.1",   # Bypass Blocks (A)
+    "focus-order-semantics":    "2.4.3",   # Focus Order (A)
+    "scrollable-region-focusable": "2.1.1", # Keyboard (A)
+    "identical-links-same-purpose": "2.4.4", # Link Purpose (AA)
+    # ── axe-core regras com WCAG mas que às vezes chegam sem critério ────────
+    "empty-heading":            "1.3.1",   # Info and Relationships (A)
+    "document-title":           "2.4.2",   # Page Titled (A)
+    "html-has-lang":            "3.1.1",   # Language of Page (A)
+    "html-lang-valid":          "3.1.1",   # Language of Page (A)
+    "html-xml-lang-mismatch":   "3.1.1",   # Language of Page (A)
+    "bypass":                   "2.4.1",   # Bypass Blocks (A)
+    "duplicate-id":             "4.1.1",   # Parsing (A)
+    "duplicate-id-active":      "4.1.1",   # Parsing (A)
+    "duplicate-id-aria":        "4.1.1",   # Parsing (A)
+    "list":                     "1.3.1",   # Info and Relationships (A)
+    "listitem":                 "1.3.1",   # Info and Relationships (A)
+    "definition-list":          "1.3.1",   # Info and Relationships (A)
+    "dlitem":                   "1.3.1",   # Info and Relationships (A)
+    "color-contrast":           "1.4.3",   # Contrast Minimum (AA)
+    "color-contrast-enhanced":  "1.4.6",   # Contrast Enhanced (AAA)
+    "image-alt":                "1.1.1",   # Non-text Content (A)
+    "input-image-alt":          "1.1.1",   # Non-text Content (A)
+    "object-alt":               "1.1.1",   # Non-text Content (A)
+    "button-name":              "4.1.2",   # Name, Role, Value (AA)
+    "link-name":                "4.1.2",   # Name, Role, Value (AA)
+    "label":                    "1.3.1",   # Info and Relationships (A)
+    "frame-title":              "4.1.2",   # Name, Role, Value (AA)
+    "meta-refresh":             "2.2.1",   # Timing Adjustable (A)
+    "meta-viewport":            "1.4.4",   # Resize Text (AA)
+    "tabindex":                 "2.1.1",   # Keyboard (A)
+    # ── pa11y / WCAG2AA rule IDs ─────────────────────────────────────────────
+    "WCAG2AA.Principle1.Guideline1_1.1_1_1.H37":    "1.1.1",
+    "WCAG2AA.Principle1.Guideline1_3.1_3_1.H42.2":  "1.3.1",
+    "WCAG2AA.Principle2.Guideline2_4.2_4_2.H25.1.NoTitleEl": "2.4.2",
+    "WCAG2AA.Principle3.Guideline3_1.3_1_1.H57.2":  "3.1.1",
+    "WCAG2AA.Principle4.Guideline4_1.4_1_2.H91.A.NoContent": "4.1.2",
 }
 
 # ─── Mapeamento WCAG → Complexity ───────────────────────────────────────────
@@ -364,13 +413,18 @@ class DetectionProtocol:
         # Calcular confiança
         confidence = self._compute_confidence(tools, primary.impact)
 
+        # Resolver wcag_criteria: usa o da ferramenta ou fallback pelo rule_id
+        wcag_criteria = primary.wcag_criteria
+        if not wcag_criteria and primary.rule_id:
+            wcag_criteria = RULE_TO_WCAG_CRITERION.get(primary.rule_id.lower())
+
         # Construir issue
         issue = A11yIssue(
             file=str(file),
             selector=primary.selector,
             issue_type=issue_type,
             complexity=complexity,
-            wcag_criteria=primary.wcag_criteria,
+            wcag_criteria=wcag_criteria,
             impact=primary.impact,
             confidence=confidence,
             found_by=tools,

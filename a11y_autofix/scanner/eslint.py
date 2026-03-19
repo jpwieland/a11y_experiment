@@ -320,17 +320,50 @@ class EslintRunner:
     # ─── Interface pública ────────────────────────────────────────────────────
 
     async def available(self) -> bool:
-        """Verifica se ESLint e jsx-a11y estão instalados."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "npx", "--yes", "eslint", "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-            return proc.returncode == 0
-        except (FileNotFoundError, asyncio.TimeoutError):
-            return False
+        """Verifica se ESLint e jsx-a11y estão instalados.
+
+        Estratégia multi-fallback (suporte a Windows e ambientes com PATH incompleto):
+          1. npx eslint --version        (instalação global padrão)
+          2. eslint --version            (binário no PATH diretamente)
+          3. node_modules/.bin/eslint    (instalação local, caso exista)
+        Retorna True se qualquer um responder com returncode 0.
+        """
+        candidates = [
+            ["npx", "--no-install", "eslint", "--version"],
+            ["eslint", "--version"],
+        ]
+        # Adicionar npm bin explícito (útil no Windows e servidores sem PATH completo)
+        npm_root = self._get_npm_root_g_sync()
+        if npm_root:
+            import platform
+            bin_dir = os.path.join(os.path.dirname(npm_root), "bin")
+            eslint_bin = os.path.join(bin_dir, "eslint.cmd" if platform.system() == "Windows" else "eslint")
+            if os.path.exists(eslint_bin):
+                candidates.insert(0, [eslint_bin, "--version"])
+
+        for cmd in candidates:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+                if proc.returncode == 0:
+                    ver = stdout.decode().strip()
+                    log.debug("eslint_available", cmd=cmd[0], version=ver)
+                    return True
+                # ESLint instalado mas incompatível com Node (returncode != 0)
+                err = (stdout.decode() + stderr.decode()).lower()
+                if "unsupported engine" in err or "node" in err:
+                    log.warning(
+                        "eslint_node_incompatible",
+                        cmd=cmd[0],
+                        hint="Atualize Node.js (≥18) ou instale eslint@8",
+                    )
+            except (FileNotFoundError, asyncio.TimeoutError, OSError):
+                continue
+        return False
 
     async def version(self) -> str:
         """Retorna versão do ESLint."""
