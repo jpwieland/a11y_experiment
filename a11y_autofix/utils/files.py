@@ -200,7 +200,7 @@ def build_html_harness(component_code: str, filename: str) -> str:
   </style>
 </head>
 <body>
-  <div id="root" role="main" aria-label="Component preview"></div>
+  <div id="root" aria-label="Component preview"></div>
 
   <!--
     Script inline (sem Babel) para:

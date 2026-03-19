@@ -201,12 +201,24 @@ RULE_TO_ISSUE_TYPE: dict[str, IssueType] = {
 # como rede de segurança: se alguma ferramenta emitir esses rule_ids, eles são
 # descartados em DetectionProtocol._group_findings() antes de qualquer mapeamento.
 PAGE_LEVEL_RULES_EXCLUDED: frozenset[str] = frozenset({
-    "page-has-heading-one",   # componentes não são páginas; nunca têm <h1> de página
-    "landmark-one-main",      # harness já provê role="main"
-    "skip-link",              # mecanismo de navegação de página inteira
-    "bypass",                 # idem
-    "region",                 # conteúdo está dentro do role="main" do harness
-    "document-title",         # harness já define <title>
+    # ── Regras que exigem contexto de PÁGINA COMPLETA ────────────────────────
+    "page-has-heading-one",        # componentes não são páginas; sem <h1> de página
+    "landmark-one-main",           # exige exatamente 1 <main>; harness não tem
+    "skip-link",                   # mecanismo de navegação de página inteira
+    "bypass",                      # idem
+    "region",                      # exige que TODO conteúdo esteja em landmark
+    "document-title",              # harness já define <title>
+
+    # ── Artefatos do harness — landmark duplicado ────────────────────────────
+    # O harness anterior tinha role="main" no #root. Quando o componente
+    # renderizava um <main>, o axe detectava dois landmarks main.
+    # Já corrigido em files.py (role="main" removido), mas mantido aqui
+    # como rede de segurança para resultados já salvos.
+    "landmark-no-duplicate-main",  # dois <main> = harness + componente
+    "landmark-main-is-top-level",  # <main> aninhado dentro de outro main
+
+    # ── Artefatos de cobertura — não são issues de acessibilidade ────────────
+    "frame-tested",                # axe não conseguiu acessar iframe; não é violação
 })
 
 # ─── Mapeamento rule_id → WCAG criterion (fallback para regras sem wcag_criteria) ─
@@ -244,6 +256,7 @@ RULE_TO_WCAG_CRITERION: dict[str, str] = {
     "color-contrast":           "1.4.3",   # Contrast Minimum (AA)
     "color-contrast-enhanced":  "1.4.6",   # Contrast Enhanced (AAA)
     "image-alt":                "1.1.1",   # Non-text Content (A)
+    "image-redundant-alt":      "1.1.1",   # Non-text Content (A) — texto alt redundante
     "input-image-alt":          "1.1.1",   # Non-text Content (A)
     "object-alt":               "1.1.1",   # Non-text Content (A)
     "button-name":              "4.1.2",   # Name, Role, Value (AA)
