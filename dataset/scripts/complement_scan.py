@@ -789,7 +789,21 @@ async def run(
         # Determinar ferramentas com problema
         broken = [t for t, d in diag.items()
                   if not d.get("ok") and t != "playwright+axe"]
-        tools_to_add = tools_filter or broken
+
+        if tools_filter:
+            # Usuário especificou ferramentas explicitamente
+            tools_to_add = tools_filter
+        elif broken:
+            # Há ferramentas quebradas: tentar corrigir e adicionar
+            tools_to_add = broken
+        else:
+            # Todas OK — complementar com as que funcionam além do playwright
+            # (pode haver projetos que foram escaneados antes do pa11y/eslint estarem
+            # disponíveis e portanto têm dados só do playwright+axe)
+            tools_to_add = [
+                t for t, d in diag.items()
+                if d.get("ok") and t not in ("playwright+axe",)
+            ]
 
         with _state["lock"]:
             _state["tools_to_add"] = tools_to_add
@@ -797,7 +811,7 @@ async def run(
         if not tools_to_add:
             with _state["lock"]:
                 _state["phase"] = "done"
-                _state["phase_label"] = "Todas ferramentas OK — nada a complementar."
+                _state["phase_label"] = "Nenhuma ferramenta de complemento disponível."
             await asyncio.sleep(1)
             return
 
