@@ -126,11 +126,22 @@ def _eta(t0: float, done: int, total: int) -> str:
     m, s = int(remaining) // 60, int(remaining) % 60
     return f"{m}m{s:02d}s"
 
+_IS_WINDOWS = platform.system() == "Windows"
+
+
 def _run(cmd: list[str], env: dict | None = None,
          timeout: int = 30) -> tuple[int, str, str]:
+    """Executa comando com suporte a Windows (.cmd não é resolvido sem shell=True)."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, env=env)
+        if _IS_WINDOWS:
+            # No Windows, subprocess sem shell=True não resolve .cmd do PATH
+            # (npx.cmd, eslint.cmd, pa11y.cmd). Usar shell=True + string resolve.
+            cmd_str = subprocess.list2cmdline(cmd)
+            r = subprocess.run(cmd_str, shell=True, capture_output=True, text=True,
+                               timeout=timeout, env=env)
+        else:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout, env=env)
         return r.returncode, r.stdout, r.stderr
     except FileNotFoundError:
         return -1, "", f"not found: {cmd[0]}"

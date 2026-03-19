@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
 import re
+import subprocess
 from pathlib import Path
 
 import structlog
@@ -23,14 +25,58 @@ from a11y_autofix.scanner.base import BaseRunner
 
 log = structlog.get_logger(__name__)
 
+
+def _npm_global_bin() -> Path | None:
+    """Retorna o diretório de binários globais do npm (com suporte a Windows)."""
+    try:
+        # No Windows, subprocess precisa de shell=True para resolver .cmd
+        result = subprocess.run(
+            "npm root -g",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        npm_root = result.stdout.strip()
+        if npm_root:
+            # npm_root = .../node_modules  → bin está um nível acima
+            return Path(npm_root).parent
+    except Exception:
+        pass
+    return None
+
+
+def _build_pa11y_candidates() -> list[list[str]]:
+    """Constrói lista de candidatos de comando pa11y com suporte a Windows."""
+    candidates: list[list[str]] = []
+
+    if platform.system() == "Windows":
+        # No Windows: .cmd não é resolvido pelo CreateProcess sem shell=True.
+        # Usar 'cmd /c' garante que o shell do Windows resolve pa11y.cmd / npx.cmd.
+        candidates += [
+            ["cmd", "/c", "pa11y"],
+            ["cmd", "/c", "npx", "pa11y"],
+        ]
+        # Tentar caminho absoluto via npm root
+        bin_dir = _npm_global_bin()
+        if bin_dir:
+            pa11y_cmd = bin_dir / "pa11y.cmd"
+            if pa11y_cmd.exists():
+                candidates.insert(0, [str(pa11y_cmd)])
+
+    # Candidatos universais (funcionam no Linux/macOS e Windows com PATH correto)
+    candidates += [
+        ["pa11y"],
+        ["npx", "pa11y"],
+        ["npx", "--yes", "pa11y"],    # download automático se ausente
+    ]
+    return candidates
+
+
 # Candidatos de comando para pa11y — testa cada um em ordem até encontrar um que funcione.
 # Resolve o problema de pa11y instalado mas não no PATH do subprocess Python
 # (comum ao rodar dentro de .venv ou com PATH customizado pelo npm).
-_PA11Y_CANDIDATES = [
-    ["pa11y"],                    # Instalado no PATH padrão
-    ["npx", "pa11y"],             # Via npx (encontra globals npm sem precisar do PATH)
-    ["npx", "--yes", "pa11y"],    # Via npx com download automático se ausente
-]
+_PA11Y_CANDIDATES = _build_pa11y_candidates()
 
 # Flags Chromium para melhor compatibilidade com file:// e CDN externo
 _CHROMIUM_FLAGS = " ".join([

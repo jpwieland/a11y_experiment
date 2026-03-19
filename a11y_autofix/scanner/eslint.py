@@ -18,11 +18,24 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import subprocess
 import tempfile
 from pathlib import Path
 
 import structlog
+
+
+def _npx_cmd() -> list[str]:
+    """Retorna o prefixo de comando para npx com suporte a Windows.
+
+    No Windows, asyncio.create_subprocess_exec não resolve arquivos .cmd
+    do PATH (CreateProcess não usa PATHEXT). Usar 'cmd /c npx' delega ao
+    shell do Windows que resolve npx.cmd automaticamente.
+    """
+    if platform.system() == "Windows":
+        return ["cmd", "/c", "npx"]
+    return ["npx"]
 
 from a11y_autofix.config import ScanTool, ToolFinding
 
@@ -263,7 +276,7 @@ class EslintRunner:
         if self._eslint_major is None:
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "npx", "eslint", "--version",
+                    *_npx_cmd(), "eslint", "--version",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -277,12 +290,19 @@ class EslintRunner:
         return self._eslint_major
 
     def _get_npm_root_g_sync(self) -> str:
-        """Retorna o caminho do npm root global (síncrono, com cache)."""
+        """Retorna o caminho do npm root global (síncrono, com cache).
+
+        Usa shell=True para garantir que npm.cmd seja resolvido no Windows,
+        onde subprocess sem shell não resolve arquivos .cmd do PATH.
+        """
         if self._npm_root_g is None:
             try:
                 result = subprocess.run(
-                    ["npm", "root", "-g"],
-                    capture_output=True, text=True, timeout=10,
+                    "npm root -g",          # string + shell=True → cmd.exe no Windows
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 self._npm_root_g = result.stdout.strip()
             except Exception:
@@ -328,16 +348,33 @@ class EslintRunner:
           3. node_modules/.bin/eslint    (instalação local, caso exista)
         Retorna True se qualquer um responder com returncode 0.
         """
-        candidates = [
+        is_windows = platform.system() == "Windows"
+
+        candidates: list[list[str]] = []
+
+        # No Windows, asyncio.create_subprocess_exec não resolve .cmd do PATH.
+        # 'cmd /c' delega ao shell do Windows que conhece PATHEXT (.cmd, .bat, etc.)
+        if is_windows:
+            candidates += [
+                ["cmd", "/c", "eslint", "--version"],
+                ["cmd", "/c", "npx", "--no-install", "eslint", "--version"],
+            ]
+
+        candidates += [
             ["npx", "--no-install", "eslint", "--version"],
             ["eslint", "--version"],
         ]
-        # Adicionar npm bin explícito (útil no Windows e servidores sem PATH completo)
+
+        # Adicionar npm bin explícito via caminho absoluto (mais confiável)
         npm_root = self._get_npm_root_g_sync()
         if npm_root:
-            import platform
-            bin_dir = os.path.join(os.path.dirname(npm_root), "bin")
-            eslint_bin = os.path.join(bin_dir, "eslint.cmd" if platform.system() == "Windows" else "eslint")
+            # npm_root = .../node_modules  → binários globais ficam um nível acima
+            # No Windows: eslint.cmd ; no Unix: eslint (sem extensão)
+            npm_bin_dir = os.path.dirname(npm_root)  # .../npm  (Windows) ou /usr/local/bin equiv
+            eslint_bin = os.path.join(
+                npm_bin_dir,
+                "eslint.cmd" if is_windows else "eslint",
+            )
             if os.path.exists(eslint_bin):
                 candidates.insert(0, [eslint_bin, "--version"])
 
@@ -369,7 +406,7 @@ class EslintRunner:
         """Retorna versão do ESLint."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "npx", "eslint", "--version",
+                *_npx_cmd(), "eslint", "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -420,7 +457,7 @@ class EslintRunner:
         cfg_path = self._write_flat_config(source_file.parent)
 
         cmd = [
-            "npx", "--yes", "eslint",
+            *_npx_cmd(), "--yes", "eslint",
             "--format", "json",
             "--config", str(cfg_path),
             str(source_file),
@@ -474,7 +511,7 @@ class EslintRunner:
         cfg_path = self._write_legacy_config(source_file.parent)
 
         cmd = [
-            "npx", "--yes", "eslint",
+            *_npx_cmd(), "--yes", "eslint",
             "--format", "json",
             "--no-eslintrc",
             "--config", str(cfg_path),
