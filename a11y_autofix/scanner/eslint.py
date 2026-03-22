@@ -606,6 +606,15 @@ class EslintRunner:
                     continue
 
                 rule_id = msg.get("ruleId") or "unknown"
+
+                # ── Filtro de escopo ────────────────────────────────────────
+                # O ESLint pode capturar regras do projeto (TypeScript, React,
+                # import, etc.) mesmo com flat config. Mantemos APENAS regras
+                # jsx-a11y — as únicas relevantes para acessibilidade.
+                if not rule_id.startswith("jsx-a11y/"):
+                    log.debug("eslint_non_a11y_rule_skipped", rule_id=rule_id)
+                    continue
+
                 meta = _RULE_META.get(rule_id, {})
 
                 line = msg.get("line", 1)

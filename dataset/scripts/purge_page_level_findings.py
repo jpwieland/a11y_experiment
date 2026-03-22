@@ -46,11 +46,44 @@ sys.path.insert(0, str(REPO_ROOT))
 PAGE_LEVEL_RULES: frozenset[str] = frozenset({
     "page-has-heading-one",
     "landmark-one-main",
+    "landmark-no-duplicate-main",
+    "landmark-main-is-top-level",
+    "landmark-contentinfo-is-top-level",
     "skip-link",
     "bypass",
     "region",
     "document-title",
+    "frame-tested",
 })
+
+# Prefixos de regras ESLint que NÃO são acessibilidade.
+# O ESLint pode capturar regras do .eslintrc do projeto (TypeScript, React, etc.).
+# Mantemos apenas jsx-a11y/*.
+NON_A11Y_ESLINT_PREFIXES: tuple[str, ...] = (
+    "@typescript-eslint/",
+    "react-hooks/",
+    "react/",
+    "import/",
+    "@next/",
+    "@angular-eslint/",
+    "ts/",
+    "no-catch-all/",
+    "unicorn/",
+    "perfectionist/",
+    "react-refresh/",
+    "jest/",
+    "cypress/",
+    "node/",
+    "jsdoc/",
+    "promise/",
+    "unused-imports/",
+    "header/",
+    "prettier/",
+    "no-secrets/",
+    "filenames-simple/",
+    "valid-jsdoc",
+    "@shopify/",
+)
 
 CRITERION_TO_PRINCIPLE: dict[str, str] = {
     "1": "perceivable",
@@ -135,12 +168,25 @@ def purge(dry_run: bool) -> None:
         clean: list[dict] = []
         removed: list[dict] = []
         for f in original:
-            rule = (f.get("rule_id") or "").lower()
-            if rule in PAGE_LEVEL_RULES:
+            rule = f.get("rule_id") or ""
+            rule_lower = rule.lower()
+            found_by = str(f.get("found_by", ""))
+
+            # 1. Artefatos de harness (landmark duplicado, frame-tested, etc.)
+            if rule_lower in PAGE_LEVEL_RULES:
                 removed.append(f)
-                rule_counts[rule] += 1
-            else:
-                clean.append(f)
+                rule_counts[f"[page-level] {rule_lower}"] += 1
+                continue
+
+            # 2. Regras ESLint não-a11y (TypeScript, React, import, etc.)
+            # O scanner pode capturar regras do .eslintrc do projeto.
+            # Mantemos APENAS regras jsx-a11y/* do eslint.
+            if "eslint" in found_by and not rule.startswith("jsx-a11y/"):
+                removed.append(f)
+                rule_counts[f"[non-a11y-eslint] {rule[:40]}"] += 1
+                continue
+
+            clean.append(f)
 
         total_before += len(original)
         total_after += len(clean)
@@ -231,3 +277,50 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ─── Modo cap: limitar findings por (rule_id × projeto) ───────────────────────
+
+def apply_rule_cap(results_dir: Path, cap: int = 10, dry_run: bool = False) -> None:
+    """
+    Aplica cap de N findings por (rule_id × projeto).
+
+    Justificativa metodológica: impede que um único projeto com 200 instâncias
+    da mesma regra domine a distribuição do dataset (reduz Gini e HHI).
+    O cap é aplicado preservando findings com maior diversidade de seletores.
+    """
+    total_removed = 0
+    for fp in sorted(results_dir.glob("*/findings.jsonl")):
+        lines = [l for l in fp.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if not lines:
+            continue
+        findings = []
+        for l in lines:
+            try: findings.append(json.loads(l))
+            except: pass
+
+        from collections import defaultdict
+        rule_buckets: dict = defaultdict(list)
+        for f in findings:
+            rule_buckets[f.get("rule_id","?")].append(f)
+
+        kept, removed = [], 0
+        for rule, group in rule_buckets.items():
+            if len(group) <= cap:
+                kept.extend(group)
+            else:
+                kept.extend(group[:cap])
+                removed += len(group) - cap
+
+        if removed > 0:
+            total_removed += removed
+            pid = fp.parent.name
+            print(f"  [cap={cap}] {pid[:50]:50s}  -{removed}")
+            if not dry_run:
+                with open(fp, "w", encoding="utf-8") as f:
+                    for row in kept:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    print(f"\nTotal removidos por cap={cap}: {total_removed}")
+    if dry_run:
+        print("(dry-run — nenhum arquivo modificado)")
