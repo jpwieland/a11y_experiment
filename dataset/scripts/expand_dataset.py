@@ -358,9 +358,9 @@ def candidates_to_entries(candidates: list[dict]) -> list[Any]:
         # IC1/IC2/IC3 já verificados; marcar como PASS
         screening = ScreeningRecord(
             ic1_stars=InclusionStatus.PASS,
-            ic2_recent_activity=InclusionStatus.PASS,
+            ic2_last_commit=InclusionStatus.PASS,
             ic3_license=InclusionStatus.PASS,
-            ic5_uses_react=InclusionStatus.UNKNOWN,  # confirmado no snapshot
+            ic5_buildability=InclusionStatus.NOT_CHECKED,  # confirmado no snapshot
         )
 
         github_meta = GitHubMetadata(
