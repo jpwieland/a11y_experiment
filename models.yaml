@@ -42,6 +42,21 @@ models:
     temperature: 0.1
     max_tokens: 16384
     tags: [coding, instruct, multilingual, large]
+    # VRAM: ~65 GB BF16 | ~33 GB FP8 | ~18 GB Q4_K_M
+    # 128 GB VRAM: BF16 confortável; roda com max_num_seqs=8
+
+  qwen2.5-coder-72b:
+    backend: vllm
+    base_url: "http://localhost:8000/v1"
+    model_id: "Qwen/Qwen2.5-Coder-7B-Instruct"   # substituir pelo 72B após pull
+    family: qwen
+    size: 72b
+    temperature: 0.1
+    max_tokens: 32768
+    tags: [coding, instruct, multilingual, sota, large]
+    # VRAM: ~144 GB BF16 → não cabe; ~72 GB FP8 → cabe em 128 GB VRAM
+    # Comando de serve: vllm serve Qwen/Qwen2.5-Coder-7B-Instruct \
+    #   --quantization fp8 --gpu-memory-utilization 0.92 --max-model-len 32768
 
   # ═══ DeepSeek Family ═══
   deepseek-coder-v2-16b:
@@ -55,13 +70,26 @@ models:
 
   deepseek-coder-v2-236b:
     backend: vllm
-    base_url: "http://gpu-server:8000/v1"
+    base_url: "http://localhost:8000/v1"
     model_id: "deepseek-ai/DeepSeek-Coder-V2-Instruct"
     family: deepseek
     size: 236b
     temperature: 0.1
     max_tokens: 16384
     tags: [coding, instruct, sota, large]
+    # VRAM: ~470 GB BF16 → NÃO CABE em 128 GB.
+    # Usar deepseek-coder-v2-16b (variante lite) como substituto prático.
+
+  deepseek-coder-v2-lite:
+    backend: vllm
+    base_url: "http://localhost:8000/v1"
+    model_id: "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+    family: deepseek
+    size: 16b
+    temperature: 0.1
+    max_tokens: 16384
+    tags: [coding, instruct, fill-in-middle]
+    # VRAM: ~32 GB BF16 — cabe fácil em 128 GB VRAM
 
   # ═══ CodeLlama Family ═══
   codellama-7b:
@@ -114,6 +142,19 @@ models:
     max_tokens: 8192
     tags: [coding, instruct, fill-in-middle]
 
+  # ═══ StarCoder2 ═══
+  starcoder2-15b:
+    backend: ollama
+    model_id: "starcoder2:15b"
+    family: starcoder
+    size: 15b
+    temperature: 0.1
+    max_tokens: 8192
+    tags: [coding, fill-in-middle, open-science]
+    # VRAM: ~9 GB (Q4_K_M) -- cabe em RTX 4090 (24 GB VRAM)
+    # Treinado por BigCode (HuggingFace + ServiceNow + Nvidia)
+    # 600+ linguagens, 4T tokens de código
+
 # Grupos de modelos para experimentos comparativos
 model_groups:
   small_models:
@@ -129,8 +170,22 @@ model_groups:
 
   large_models:
     - qwen2.5-coder-32b
-    - deepseek-coder-v2-236b
+    - deepseek-coder-v2-lite
     - codellama-34b
+
+  # Grupo ideal para GPU com 128 GB VRAM
+  # Cobre small → large para análise comparativa estatística
+  gpu_128gb:
+    - qwen2.5-coder-7b        # ~4  GB Q4  — baseline
+    - qwen2.5-coder-14b       # ~9  GB Q4  — mid
+    - deepseek-coder-v2-lite  # ~32 GB BF16 — comparison
+    - qwen2.5-coder-32b       # ~65 GB BF16 — large (SOTA coding)
+
+  # Experimento principal do corpus (H1/H3/H5)
+  corpus_experiment:
+    - qwen2.5-coder-7b
+    - qwen2.5-coder-14b
+    - qwen2.5-coder-32b
 
   all_qwen:
     - qwen2.5-coder-7b
@@ -146,6 +201,15 @@ model_groups:
     - qwen2.5-coder-7b
     - qwen2.5-coder-14b
     - deepseek-coder-v2-16b
+
+  # Experimento comparativo principal — 3 famílias diferentes em ~14B
+  # Objetivo: avaliar qual arquitetura/família produz melhores correções a11y
+  # Hardware: RTX 4090 (24 GB VRAM) — todos via ollama Q4_K_M
+  # VRAM total por modelo: ~9-10 GB; modelos carregados um de cada vez (cold-start)
+  experiment_14b:
+    - qwen2.5-coder-14b      # Qwen2.5-Coder (Alibaba) — SOTA código 14B
+    - deepseek-coder-v2-16b  # DeepSeek-Coder-V2 Lite (DeepSeek AI) — FIM + instruct
+    - starcoder2-15b         # StarCoder2 (BigCode/HuggingFace) — open-science
 
   # Grupo para GPU com apenas 4 GB VRAM (ex: GTX 1650, RTX 3050)
   # Modelos que cabem totalmente ou com partial offload mínimo
