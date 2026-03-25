@@ -64,16 +64,56 @@ done
 
 mkdir -p "$LOG_DIR"
 
-# ── Detectar Python ───────────────────────────────────────────────────────────
-if [[ -f "${VENV_PATH}/bin/python" ]]; then
-    PYTHON="${VENV_PATH}/bin/python"
-    ACTIVATE="source '${VENV_PATH}/bin/activate' && "
-elif command -v python3 &>/dev/null; then
-    PYTHON="$(command -v python3)"
-    ACTIVATE=""
+# ── Localizar Python base ─────────────────────────────────────────────────────
+if command -v python3 &>/dev/null; then
+    PYTHON_BASE="$(command -v python3)"
+elif command -v python &>/dev/null; then
+    PYTHON_BASE="$(command -v python)"
 else
-    echo "${RED}✘  Python3 não encontrado.${R}"; exit 1
+    echo "${RED}✘  Python3 não encontrado no PATH.${R}"; exit 1
 fi
+
+# ── Setup do venv (cria e instala se necessário) ──────────────────────────────
+setup_venv() {
+    # Verificar se o venv existe e tem o binário a11y-autofix instalado
+    if [[ -x "${VENV_PATH}/bin/a11y-autofix" ]]; then
+        return 0  # já pronto
+    fi
+
+    echo ""
+    echo "${YELLOW}  Configurando ambiente virtual...${R}"
+
+    # Criar venv se não existir
+    if [[ ! -f "${VENV_PATH}/bin/python" ]]; then
+        echo "  Criando venv em ${VENV_PATH} ..."
+        "$PYTHON_BASE" -m venv "${VENV_PATH}" || {
+            echo "${RED}  ✘  Falha ao criar venv.${R}"; exit 1
+        }
+    fi
+
+    local pip="${VENV_PATH}/bin/pip"
+
+    # Instalar o pacote em modo editable
+    echo "  Instalando a11y-autofix (pip install -e .) ..."
+    "$pip" install --quiet --upgrade pip
+    "$pip" install --quiet -e "${SCRIPT_DIR}" || {
+        echo "${RED}  ✘  Falha no pip install. Verifique a saída acima.${R}"; exit 1
+    }
+
+    if [[ ! -x "${VENV_PATH}/bin/a11y-autofix" ]]; then
+        echo "${RED}  ✘  Binário a11y-autofix não encontrado após instalação.${R}"
+        echo "  Verifique o pyproject.toml → [project.scripts]."
+        exit 1
+    fi
+
+    echo "${GREEN}  ✔  Ambiente configurado.${R}"
+}
+
+setup_venv
+
+# Caminhos absolutos — nunca dependem de PATH ou source activate
+PYTHON="${VENV_PATH}/bin/python"
+A11Y_BIN="${VENV_PATH}/bin/a11y-autofix"
 
 # ── Detectar multiplexer disponível ──────────────────────────────────────────
 detect_muxer() {
@@ -258,8 +298,9 @@ if session_exists; then
 fi
 
 # ── Verificar multiplexer — tentar instalar dtach se nada disponível ──────────
-echo "${GREEN}✔${R}  Python: $($PYTHON --version)"
-echo "${GREEN}✔${R}  Config: ${CONFIG}"
+echo "${GREEN}✔${R}  Python:    $($PYTHON --version)"
+echo "${GREEN}✔${R}  a11y-bin:  ${A11Y_BIN}"
+echo "${GREEN}✔${R}  Config:    ${CONFIG}"
 
 case "$MUXER" in
     screen) echo "${GREEN}✔${R}  Multiplexer: screen $(screen --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\S*' || echo '')" ;;
@@ -288,7 +329,8 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # ── Montar comando do experimento ─────────────────────────────────────────────
-EXP_CMD="${ACTIVATE}a11y-autofix experiment '${CONFIG}'"
+# Usa caminho absoluto — não depende de PATH nem de source activate
+EXP_CMD="'${A11Y_BIN}' experiment '${CONFIG}'"
 
 if [[ -n "$OUTPUT_DIR" ]]; then
     EXP_CMD="${EXP_CMD} --output '${OUTPUT_DIR}'"
@@ -330,7 +372,7 @@ if $OPEN_WATCH && [[ "$MUXER" == "tmux" ]] && command -v tmux &>/dev/null; then
     sleep 1
     tmux split-window -t "${SESSION}" -v -p 28
     tmux send-keys -t "${SESSION}.1" \
-        "sleep 8 && cd '${SCRIPT_DIR}' && ${PYTHON} watch_experiment.py --interval 4" Enter
+        "sleep 8 && '${PYTHON}' '${SCRIPT_DIR}/watch_experiment.py' --interval 4" Enter
     tmux select-pane -t "${SESSION}.0"
 fi
 
