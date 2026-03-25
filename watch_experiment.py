@@ -119,6 +119,43 @@ def _count_checkpoints(output_dir: Path) -> dict[str, dict]:
     return counts
 
 
+def _read_gpu_stats() -> str | None:
+    """Lê VRAM atual via nvidia-smi (sincrono, para o dashboard)."""
+    import shutil
+    import subprocess
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return None
+        lines = []
+        for line in r.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 6:
+                continue
+            idx, name, used, total, util, temp = parts[:6]
+            used_gb = int(used) / 1024
+            total_gb = int(total) / 1024
+            pct = int(used) / max(int(total), 1) * 100
+            bar_w = 14
+            filled = round(min(pct / 100, 1.0) * bar_w)
+            bar = GREEN + "█" * filled + DIM + "░" * (bar_w - filled) + R
+            lines.append(
+                f"  GPU {idx} {CYAN}{name[:24]:<24}{R}  "
+                f"VRAM [{bar}] {CYAN}{used_gb:.1f}{R}/{total_gb:.0f} GB  "
+                f"Util {YELLOW}{util:>3}%{R}  {DIM}{temp}°C{R}"
+            )
+        return "\n".join(lines) if lines else None
+    except Exception:
+        return None
+
+
 def _load_clone_log(output_dir: Path) -> list[dict]:
     fp = output_dir / "auto_clone.jsonl"
     if not fp.exists():
@@ -225,6 +262,13 @@ def render(output_dir: Path) -> list[str]:
         f"Sucesso: {GREEN}{total_success}{R}  "
         f"SR: {CYAN}{_pct(total_success, total_done)}{R}  "
         f"IFR: {GREEN}{_pct(total_issues_fixed, total_issues)}{R}")
+
+    # ── GPU ───────────────────────────────────────────────────────────────────
+    gpu_str = _read_gpu_stats()
+    if gpu_str:
+        add()
+        add(f"  {BOLD}GPU{R}")
+        add(gpu_str)
 
     # ── Auto-clones ───────────────────────────────────────────────────────────
     if clones:

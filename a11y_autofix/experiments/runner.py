@@ -33,6 +33,7 @@ from a11y_autofix.config import ExperimentResult, FixResult, Settings
 from a11y_autofix.experiments.config_schema import ExperimentConfig, load_experiment_config
 from a11y_autofix.experiments.metrics import compute_experiment_metrics
 from a11y_autofix.llm.registry import ModelRegistry
+from a11y_autofix.utils.gpu_monitor import GpuMonitor
 
 if TYPE_CHECKING:
     from a11y_autofix.pipeline import Pipeline
@@ -229,6 +230,17 @@ class _ProgressTracker:
 _DEFAULT_SENSITIVITY_TEMPERATURES = [0.0, 0.1, 0.3, 0.5, 1.0]
 
 
+def _override_concurrency(settings: "Settings", max_concurrent_agents: int) -> "Settings":
+    """
+    Retorna uma cópia das settings com max_concurrent_agents sobrescrito.
+    Usado pelo scheduler dinâmico para ajustar o paralelismo por modelo.
+    """
+    import copy
+    s = copy.copy(settings)
+    object.__setattr__(s, "max_concurrent_agents", max_concurrent_agents)
+    return s
+
+
 class ExperimentRunner:
     """
     Executa experimentos comparativos entre múltiplos modelos LLM.
@@ -299,6 +311,14 @@ class ExperimentRunner:
         # ── Progress tracker (lido por watch_experiment.py) ───────────────────
         tracker = _ProgressTracker(output_dir, models_to_test, len(files))
 
+        # ── GPU monitor para paralelismo dinâmico ─────────────────────────────
+        gpu_monitor = GpuMonitor(poll_interval=5.0)
+        gpu_available = await gpu_monitor.start()
+        if gpu_available:
+            log.info("gpu_monitor_active", stats=gpu_monitor.format_stats())
+        else:
+            log.info("gpu_monitor_inactive", reason="nvidia-smi not available — using static concurrency")
+
         sem = asyncio.Semaphore(self.settings.max_concurrent_models)
 
         async def run_model(model_name: str) -> tuple[str, list[FixResult]]:
@@ -306,9 +326,37 @@ class ExperimentRunner:
                 model_output = output_dir / model_name.replace("/", "_")
                 model_output.mkdir(exist_ok=True)
                 await tracker.set_model_status(model_name, "loading")
+
+                # Decidir concorrência de LLM baseada em VRAM disponível
+                # antes do cold-start (modelo ainda não carregado = mais VRAM livre)
+                model_vram_gb = self._estimate_model_vram(model_name)
+                llm_concurrency = gpu_monitor.recommend_concurrency(
+                    model_vram_gb=model_vram_gb,
+                    base=self.settings.max_concurrent_agents,
+                )
+                log.info("dynamic_concurrency_set",
+                         model=model_name,
+                         llm_concurrency=llm_concurrency,
+                         gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
+
                 # Cold-start: stop and restart model server before each condition
                 await self._cold_start_model(model_name, condition_id=f"{model_name}/{config.name}")
                 await tracker.set_model_status(model_name, "running")
+
+                # Após cold-start o modelo está carregado: recalcular com VRAM real
+                await asyncio.sleep(2.0)  # aguardar nvidia-smi atualizar
+                llm_concurrency_loaded = gpu_monitor.recommend_concurrency(
+                    model_vram_gb=model_vram_gb,
+                    base=self.settings.max_concurrent_agents,
+                )
+                if llm_concurrency_loaded != llm_concurrency:
+                    log.info("dynamic_concurrency_adjusted",
+                             model=model_name,
+                             before=llm_concurrency,
+                             after=llm_concurrency_loaded,
+                             gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
+                    llm_concurrency = llm_concurrency_loaded
+
                 result = await self._run_single_model(
                     model_name=model_name,
                     files=files,
@@ -316,6 +364,8 @@ class ExperimentRunner:
                     output_dir=model_output,
                     checkpoints_dir=checkpoints_dir,
                     tracker=tracker,
+                    llm_concurrency=llm_concurrency,
+                    gpu_monitor=gpu_monitor,
                 )
                 await tracker.set_model_status(model_name, "done")
                 return result
@@ -336,6 +386,7 @@ class ExperimentRunner:
 
         metrics = compute_experiment_metrics(results_by_model)
         tracker.finish()
+        await gpu_monitor.stop()
 
         experiment_result = ExperimentResult(
             experiment_id=exp_id,
@@ -537,6 +588,23 @@ class ExperimentRunner:
 
     # ── Single model run ───────────────────────────────────────────────────
 
+    def _estimate_model_vram(self, model_name: str) -> float:
+        """
+        Estima VRAM necessária em GB para um modelo, baseado no nome.
+        Usado pelo scheduler dinâmico para calcular headroom disponível.
+        Fallback conservador: 10 GB para modelos ~14B Q4.
+        """
+        name_lower = model_name.lower()
+        if "32b" in name_lower or "33b" in name_lower:
+            return 20.0
+        if "14b" in name_lower or "16b" in name_lower or "15b" in name_lower:
+            return 10.0
+        if "7b" in name_lower or "8b" in name_lower:
+            return 6.0
+        if "3b" in name_lower or "1b" in name_lower:
+            return 3.0
+        return 10.0  # conservador
+
     async def _run_single_model(
         self,
         model_name: str,
@@ -545,13 +613,21 @@ class ExperimentRunner:
         output_dir: Path,
         checkpoints_dir: Path,
         tracker: "_ProgressTracker | None" = None,
+        llm_concurrency: int | None = None,
+        gpu_monitor: "GpuMonitor | None" = None,
     ) -> tuple[str, list[FixResult]]:
         """Run the full pipeline for a single model and checkpoint each file."""
         model_config = self.registry.get(model_name)
         pipeline = self.pipeline_factory(model_config)
 
+        # Usar concorrência dinâmica fornecida ou cair no default das settings
+        effective_concurrency = llm_concurrency or self.settings.max_concurrent_agents
+        # Substituir o semáforo padrão do pipeline pelo valor dinâmico
+        pipeline.settings = _override_concurrency(pipeline.settings, effective_concurrency)
+
         t0 = time.monotonic()
-        log.info("experiment_model_start", model=model_name, files=len(files))
+        log.info("experiment_model_start", model=model_name, files=len(files),
+                 llm_concurrency=effective_concurrency)
 
         # Callback chamado pelo pipeline após cada arquivo
         async def _on_file_done(fix_result: FixResult) -> None:
