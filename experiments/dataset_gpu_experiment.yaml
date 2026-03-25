@@ -1,0 +1,155 @@
+# experiments/dataset_gpu_experiment.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Experimento principal — correção com LLM no corpus real do dataset
+#
+# Objetivos científicos:
+#   H1: Detectar issues a11y com precision ≥ 0.80 (δ ≥ 0.80)
+#   H3: Corrigir issues com taxa ≥ 0.70 (τ ≥ 0.70)
+#   H5: Regressão funcional < 5% (ρ < 0.05)
+#   Comparativo: 7B vs 14B vs 32B — impacto do tamanho do modelo
+#
+# GPU recomendada: ≥ 40 GB VRAM (32B em FP8) | 128 GB VRAM (32B em BF16 full)
+#
+# Duração estimada (128 GB VRAM, 3 modelos, 35 projetos):
+#   ~4-8 horas por repetição → 12-24 horas total (3 repetições)
+#
+# Uso:
+#   a11y-autofix experiment experiments/dataset_gpu_experiment.yaml
+#   a11y-autofix experiment experiments/dataset_gpu_experiment.yaml --output results/gpu_run_1
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Dataset GPU Experiment — Full Corpus A11y Correction"
+description: |
+  Experimento principal de correção automática de acessibilidade no corpus real.
+  Compara modelos Qwen2.5-Coder de diferentes tamanhos (7B, 14B, 32B) na
+  correção de issues WCAG 2.1 AA detectados por múltiplas ferramentas.
+  Métricas: detection rate (δ), correction rate (τ), regression rate (ρ),
+  tokens consumidos, tempo por arquivo, distribição por tipo de issue.
+
+# ── Modelos a comparar ──────────────────────────────────────────────────────
+models:
+  - qwen2.5-coder-7b       # baseline small     (~4 GB VRAM Q4)
+  - qwen2.5-coder-14b      # mid-size           (~9 GB VRAM Q4)
+  - qwen2.5-coder-32b      # large (vLLM/BF16)  (~65 GB VRAM BF16)
+
+# ── Projetos reais do corpus (amostra representativa — 35 projetos) ─────────
+# Selecionados para cobrir todos os 7 domínios e priorizar projetos
+# com issues diversas (não apenas semantic/operable).
+# Paths relativos à raiz do repositório; os snapshots são re-clonados
+# automaticamente via snapshot.py --project <id> se não existirem.
+project_ids:
+  # Dashboard (5 projetos)
+  - AHMAD-JX__Hozn-RealEstate-Fullstack
+  - edp963__davinci
+  - arpanghosh8453__open-dronelog
+  - builderz-labs__mission-control
+  - Kanaries__graphic-walker
+  # Developer Tools (5 projetos)
+  - alibaba-fusion__next
+  - FeatureProbe__FeatureProbe
+  - arco-design__arco-design
+  - cloudscape-design__components
+  - debba__tabularis
+  # E-commerce (5 projetos)
+  - aelassas__bookcars
+  - BuilderIO__mitosis
+  - aelassas__movinin
+  - CromwellCMS__Cromwell
+  - BuilderIO__builder
+  # Education (5 projetos)
+  - LHRUN__paint-board
+  - angellikgh__react-design-editor
+  - F-star__suika
+  - WindRunnerMax__CanvasEditor
+  - KartikLabhshetwar__screenshot-studio
+  # Government (5 projetos)
+  - codeforpdx__recordexpungPDX
+  - JustFixNYC__who-owns-what
+  - demokratie-live__democracy-development
+  - codyogden__killedbygoogle
+  - cds-snc__gcds-components
+  # Healthcare (5 projetos)
+  - OHIF__Viewers
+  - Snouzy__workout-cool
+  - beda-software__fhir-emr
+  - DouglasNeuroInformatics__OpenDataCapture
+  - aphp__Cohort360-FrontEnd
+  # Social (5 projetos)
+  - OvidijusParsiunas__deep-chat
+  - agnaistic__agnai
+  - dream-num__univer
+  - Privoce__vocechat-web
+  - Linen-dev__linen.dev
+
+# ── Nível WCAG e ferramentas ────────────────────────────────────────────────
+wcag_level: AA
+
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+  - eslint-jsx-a11y
+
+# ── Agentes ─────────────────────────────────────────────────────────────────
+agents:
+  - auto          # roteamento automático (openhands para complex, swe para simple)
+
+# ── Configuração estatística ─────────────────────────────────────────────────
+# 3 repetições por modelo para robustez estatística (reduz variância do LLM)
+repetitions: 3
+
+# ── Paralelismo (ajuste conforme VRAM disponível) ───────────────────────────
+max_concurrent_models: 1     # 1 modelo de cada vez (32B precisa de ~65 GB VRAM)
+max_concurrent_agents: 4     # 4 arquivos em paralelo por modelo
+max_concurrent_scans: 6      # 6 scans paralelos (scanners são leves)
+
+# ── Timeouts ────────────────────────────────────────────────────────────────
+scan_timeout_s: 120          # segundos por arquivo no scanner
+agent_timeout_s: 600         # segundos por arquivo no agente LLM (32B é mais lento)
+model_load_timeout_s: 180    # aguardar modelo carregar na VRAM
+
+# ── Temperatura e reprodutibilidade ─────────────────────────────────────────
+temperature: 0.1             # baixa para resultados determinísticos
+seed: 42                     # seed para reprodutibilidade
+
+# ── Métricas a calcular ──────────────────────────────────────────────────────
+metrics:
+  - detection_rate           # δ = issues_detected / total_issues (H1)
+  - correction_rate          # τ = issues_fixed / issues_detected  (H3)
+  - regression_rate          # ρ = regressions / patches_applied   (H5)
+  - precision                # precision no conjunto com ground-truth
+  - tokens_used              # consumo de tokens por arquivo
+  - time_per_file_s          # tempo de processamento por arquivo
+  - issues_by_type           # breakdown: semantic, contrast, aria, label, alt-text
+  - issues_by_wcag_principle # breakdown: P1-P4
+  - fix_by_agent             # quais fixes vieram de openhands vs swe-agent
+
+# ── Formato de saída ─────────────────────────────────────────────────────────
+output_format:
+  - json      # dados brutos completos (audit trail)
+  - html      # relatório visual interativo com diffs
+  - csv       # dados para análise estatística (pandas/R)
+  - latex     # tabelas para artigo científico
+
+output_dir: experiment-results/dataset_gpu_experiment
+
+# ── Configurações avançadas ──────────────────────────────────────────────────
+advanced:
+  # Se snapshot não existe, clonar automaticamente antes de escanear
+  auto_clone_missing_snapshots: true
+
+  # Salvar checkpoint por projeto (permite retomar se interrompido)
+  checkpoint_per_project: true
+  checkpoint_dir: experiment-results/dataset_gpu_experiment/checkpoints
+
+  # Salvar diff antes/depois de cada arquivo corrigido
+  save_diffs: true
+
+  # Validar com compilação TypeScript após correção (tsc --noEmit)
+  typescript_validation: false  # desabilitado (lento, nem todo projeto tem tsconfig)
+
+  # Limite de arquivos por projeto (null = todos)
+  max_files_per_project: null
+
+  # Incluir projetos com 0 issues (para baseline)
+  include_zero_issue_projects: true

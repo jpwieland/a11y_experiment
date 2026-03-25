@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,6 +78,7 @@ class Pipeline:
         targets: list[Path] | list[str],
         wcag_level: str = "WCAG2AA",
         output_dir: Path | None = None,
+        on_file_done: Callable | None = None,
     ) -> list[FixResult]:
         """
         Executa o pipeline completo para uma lista de targets.
@@ -129,7 +131,7 @@ class Pipeline:
             if not isinstance(scan, ScanResult):
                 raise TypeError
             if not scan.has_issues:
-                return FixResult(
+                result = FixResult(
                     file=scan.file,
                     scan_result=scan,
                     final_success=True,
@@ -137,8 +139,14 @@ class Pipeline:
                     issues_pending=0,
                     total_time=0.0,
                 )
-            async with sem:
-                return await self._fix_file(scan, wcag_level)
+            else:
+                async with sem:
+                    result = await self._fix_file(scan, wcag_level)
+            if on_file_done is not None:
+                cb = on_file_done(result)
+                if asyncio.iscoroutine(cb):
+                    await cb
+            return result
 
         fix_results = await asyncio.gather(*[fix_with_sem(s) for s in scan_results])
 

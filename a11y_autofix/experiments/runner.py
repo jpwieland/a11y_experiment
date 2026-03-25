@@ -39,6 +39,193 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+
+# ── Auto-clone helpers ─────────────────────────────────────────────────────────
+
+def _load_catalog_urls(catalog_path: Path) -> dict[str, str]:
+    """Carrega mapa project_id → github_url do catalog YAML."""
+    try:
+        import yaml
+        with open(catalog_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return {
+            p.get("id", ""): p.get("github_url", "")
+            for p in data.get("projects", [])
+            if p.get("id") and p.get("github_url")
+        }
+    except Exception as exc:
+        log.warning("catalog_load_failed", error=str(exc))
+        return {}
+
+
+def _clone_snapshot(project_id: str, github_url: str,
+                    snapshot_dir: Path, clone_log: Path) -> bool:
+    """
+    Clona um repositório em snapshot_dir via git clone --depth 1.
+    Registra o evento em clone_log (JSONL).
+    Retorna True em sucesso.
+    """
+    event: dict[str, Any] = {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "project_id": project_id,
+        "github_url": github_url,
+        "snapshot_dir": str(snapshot_dir),
+        "status": "pending",
+    }
+    t0 = time.monotonic()
+    try:
+        snapshot_dir.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", "--single-branch",
+             github_url, str(snapshot_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+        elapsed = round(time.monotonic() - t0, 1)
+        if result.returncode == 0:
+            event.update({"status": "cloned", "elapsed_s": elapsed})
+            log.info("snapshot_auto_cloned", project_id=project_id,
+                     elapsed_s=elapsed, path=str(snapshot_dir))
+        else:
+            event.update({"status": "error", "error": result.stderr[:300],
+                          "elapsed_s": elapsed})
+            log.error("snapshot_clone_failed", project_id=project_id,
+                      error=result.stderr[:200])
+    except Exception as exc:
+        event.update({"status": "error", "error": str(exc)})
+        log.error("snapshot_clone_exception", project_id=project_id, error=str(exc))
+
+    # Gravar no log JSONL
+    try:
+        clone_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(clone_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+    return event["status"] == "cloned"
+
+
+def ensure_snapshots(config: ExperimentConfig, output_dir: Path) -> list[str]:
+    """
+    Verifica se todos os diretórios de snapshot do config existem.
+    Clona automaticamente os que estiverem faltando.
+
+    Retorna lista de project_ids clonados nesta chamada.
+    """
+    from pathlib import Path as _Path
+    repo_root = _Path(__file__).parent.parent.parent
+    catalog_path = repo_root / "dataset" / "catalog" / "projects.yaml"
+    clone_log = output_dir / "auto_clone.jsonl"
+
+    # Resolver quais diretórios de snapshot são referenciados
+    snapshot_dirs: list[tuple[str, _Path]] = []
+    for pattern in config.files:
+        p = _Path(pattern) if _Path(pattern).is_absolute() else repo_root / pattern
+        # O padrão é um diretório de snapshot, não um glob de arquivo
+        if "snapshots" in str(p):
+            project_id = p.name
+            snapshot_dirs.append((project_id, p))
+
+    if not snapshot_dirs:
+        return []
+
+    catalog_urls = _load_catalog_urls(catalog_path)
+    cloned: list[str] = []
+
+    for project_id, snap_dir in snapshot_dirs:
+        if snap_dir.exists() and any(snap_dir.iterdir()):
+            continue  # snapshot já está presente
+
+        github_url = catalog_urls.get(project_id, "")
+        if not github_url:
+            log.warning("snapshot_missing_no_url", project_id=project_id,
+                        hint="Add to catalog or check project_id spelling")
+            continue
+
+        log.info("snapshot_missing_cloning", project_id=project_id,
+                 github_url=github_url)
+        ok = _clone_snapshot(project_id, github_url, snap_dir, clone_log)
+        if ok:
+            cloned.append(project_id)
+
+    return cloned
+
+
+# ── Progress tracking ──────────────────────────────────────────────────────────
+
+class _ProgressTracker:
+    """
+    Escreve um JSON de progresso em disco após cada arquivo processado.
+    Permite que watch_experiment.py leia o estado em tempo real.
+    """
+
+    def __init__(self, output_dir: Path, models: list[str],
+                 total_files: int) -> None:
+        self.path = output_dir / "experiment_progress.json"
+        self.total_files = total_files
+        self._state: dict[str, Any] = {
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            "total_files": total_files,
+            "models": {m: {
+                "done": 0, "success": 0, "failed": 0,
+                "issues_fixed": 0, "issues_total": 0,
+                "current_file": None, "status": "waiting",
+            } for m in models},
+        }
+        self._lock = asyncio.Lock()
+        self._flush()
+
+    async def update(self, model: str, file_name: str,
+                     success: bool, issues_fixed: int, issues_total: int,
+                     status: str = "running") -> None:
+        async with self._lock:
+            m = self._state["models"].setdefault(model, {
+                "done": 0, "success": 0, "failed": 0,
+                "issues_fixed": 0, "issues_total": 0,
+                "current_file": None, "status": "waiting",
+            })
+            m["done"] += 1
+            m["issues_fixed"] += issues_fixed
+            m["issues_total"] += issues_total
+            m["current_file"] = file_name
+            m["status"] = status
+            if success:
+                m["success"] += 1
+            else:
+                m["failed"] += 1
+            self._state["last_update"] = datetime.now(tz=timezone.utc).isoformat()
+            self._flush()
+
+    async def set_model_status(self, model: str, status: str,
+                               current_file: str | None = None) -> None:
+        async with self._lock:
+            m = self._state["models"].setdefault(model, {
+                "done": 0, "success": 0, "failed": 0,
+                "issues_fixed": 0, "issues_total": 0,
+                "current_file": None, "status": "waiting",
+            })
+            m["status"] = status
+            if current_file is not None:
+                m["current_file"] = current_file
+            self._state["last_update"] = datetime.now(tz=timezone.utc).isoformat()
+            self._flush()
+
+    def finish(self) -> None:
+        for m in self._state["models"].values():
+            if m["status"] not in ("done", "error"):
+                m["status"] = "done"
+        self._state["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        self._flush()
+
+    def _flush(self) -> None:
+        try:
+            self.path.write_text(
+                json.dumps(self._state, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
 _DEFAULT_SENSITIVITY_TEMPERATURES = [0.0, 0.1, 0.3, 0.5, 1.0]
 
 
@@ -91,6 +278,12 @@ class ExperimentRunner:
         checkpoints_dir.mkdir(exist_ok=True)
 
         models_to_test = self._resolve_models(config.models)
+
+        # ── Auto-clone snapshots ausentes ─────────────────────────────────────
+        cloned = ensure_snapshots(config, output_dir)
+        if cloned:
+            log.info("snapshots_auto_cloned", count=len(cloned), projects=cloned)
+
         files = config.resolve_files()
         if not files:
             raise ValueError(f"No files found matching patterns: {config.files}")
@@ -103,21 +296,29 @@ class ExperimentRunner:
             output=str(output_dir),
         )
 
+        # ── Progress tracker (lido por watch_experiment.py) ───────────────────
+        tracker = _ProgressTracker(output_dir, models_to_test, len(files))
+
         sem = asyncio.Semaphore(self.settings.max_concurrent_models)
 
         async def run_model(model_name: str) -> tuple[str, list[FixResult]]:
             async with sem:
                 model_output = output_dir / model_name.replace("/", "_")
                 model_output.mkdir(exist_ok=True)
+                await tracker.set_model_status(model_name, "loading")
                 # Cold-start: stop and restart model server before each condition
                 await self._cold_start_model(model_name, condition_id=f"{model_name}/{config.name}")
-                return await self._run_single_model(
+                await tracker.set_model_status(model_name, "running")
+                result = await self._run_single_model(
                     model_name=model_name,
                     files=files,
                     config=config,
                     output_dir=model_output,
                     checkpoints_dir=checkpoints_dir,
+                    tracker=tracker,
                 )
+                await tracker.set_model_status(model_name, "done")
+                return result
 
         model_results = await asyncio.gather(
             *[run_model(m) for m in models_to_test],
@@ -134,6 +335,7 @@ class ExperimentRunner:
                 results_by_model[name] = results
 
         metrics = compute_experiment_metrics(results_by_model)
+        tracker.finish()
 
         experiment_result = ExperimentResult(
             experiment_id=exp_id,
@@ -342,6 +544,7 @@ class ExperimentRunner:
         config: ExperimentConfig,
         output_dir: Path,
         checkpoints_dir: Path,
+        tracker: "_ProgressTracker | None" = None,
     ) -> tuple[str, list[FixResult]]:
         """Run the full pipeline for a single model and checkpoint each file."""
         model_config = self.registry.get(model_name)
@@ -350,22 +553,48 @@ class ExperimentRunner:
         t0 = time.monotonic()
         log.info("experiment_model_start", model=model_name, files=len(files))
 
-        results = await pipeline.run(
-            targets=files,
-            wcag_level=config.wcag_level,
-            output_dir=output_dir,
-        )
-
-        elapsed = time.monotonic() - t0
-
-        # Checkpoint each file result
-        for fix_result in results:
+        # Callback chamado pelo pipeline após cada arquivo
+        async def _on_file_done(fix_result: FixResult) -> None:
+            if tracker:
+                await tracker.update(
+                    model=model_name,
+                    file_name=fix_result.file.name,
+                    success=fix_result.final_success,
+                    issues_fixed=fix_result.issues_fixed,
+                    issues_total=len(fix_result.scan_result.issues),
+                )
             self._save_file_checkpoint(
                 fix_result=fix_result,
                 model_id=model_name,
                 strategy=getattr(config, "strategy", "few-shot"),
                 checkpoints_dir=checkpoints_dir,
             )
+
+        results = await pipeline.run(
+            targets=files,
+            wcag_level=config.wcag_level,
+            output_dir=output_dir,
+            on_file_done=_on_file_done,
+        )
+
+        elapsed = time.monotonic() - t0
+
+        # Checkpoint files não cobertos pelo callback (fallback)
+        checkpointed = set()
+        for fix_result in results:
+            fid = fix_result.file.stem
+            cp_path = (checkpoints_dir
+                       / model_name.replace("/", "_")
+                       / getattr(config, "strategy", "few-shot")
+                       / f"{fid}.json")
+            if not cp_path.exists():
+                self._save_file_checkpoint(
+                    fix_result=fix_result,
+                    model_id=model_name,
+                    strategy=getattr(config, "strategy", "few-shot"),
+                    checkpoints_dir=checkpoints_dir,
+                )
+            checkpointed.add(fid)
 
         # Compute per-model metrics for condition_complete log
         from a11y_autofix.experiments.metrics import compute_sr, compute_ifr, compute_mttr, compute_te

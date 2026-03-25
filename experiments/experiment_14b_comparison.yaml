@@ -1,0 +1,168 @@
+# experiments/experiment_14b_comparison.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Experimento comparativo — 3 famílias de modelos ~14B no corpus real
+#
+# Objetivo científico:
+#   Comparar 3 modelos de código open-source em ~14B parâmetros na tarefa de
+#   correção automática de issues WCAG 2.1 AA em componentes React/TypeScript.
+#
+# Modelos testados (todas famílias distintas):
+#   1. qwen2.5-coder-14b      — Qwen2.5-Coder-14B-Instruct (Alibaba/Qwen)
+#   2. deepseek-coder-v2-16b  — DeepSeek-Coder-V2-Lite-Instruct (DeepSeek AI)
+#   3. starcoder2-15b         — StarCoder2-15B (BigCode / HuggingFace)
+#
+# Hardware: NVIDIA RTX 4090 (24 GB VRAM)
+#   Todos os modelos via ollama Q4_K_M: ~9-10 GB VRAM por modelo
+#   Modelos carregados sequencialmente (cold-start entre condições)
+#
+# Projetos: 35 do corpus real, cobrindo os 7 domínios (5 por domínio)
+#
+# Duração estimada (RTX 4090, 3 modelos, 35 projetos, 3 repetições):
+#   ~6-10 horas total (depende da densidade de issues por projeto)
+#
+# Uso:
+#   a11y-autofix experiment experiments/experiment_14b_comparison.yaml
+#   a11y-autofix experiment experiments/experiment_14b_comparison.yaml \
+#       --output experiment-results/14b_run_1
+#
+# Para retomar após interrupção (usa checkpoints):
+#   a11y-autofix experiment experiments/experiment_14b_comparison.yaml \
+#       --resume experiment-results/14b_run_1/checkpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "14B Code Models Comparison — A11y Auto-fix Corpus"
+description: |
+  Experimento comparativo entre três modelos open-source de ~14B parâmetros de
+  famílias distintas (Qwen, DeepSeek, StarCoder2) na tarefa de correção
+  automática de problemas de acessibilidade WCAG 2.1 AA em código React/TypeScript.
+  Cobre 35 projetos reais do corpus distribuídos pelos 7 domínios de aplicação.
+
+# ── Modelos — group definido em models.yaml ──────────────────────────────────
+models:
+  - qwen2.5-coder-14b      # Qwen2.5-Coder-14B-Instruct  ~9 GB Q4
+  - deepseek-coder-v2-16b  # DeepSeek-Coder-V2-Lite       ~10 GB Q4
+  - starcoder2-15b         # StarCoder2-15B                ~9 GB Q4
+
+# ── Projetos (snapshots em dataset/snapshots/<id>/) ───────────────────────────
+# find_react_files() varrerá cada diretório recursivamente.
+# Se um snapshot não existir localmente, auto_clone_missing_snapshots irá cloná-lo.
+files:
+  # Dashboard (5)
+  - dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack
+  - dataset/snapshots/edp963__davinci
+  - dataset/snapshots/arpanghosh8453__open-dronelog
+  - dataset/snapshots/builderz-labs__mission-control
+  - dataset/snapshots/Kanaries__graphic-walker
+  # Developer Tools (5)
+  - dataset/snapshots/alibaba-fusion__next
+  - dataset/snapshots/FeatureProbe__FeatureProbe
+  - dataset/snapshots/arco-design__arco-design
+  - dataset/snapshots/cloudscape-design__components
+  - dataset/snapshots/debba__tabularis
+  # E-commerce (5)
+  - dataset/snapshots/aelassas__bookcars
+  - dataset/snapshots/BuilderIO__mitosis
+  - dataset/snapshots/aelassas__movinin
+  - dataset/snapshots/CromwellCMS__Cromwell
+  - dataset/snapshots/BuilderIO__builder
+  # Education (5)
+  - dataset/snapshots/LHRUN__paint-board
+  - dataset/snapshots/angellikgh__react-design-editor
+  - dataset/snapshots/F-star__suika
+  - dataset/snapshots/WindRunnerMax__CanvasEditor
+  - dataset/snapshots/KartikLabhshetwar__screenshot-studio
+  # Government (5)
+  - dataset/snapshots/codeforpdx__recordexpungPDX
+  - dataset/snapshots/JustFixNYC__who-owns-what
+  - dataset/snapshots/demokratie-live__democracy-development
+  - dataset/snapshots/codyogden__killedbygoogle
+  - dataset/snapshots/cds-snc__gcds-components
+  # Healthcare (5)
+  - dataset/snapshots/OHIF__Viewers
+  - dataset/snapshots/Snouzy__workout-cool
+  - dataset/snapshots/beda-software__fhir-emr
+  - dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture
+  - dataset/snapshots/aphp__Cohort360-FrontEnd
+  # Social (5)
+  - dataset/snapshots/OvidijusParsiunas__deep-chat
+  - dataset/snapshots/agnaistic__agnai
+  - dataset/snapshots/dream-num__univer
+  - dataset/snapshots/Privoce__vocechat-web
+  - dataset/snapshots/Linen-dev__linen.dev
+
+# ── Nível WCAG ────────────────────────────────────────────────────────────────
+wcag_level: AA
+
+# ── Scanners (detecção de issues antes de enviar ao LLM) ─────────────────────
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+  - eslint-jsx-a11y
+
+# ── Agente ────────────────────────────────────────────────────────────────────
+# "auto" — roteador decide: openhands p/ issues complexas, direct-llm p/ simples
+agents:
+  - auto
+
+# ── Estratégia de prompting ───────────────────────────────────────────────────
+# few-shot: inclui 3 exemplos de correção (WCAG 1.1.1, 1.3.1, 2.1.1)
+strategy: few-shot
+
+# ── Repetições ────────────────────────────────────────────────────────────────
+# 3 repetições para reduzir variância do sampling (temperature=0.1)
+repetitions: 3
+
+# ── Paralelismo (RTX 4090, 24 GB VRAM) ───────────────────────────────────────
+execution:
+  cold_start: true           # reiniciar servidor entre modelos (metodologia §3.1.3)
+  max_concurrent_models: 1   # 1 modelo de cada vez na GPU
+  temperature: 0.1           # baixa para reprodutibilidade
+
+# ── Timeouts ─────────────────────────────────────────────────────────────────
+# Valores ajustados para RTX 4090 + modelos 14B via ollama
+scan_timeout_s: 120          # scanner por arquivo
+agent_timeout_s: 300         # LLM por arquivo (14B é rápido: ~20-60s)
+model_load_timeout_s: 120    # carregamento do modelo na VRAM (ollama)
+
+# ── Métricas ──────────────────────────────────────────────────────────────────
+metrics:
+  - detection_rate           # δ — issues detectadas / total_issues  (H1)
+  - correction_rate          # τ — issues corrigidas / issues_detectadas (H3)
+  - regression_rate          # ρ — regressões / patches aplicados (H5)
+  - precision
+  - tokens_used              # consumo de tokens por arquivo
+  - time_per_file_s          # latência de correção por arquivo
+  - issues_by_type           # semantic, contrast, aria, label, alt-text
+  - issues_by_wcag_principle # P1 (perceivable), P2 (operable), P3, P4
+  - fix_by_agent             # quais fixes: openhands vs direct-llm
+
+# ── Saídas ────────────────────────────────────────────────────────────────────
+output_format:
+  - json      # audit trail completo
+  - html      # relatório visual com diffs antes/depois
+  - csv       # dados para análise estatística (pandas/R)
+
+output_dir: experiment-results/14b_comparison
+
+# ── Configurações avançadas ───────────────────────────────────────────────────
+advanced:
+  # Clonar snapshot automaticamente se não existir
+  auto_clone_missing_snapshots: true
+
+  # Checkpoints por (model, file) — permite retomar em qualquer ponto
+  checkpoint_per_project: true
+  checkpoint_dir: experiment-results/14b_comparison/checkpoints
+
+  # Salvar diff antes/depois
+  save_diffs: true
+
+  # TypeScript validation (tsc --noEmit) — desabilitado por padrão
+  typescript_validation: false
+
+  # Máximo de arquivos por projeto (null = todos)
+  # Sugestão para teste rápido: 5; para experimento completo: null
+  max_files_per_project: null
+
+  # Seed para reprodutibilidade do sampling aleatório
+  seed: 42
