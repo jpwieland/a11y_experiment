@@ -758,27 +758,88 @@ class ExperimentRunner:
         best_attempt = fix_result.best_attempt
         total_input_tokens: int = 0
         total_output_tokens: int = 0
+        total_tokens_all: int = 0
         for attempt in fix_result.attempts:
-            if attempt.tokens_used is not None:
+            if attempt.tokens_prompt is not None:
+                total_input_tokens += attempt.tokens_prompt
+            if attempt.tokens_completion is not None:
+                total_output_tokens += attempt.tokens_completion
+            elif attempt.tokens_used is not None:
+                # fallback: quando tokens_prompt/completion não disponíveis,
+                # usar tokens_used como proxy de output (conservador)
                 total_output_tokens += attempt.tokens_used
+            if attempt.tokens_used is not None:
+                total_tokens_all += attempt.tokens_used
 
         # Build checkpoint payload (methodology Section 3.1.3)
+        # Coletar diff_lines e complexidade dos issues para análise posterior
+        best_diff_lines = len(best_attempt.diff.splitlines()) if best_attempt and best_attempt.diff else 0
+        issue_types = list({i.issue_type.value for i in fix_result.scan_result.issues})
+        complexities = list({i.complexity.value for i in fix_result.scan_result.issues})
+        wcag_criteria = list({i.wcag_criteria for i in fix_result.scan_result.issues if i.wcag_criteria})
+        # Deriving WCAG principles from criteria (1.x → P1, 2.x → P2, 3.x → P3, 4.x → P4)
+        wcag_principles = list({f"P{c[0]}" for c in wcag_criteria if c and c[0].isdigit()})
+        tool_consensus_avg = (
+            sum(i.tool_consensus for i in fix_result.scan_result.issues) / len(fix_result.scan_result.issues)
+            if fix_result.scan_result.issues else 0.0
+        )
+
         checkpoint: dict[str, Any] = {
+            # Identificação da condição experimental
             "model_id": model_id,
             "strategy": strategy,
             "file_id": file_id,
             "condition_id": f"{model_id}/{strategy}",
+
+            # Métricas primárias (methodology Section 3.7.1)
             "status": "success" if fix_result.final_success else "failed",
             "sr": 1 if fix_result.final_success else 0,
             "ifr_numerator": fix_result.issues_fixed,
             "ifr_denominator": len(fix_result.scan_result.issues),
             "mttr_seconds": round(fix_result.total_time, 3) if fix_result.final_success else None,
+            "total_time_seconds": round(fix_result.total_time, 3),
+
+            # Tokens (separados prompt/completion para TE preciso)
             "token_input": total_input_tokens,
             "token_output": total_output_tokens,
+            "token_total": total_tokens_all,
+            "token_input_available": total_input_tokens > 0,  # flag para diagnóstico
+
+            # Validação
             "validation_layer_rejected": None,  # populated by ValidationPipeline if used
             "failure_mode": best_attempt.error if (best_attempt and best_attempt.error) else None,
+
+            # Agente e tentativas
             "agent_used": best_attempt.agent if best_attempt else "unknown",
             "attempt_number": len(fix_result.attempts),
+            "attempts_detail": [
+                {
+                    "n": a.attempt_number,
+                    "success": a.success,
+                    "agent": a.agent,
+                    "time_s": round(a.time_seconds, 2),
+                    "token_total": a.tokens_used,
+                    "token_prompt": a.tokens_prompt,
+                    "token_completion": a.tokens_completion,
+                }
+                for a in fix_result.attempts
+            ],
+
+            # Patch
+            "diff_lines": best_diff_lines,
+
+            # Metadados dos issues para análise cross-dimensional
+            "issue_types": issue_types,
+            "complexities": complexities,
+            "wcag_criteria": wcag_criteria,
+            "wcag_principles": wcag_principles,
+            "tool_consensus_avg": round(tool_consensus_avg, 2),
+            "issues_confidence": {
+                c: sum(1 for i in fix_result.scan_result.issues if i.confidence.value == c)
+                for c in ("high", "medium", "low")
+            },
+
+            # Timestamps
             "cold_start_timestamp": datetime.utcnow().isoformat(),
             "completed_at": datetime.now(tz=timezone.utc).isoformat(),
         }

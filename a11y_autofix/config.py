@@ -255,7 +255,9 @@ class PatchResult(BaseModel):
     new_content: str = Field(default="")
     diff: str = Field(default="")
     error: str | None = Field(default=None)
-    tokens_used: int | None = Field(default=None)
+    tokens_used: int | None = Field(default=None, description="Total tokens (prompt+completion)")
+    tokens_prompt: int | None = Field(default=None, description="Tokens de input/prompt")
+    tokens_completion: int | None = Field(default=None, description="Tokens de output/completion")
     time_seconds: float = Field(default=0.0)
 
 
@@ -269,7 +271,9 @@ class FixAttempt(BaseModel):
     success: bool
     diff: str = Field(default="")
     new_content: str = Field(default="")
-    tokens_used: int | None = Field(default=None)
+    tokens_used: int | None = Field(default=None, description="Total tokens (prompt+completion)")
+    tokens_prompt: int | None = Field(default=None, description="Tokens de input/prompt")
+    tokens_completion: int | None = Field(default=None, description="Tokens de output/completion")
     time_seconds: float = Field(default=0.0)
     error: str | None = Field(default=None)
 

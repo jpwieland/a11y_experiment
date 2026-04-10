@@ -19,10 +19,23 @@ Metric definitions (methodology Section 3.7.1):
   TE  (Token Efficiency):
       TE = (IFR × |I|) / (C_total / 1000)
       where C_total is the sum of input tokens across all prompts in the condition.
+
+  ρ   (Regression Rate, H5):
+      ρ = |patches rejected at Layer 2| / |patches attempted|
+      Layer 2 rejections = functional regression introduced by the patch.
+
+  δ   (Detection Rate):
+      δ = |issues detected by scanner set| / |issues in ground truth|
+      Requires a ground truth reference; computed separately.
+
+  TPF (Tokens Per Fix):
+      TPF = total_input_tokens / issues_fixed
+      More precise alternative to TE when prompt tokens are available.
 """
 
 from __future__ import annotations
 
+import statistics
 from typing import Any
 
 from a11y_autofix.config import FixResult
@@ -247,3 +260,333 @@ def rank_models(
     # Para avg_time: menor é melhor → inverter ordenação
     reverse = primary_metric != "avg_time"
     return sorted(ranked, key=lambda x: x[1], reverse=reverse)
+
+
+def compute_regression_rate(
+    results: list[FixResult],
+) -> tuple[float, int, int]:
+    """
+    Taxa de regressão ρ (H5) — metodologia Seção 3.7.1.
+
+    ρ = patches rejeitados na Camada 2 / total de patches tentados
+
+    A rejeição na Camada 2 indica regressão funcional introduzida pelo patch
+    (interface quebrada, export removido, event handler perdido).
+
+    Nota: requer que `FixAttempt.error` contenha o prefixo "functional_regression:"
+    para contar como rejeição L2 — gerado por ValidationPipeline.
+
+    Returns:
+        Tuple (ρ, n_regressions, n_attempts_total)
+    """
+    n_attempts = 0
+    n_regressions = 0
+    for result in results:
+        for attempt in result.attempts:
+            n_attempts += 1
+            if attempt.error and attempt.error.startswith("functional_regression:"):
+                n_regressions += 1
+    rho = n_regressions / n_attempts if n_attempts > 0 else 0.0
+    return rho, n_regressions, n_attempts
+
+
+def compute_validation_layer_breakdown(
+    results: list[FixResult],
+) -> dict[str, int]:
+    """
+    Distribui as falhas de validação por camada.
+
+    Conta quantas tentativas foram rejeitadas em cada camada (1–4)
+    e quantas passaram em todas as camadas.
+
+    Returns:
+        Dict com chaves "layer_1", "layer_2", "layer_3", "layer_4", "passed".
+    """
+    counts = {"layer_1": 0, "layer_2": 0, "layer_3": 0, "layer_4": 0, "passed": 0}
+    layer_prefixes = {
+        "layer_1": ("empty_patch", "unclosed_code_block", "llm_refusal", "no_jsx_found"),
+        "layer_2": ("functional_regression:",),
+        "layer_3": ("domain_check_failed:",),
+        "layer_4": ("invalid_tabIndex:", "dangerouslySetInnerHTML_present"),
+    }
+    for result in results:
+        for attempt in result.attempts:
+            if attempt.success:
+                counts["passed"] += 1
+                continue
+            err = attempt.error or ""
+            matched = False
+            for layer, prefixes in layer_prefixes.items():
+                if any(err.startswith(p) for p in prefixes):
+                    counts[layer] += 1
+                    matched = True
+                    break
+            if not matched and err:
+                # Timeout, LLM error, etc. — não são rejeições de validação
+                pass
+    return counts
+
+
+def compute_per_complexity_metrics(
+    results_by_model: dict[str, list[FixResult]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Taxa de sucesso por nível de complexidade do issue (simple/moderate/complex).
+
+    Permite avaliar se modelos maiores resolvem melhor issues complexas.
+
+    Returns:
+        {model: {complexity: {total, fixed, rate}}}
+    """
+    metrics: dict[str, dict[str, Any]] = {}
+    for model_name, results in results_by_model.items():
+        by_complexity: dict[str, dict[str, int]] = {}
+        for fix_result in results:
+            for issue in fix_result.scan_result.issues:
+                c = issue.complexity.value
+                if c not in by_complexity:
+                    by_complexity[c] = {"total": 0, "fixed": 0}
+                by_complexity[c]["total"] += 1
+                if fix_result.final_success:
+                    by_complexity[c]["fixed"] += 1
+        metrics[model_name] = {
+            c: {
+                "total": v["total"],
+                "fixed": v["fixed"],
+                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+            }
+            for c, v in by_complexity.items()
+        }
+    return metrics
+
+
+def compute_per_wcag_principle_metrics(
+    results_by_model: dict[str, list[FixResult]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Taxa de sucesso por princípio WCAG (P1 Perceivable, P2 Operable,
+    P3 Understandable, P4 Robust).
+
+    Princípio derivado do primeiro dígito do critério WCAG (1.x, 2.x, 3.x, 4.x).
+
+    Returns:
+        {model: {principle: {total, fixed, rate}}}
+    """
+    _PRINCIPLES = {"1": "P1_Perceivable", "2": "P2_Operable",
+                   "3": "P3_Understandable", "4": "P4_Robust"}
+    metrics: dict[str, dict[str, Any]] = {}
+    for model_name, results in results_by_model.items():
+        by_principle: dict[str, dict[str, int]] = {}
+        for fix_result in results:
+            for issue in fix_result.scan_result.issues:
+                wcag = issue.wcag_criteria or ""
+                principle = _PRINCIPLES.get(wcag[0], "unknown") if wcag else "unknown"
+                if principle not in by_principle:
+                    by_principle[principle] = {"total": 0, "fixed": 0}
+                by_principle[principle]["total"] += 1
+                if fix_result.final_success:
+                    by_principle[principle]["fixed"] += 1
+        metrics[model_name] = {
+            p: {
+                "total": v["total"],
+                "fixed": v["fixed"],
+                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+            }
+            for p, v in by_principle.items()
+        }
+    return metrics
+
+
+def compute_fix_by_agent(
+    results_by_model: dict[str, list[FixResult]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Distribui as correções bem-sucedidas por agente (direct-llm, openhands, swe-agent).
+
+    Returns:
+        {model: {agent: {attempts, successes, sr}}}
+    """
+    metrics: dict[str, dict[str, Any]] = {}
+    for model_name, results in results_by_model.items():
+        by_agent: dict[str, dict[str, int]] = {}
+        for fix_result in results:
+            for attempt in fix_result.attempts:
+                agent = attempt.agent
+                if agent not in by_agent:
+                    by_agent[agent] = {"attempts": 0, "successes": 0}
+                by_agent[agent]["attempts"] += 1
+                if attempt.success:
+                    by_agent[agent]["successes"] += 1
+        metrics[model_name] = {
+            agent: {
+                "attempts": v["attempts"],
+                "successes": v["successes"],
+                "sr": v["successes"] / v["attempts"] if v["attempts"] > 0 else 0.0,
+            }
+            for agent, v in by_agent.items()
+        }
+    return metrics
+
+
+def compute_attempt_distribution(
+    results: list[FixResult],
+) -> dict[int, int]:
+    """
+    Distribuição do número de tentativas por arquivo.
+
+    Útil para entender se o modelo converge na 1ª tentativa ou precisa de retries.
+
+    Returns:
+        {n_attempts: count_of_files}
+    """
+    dist: dict[int, int] = {}
+    for r in results:
+        n = len(r.attempts)
+        dist[n] = dist.get(n, 0) + 1
+    return dict(sorted(dist.items()))
+
+
+def compute_tpf(
+    results: list[FixResult],
+) -> float | None:
+    """
+    Tokens Per Fix (TPF) — custo médio de tokens de input por issue corrigida.
+
+    TPF = total_token_input / issues_fixed
+
+    Mais preciso que TE quando tokens de input estão disponíveis.
+    Retorna None se não houver issues corrigidas ou tokens disponíveis.
+    """
+    total_input = sum(
+        a.tokens_prompt or 0
+        for r in results
+        for a in r.attempts
+    )
+    total_fixed = sum(r.issues_fixed for r in results)
+    if total_fixed == 0 or total_input == 0:
+        return None
+    return round(total_input / total_fixed, 1)
+
+
+def compute_diff_stats(
+    results: list[FixResult],
+) -> dict[str, float | None]:
+    """
+    Estatísticas do tamanho dos patches gerados (linhas do diff).
+
+    Indica o "conservadorismo" do modelo: patches menores tendem a ser
+    mais cirúrgicos e menos propensos a introduzir regressões.
+
+    Returns:
+        {mean, median, p25, p75, max}
+    """
+    sizes = []
+    for r in results:
+        if r.best_attempt and r.best_attempt.diff:
+            sizes.append(len(r.best_attempt.diff.splitlines()))
+
+    if not sizes:
+        return {"mean": None, "median": None, "p25": None, "p75": None, "max": None}
+
+    sorted_sizes = sorted(sizes)
+    n = len(sorted_sizes)
+    return {
+        "mean": round(sum(sizes) / n, 1),
+        "median": float(statistics.median(sizes)),
+        "p25": float(sorted_sizes[n // 4]),
+        "p75": float(sorted_sizes[min(3 * n // 4, n - 1)]),
+        "max": float(max(sizes)),
+    }
+
+
+def compute_confidence_breakdown(
+    results_by_model: dict[str, list[FixResult]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Taxa de correção por nível de confiança do issue (high/medium/low).
+
+    Permite verificar se o modelo tem melhor desempenho em issues com
+    alta confiança (multi-tool agreement) vs issues detectadas por 1 tool.
+
+    Returns:
+        {model: {confidence_level: {total, fixed, rate}}}
+    """
+    metrics: dict[str, dict[str, Any]] = {}
+    for model_name, results in results_by_model.items():
+        by_conf: dict[str, dict[str, int]] = {}
+        for fix_result in results:
+            for issue in fix_result.scan_result.issues:
+                conf = issue.confidence.value
+                if conf not in by_conf:
+                    by_conf[conf] = {"total": 0, "fixed": 0}
+                by_conf[conf]["total"] += 1
+                if fix_result.final_success:
+                    by_conf[conf]["fixed"] += 1
+        metrics[model_name] = {
+            conf: {
+                "total": v["total"],
+                "fixed": v["fixed"],
+                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+            }
+            for conf, v in by_conf.items()
+        }
+    return metrics
+
+
+def compute_full_experiment_metrics(
+    results_by_model: dict[str, list[FixResult]],
+    input_tokens_by_model: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """
+    Computa TODAS as métricas disponíveis para um experimento.
+
+    Inclui primárias (SR, IFR, MTTR, TE), secundárias (ρ, TPF),
+    e todas as decomposições cross-dimensionais.
+
+    Returns:
+        Dict com chaves:
+          "per_model"          — métricas primárias por modelo
+          "regression_rate"    — ρ por modelo
+          "validation_layers"  — breakdown de falhas por camada
+          "per_issue_type"     — IFR por tipo de issue
+          "per_complexity"     — IFR por complexidade
+          "per_wcag_principle" — IFR por princípio WCAG
+          "per_confidence"     — IFR por nível de confiança
+          "fix_by_agent"       — SR por agente
+          "attempt_distribution" — distribuição de nº de tentativas
+          "diff_stats"         — estatísticas de tamanho de patch
+          "tpf"                — tokens per fix por modelo
+    """
+    per_model = compute_experiment_metrics(results_by_model, input_tokens_by_model)
+
+    regression_rate: dict[str, Any] = {}
+    validation_layers: dict[str, Any] = {}
+    attempt_dist: dict[str, Any] = {}
+    diff_stats: dict[str, Any] = {}
+    tpf: dict[str, Any] = {}
+
+    for model_name, results in results_by_model.items():
+        rho, n_reg, n_att = compute_regression_rate(results)
+        regression_rate[model_name] = {
+            "rho": round(rho, 4),
+            "regressions": n_reg,
+            "attempts": n_att,
+        }
+        validation_layers[model_name] = compute_validation_layer_breakdown(results)
+        attempt_dist[model_name] = compute_attempt_distribution(results)
+        diff_stats[model_name] = compute_diff_stats(results)
+        tpf[model_name] = compute_tpf(results)
+
+    return {
+        "per_model": per_model,
+        "regression_rate": regression_rate,
+        "validation_layers": validation_layers,
+        "per_issue_type": compute_per_issue_type_metrics(results_by_model),
+        "per_complexity": compute_per_complexity_metrics(results_by_model),
+        "per_wcag_principle": compute_per_wcag_principle_metrics(results_by_model),
+        "per_confidence": compute_confidence_breakdown(results_by_model),
+        "fix_by_agent": compute_fix_by_agent(results_by_model),
+        "attempt_distribution": attempt_dist,
+        "diff_stats": diff_stats,
+        "tpf": tpf,
+    }

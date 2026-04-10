@@ -69,6 +69,8 @@ class DirectLLMAgent(BaseAgent):
                 success=False,
                 error="LLM did not return a valid code block",
                 tokens_used=metrics.get("tokens_total"),
+                tokens_prompt=metrics.get("tokens_prompt"),
+                tokens_completion=metrics.get("tokens_completion"),
                 time_seconds=metrics.get("time_seconds", 0.0),
             )
 
@@ -79,6 +81,8 @@ class DirectLLMAgent(BaseAgent):
             file=task.file.name,
             diff_lines=len(diff.splitlines()),
             time_s=metrics.get("time_seconds", 0.0),
+            tokens_prompt=metrics.get("tokens_prompt"),
+            tokens_completion=metrics.get("tokens_completion"),
         )
 
         return PatchResult(
@@ -86,5 +90,7 @@ class DirectLLMAgent(BaseAgent):
             new_content=new_content,
             diff=diff,
             tokens_used=metrics.get("tokens_total"),
+            tokens_prompt=metrics.get("tokens_prompt"),
+            tokens_completion=metrics.get("tokens_completion"),
             time_seconds=metrics.get("time_seconds", 0.0),
         )
