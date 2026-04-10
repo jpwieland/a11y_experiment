@@ -158,7 +158,25 @@ class _ProgressTracker:
     """
     Escreve um JSON de progresso em disco após cada arquivo processado.
     Permite que watch_experiment.py leia o estado em tempo real.
+
+    Campos adicionais por modelo:
+      started_at         — ISO timestamp de quando o modelo começou
+      avg_time_per_file_s — média móvel (últimas 10 amostras) de tempo por arquivo
+      eta_seconds        — estimativa de segundos restantes para o modelo
+      tokens_input       — total de tokens de input consumidos
+      tokens_output      — total de tokens de output produzidos
     """
+
+    _DEFAULT_MODEL_STATE: dict[str, Any] = {
+        "done": 0, "success": 0, "failed": 0,
+        "issues_fixed": 0, "issues_total": 0,
+        "current_file": None, "status": "waiting",
+        "started_at": None,
+        "avg_time_per_file_s": None,
+        "eta_seconds": None,
+        "tokens_input": 0,
+        "tokens_output": 0,
+    }
 
     def __init__(self, output_dir: Path, models: list[str],
                  total_files: int) -> None:
@@ -167,45 +185,60 @@ class _ProgressTracker:
         self._state: dict[str, Any] = {
             "started_at": datetime.now(tz=timezone.utc).isoformat(),
             "total_files": total_files,
-            "models": {m: {
-                "done": 0, "success": 0, "failed": 0,
-                "issues_fixed": 0, "issues_total": 0,
-                "current_file": None, "status": "waiting",
-            } for m in models},
+            "models": {m: dict(self._DEFAULT_MODEL_STATE) for m in models},
         }
         self._lock = asyncio.Lock()
+        # Histórico de tempos por arquivo para média móvel
+        self._file_times: dict[str, list[float]] = {m: [] for m in models}
         self._flush()
 
-    async def update(self, model: str, file_name: str,
-                     success: bool, issues_fixed: int, issues_total: int,
-                     status: str = "running") -> None:
+    async def update(
+        self,
+        model: str,
+        file_name: str,
+        success: bool,
+        issues_fixed: int,
+        issues_total: int,
+        status: str = "running",
+        time_seconds: float = 0.0,
+        tokens_input: int = 0,
+        tokens_output: int = 0,
+    ) -> None:
         async with self._lock:
-            m = self._state["models"].setdefault(model, {
-                "done": 0, "success": 0, "failed": 0,
-                "issues_fixed": 0, "issues_total": 0,
-                "current_file": None, "status": "waiting",
-            })
+            m = self._state["models"].setdefault(model, dict(self._DEFAULT_MODEL_STATE))
             m["done"] += 1
             m["issues_fixed"] += issues_fixed
             m["issues_total"] += issues_total
             m["current_file"] = file_name
             m["status"] = status
+            m["tokens_input"] = (m.get("tokens_input") or 0) + tokens_input
+            m["tokens_output"] = (m.get("tokens_output") or 0) + tokens_output
             if success:
                 m["success"] += 1
             else:
                 m["failed"] += 1
+
+            # ── ETA via média móvel das últimas 10 amostras ───────────────────
+            if time_seconds > 0:
+                times = self._file_times.setdefault(model, [])
+                times.append(time_seconds)
+                recent = times[-10:]
+                avg = sum(recent) / len(recent)
+                m["avg_time_per_file_s"] = round(avg, 1)
+                remaining = max(0, self.total_files - m["done"])
+                m["eta_seconds"] = round(avg * remaining)
+
             self._state["last_update"] = datetime.now(tz=timezone.utc).isoformat()
             self._flush()
 
     async def set_model_status(self, model: str, status: str,
                                current_file: str | None = None) -> None:
         async with self._lock:
-            m = self._state["models"].setdefault(model, {
-                "done": 0, "success": 0, "failed": 0,
-                "issues_fixed": 0, "issues_total": 0,
-                "current_file": None, "status": "waiting",
-            })
+            m = self._state["models"].setdefault(model, dict(self._DEFAULT_MODEL_STATE))
             m["status"] = status
+            # Registrar timestamp de início ao entrar em execução
+            if status == "running" and m.get("started_at") is None:
+                m["started_at"] = datetime.now(tz=timezone.utc).isoformat()
             if current_file is not None:
                 m["current_file"] = current_file
             self._state["last_update"] = datetime.now(tz=timezone.utc).isoformat()
@@ -215,6 +248,7 @@ class _ProgressTracker:
         for m in self._state["models"].values():
             if m["status"] not in ("done", "error"):
                 m["status"] = "done"
+            m["eta_seconds"] = 0
         self._state["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
         self._flush()
 
@@ -632,12 +666,15 @@ class ExperimentRunner:
         # Callback chamado pelo pipeline após cada arquivo
         async def _on_file_done(fix_result: FixResult) -> None:
             if tracker:
+                tokens_out = sum(a.tokens_used or 0 for a in fix_result.attempts)
                 await tracker.update(
                     model=model_name,
                     file_name=fix_result.file.name,
                     success=fix_result.final_success,
                     issues_fixed=fix_result.issues_fixed,
                     issues_total=len(fix_result.scan_result.issues),
+                    time_seconds=fix_result.total_time,
+                    tokens_output=tokens_out,
                 )
             self._save_file_checkpoint(
                 fix_result=fix_result,

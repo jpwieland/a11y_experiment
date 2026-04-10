@@ -1,0 +1,169 @@
+# experiments/experiment_weak_gpu.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Experimento para GPU fraca (≤8 GB VRAM) — Windows / máquina secundária
+#
+# SELEÇÃO DE MODELOS — RACIOCÍNIO:
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#   GPU forte (RTX 4090, 24 GB VRAM) → experiment_14b_comparison.yaml
+#     └─ Roda modelos ~14B Q4 (~9-10 GB cada): Qwen14B, DeepSeek16B, StarCoder15B
+#
+#   GPU fraca (≤8 GB VRAM) → ESTE ARQUIVO
+#     └─ Modelos que cabem confortavelmente sem CPU-offload excessivo:
+#
+#   Modelo                VRAM (Q4_K_M)  Backend  Plataforma  Papel
+#   ──────────────────────────────────────────────────────────────────────────
+#   qwen2.5-coder-7b      ~4.1 GB        ollama   Windows ✓   Principal (SOTA 7B)
+#   codellama-7b          ~4.1 GB        ollama   Windows ✓   Comparação (família Meta)
+#   qwen2.5-coder-3b      ~2.0 GB        ollama   Windows ✓   Baseline leve
+#
+#   EXCLUÍDOS desta configuração (VRAM insuficiente):
+#     qwen2.5-coder-14b   ~8.9 GB  → apenas com CPU offload pesado (muito lento)
+#     deepseek-coder-16b  ~10 GB   → não cabe
+#     starcoder2-15b      ~9  GB   → não cabe
+#     modelos vLLM        vários   → vLLM não suporta Windows nativamente
+#
+# REGRA PRÁTICA DE SELEÇÃO AUTOMÁTICA:
+#   VRAM ≥ 6 GB  → qwen2.5-coder-7b + codellama-7b + qwen2.5-coder-3b  (este YAML)
+#   VRAM < 6 GB  → qwen2.5-coder-3b apenas (editar lista abaixo)
+#   VRAM ≥ 12 GB → experiment_14b_comparison.yaml (GPU forte)
+#
+# Estimativa de duração (GPU fraca 6-8 GB, 35 projetos, 3 modelos, 3 reps):
+#   ~3-6 horas total — depende da densidade de issues e da GPU específica
+#
+# Hardware alvo: RTX 3060/3070 (8 GB), RTX 4060 (8 GB), GTX 1080 (8 GB),
+#                RTX 2060 (6 GB), GTX 1660 Super (6 GB) etc.
+#
+# Compatibilidade Windows: todos os modelos usam backend=ollama
+#   (vLLM exige Linux; LM Studio funciona mas é mais lento que ollama)
+#
+# Uso:
+#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml
+#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml \
+#       --output experiment-results/weak_gpu_run_1
+#
+# Para retomar após interrupção (usa checkpoints):
+#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml \
+#       --resume experiment-results/weak_gpu_run_1/checkpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "7B Code Models — A11y Auto-fix (GPU Fraca / Windows)"
+description: |
+  Experimento comparativo entre modelos open-source de 3–7B parâmetros
+  na tarefa de correção automática de problemas WCAG 2.1 AA em código
+  React/TypeScript. Configurado para GPUs com ≤8 GB VRAM rodando Windows.
+  Cobre 35 projetos reais do corpus distribuídos pelos 7 domínios de aplicação.
+
+# ── Modelos (todos via ollama, Windows-compatíveis, ≤5 GB VRAM) ──────────────
+models:
+  - qwen2.5-coder-7b   # SOTA 7B coding — 4.1 GB Q4_K_M  (Alibaba/Qwen)
+  - codellama-7b       # Meta/CodeLlama  — 4.1 GB Q4_K_M  (família diferente)
+  - qwen2.5-coder-3b   # baseline leve   — 2.0 GB Q4_K_M  (referência)
+
+# ── Projetos (mesmos 35 do experimento principal) ────────────────────────────
+files:
+  # Dashboard (5)
+  - dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack
+  - dataset/snapshots/edp963__davinci
+  - dataset/snapshots/arpanghosh8453__open-dronelog
+  - dataset/snapshots/builderz-labs__mission-control
+  - dataset/snapshots/Kanaries__graphic-walker
+  # Developer Tools (5)
+  - dataset/snapshots/alibaba-fusion__next
+  - dataset/snapshots/FeatureProbe__FeatureProbe
+  - dataset/snapshots/arco-design__arco-design
+  - dataset/snapshots/cloudscape-design__components
+  - dataset/snapshots/debba__tabularis
+  # E-commerce (5)
+  - dataset/snapshots/aelassas__bookcars
+  - dataset/snapshots/BuilderIO__mitosis
+  - dataset/snapshots/aelassas__movinin
+  - dataset/snapshots/CromwellCMS__Cromwell
+  - dataset/snapshots/BuilderIO__builder
+  # Education (5)
+  - dataset/snapshots/LHRUN__paint-board
+  - dataset/snapshots/angellikgh__react-design-editor
+  - dataset/snapshots/F-star__suika
+  - dataset/snapshots/WindRunnerMax__CanvasEditor
+  - dataset/snapshots/KartikLabhshetwar__screenshot-studio
+  # Government (5)
+  - dataset/snapshots/codeforpdx__recordexpungPDX
+  - dataset/snapshots/JustFixNYC__who-owns-what
+  - dataset/snapshots/demokratie-live__democracy-development
+  - dataset/snapshots/codyogden__killedbygoogle
+  - dataset/snapshots/cds-snc__gcds-components
+  # Healthcare (5)
+  - dataset/snapshots/OHIF__Viewers
+  - dataset/snapshots/Snouzy__workout-cool
+  - dataset/snapshots/beda-software__fhir-emr
+  - dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture
+  - dataset/snapshots/aphp__Cohort360-FrontEnd
+  # Social (5)
+  - dataset/snapshots/OvidijusParsiunas__deep-chat
+  - dataset/snapshots/agnaistic__agnai
+  - dataset/snapshots/dream-num__univer
+  - dataset/snapshots/Privoce__vocechat-web
+  - dataset/snapshots/Linen-dev__linen.dev
+
+# ── Nível WCAG ────────────────────────────────────────────────────────────────
+wcag_level: AA
+
+# ── Scanners ──────────────────────────────────────────────────────────────────
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+  - eslint-jsx-a11y
+
+# ── Agente ────────────────────────────────────────────────────────────────────
+agents:
+  - auto
+
+# ── Estratégia ────────────────────────────────────────────────────────────────
+strategy: few-shot
+
+# ── Repetições ────────────────────────────────────────────────────────────────
+repetitions: 3
+
+# ── Paralelismo (GPU fraca: 1 modelo de cada vez, 1 arquivo por vez) ─────────
+execution:
+  cold_start: true           # reiniciar servidor entre modelos
+  max_concurrent_models: 1   # 1 modelo de cada vez (sem VRAM para mais)
+  temperature: 0.1
+
+# ── Timeouts (ajustados para GPU fraca — inferência mais lenta) ───────────────
+# GPU fraca com modelo 7B Q4: ~5-30s por arquivo (vs ~5s no RTX 4090)
+# Margem extra para picos de carga e swapping de KV-cache
+scan_timeout_s: 120          # scanner por arquivo (igual ao experimento principal)
+agent_timeout_s: 300         # LLM por arquivo — 5 min (3× mais que no 4090)
+model_load_timeout_s: 180    # carregamento inicial do modelo (~60s em GPU fraca)
+
+# ── Métricas (iguais ao experimento principal para comparabilidade) ────────────
+metrics:
+  - detection_rate
+  - correction_rate
+  - regression_rate
+  - precision
+  - tokens_used
+  - time_per_file_s
+  - issues_by_type
+  - issues_by_wcag_principle
+  - fix_by_agent
+
+# ── Saídas ────────────────────────────────────────────────────────────────────
+output_format:
+  - json
+  - html
+  - csv
+
+output_dir: experiment-results/weak_gpu_comparison
+
+# ── Configurações avançadas ───────────────────────────────────────────────────
+advanced:
+  auto_clone_missing_snapshots: true
+  checkpoint_per_project: true
+  checkpoint_dir: experiment-results/weak_gpu_comparison/checkpoints
+  save_diffs: true
+  typescript_validation: false
+  max_files_per_project: null
+  seed: 42

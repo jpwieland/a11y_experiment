@@ -217,3 +217,16 @@ model_groups:
     - qwen2.5-coder-3b
     - qwen2.5-coder-7b
     - codellama-7b
+
+  # ── Grupo para GPU FRACA no Windows (≤8 GB VRAM) ─────────────────────────
+  # Todos via Ollama: compatível com Windows, sem vLLM (requer Linux).
+  # SELEÇÃO: 3 famílias distintas em ≤7B → validade comparativa preservada
+  #   qwen2.5-coder-7b : SOTA 7B código   ~4.1 GB Q4_K_M  ← principal
+  #   codellama-7b      : família Meta      ~4.1 GB Q4_K_M  ← comparação
+  #   qwen2.5-coder-3b  : baseline leve     ~2.0 GB Q4_K_M  ← referência
+  # Não inclui modelos >8B: excedem VRAM segura sem CPU-offload excessivo.
+  # Usar: experiment experiments/experiment_weak_gpu.yaml
+  weak_gpu_windows:
+    - qwen2.5-coder-7b
+    - codellama-7b
+    - qwen2.5-coder-3b

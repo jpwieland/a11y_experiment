@@ -64,49 +64,175 @@ done
 
 mkdir -p "$LOG_DIR"
 
-# ── Localizar Python base ─────────────────────────────────────────────────────
-if command -v python3 &>/dev/null; then
-    PYTHON_BASE="$(command -v python3)"
-elif command -v python &>/dev/null; then
-    PYTHON_BASE="$(command -v python)"
-else
-    echo "${RED}✘  Python3 não encontrado no PATH.${R}"; exit 1
-fi
+# ── Localizar Python base (≥3.9) ──────────────────────────────────────────────
+_find_python() {
+    for candidate in \
+        "$(command -v python3.12 2>/dev/null)" \
+        "$(command -v python3.11 2>/dev/null)" \
+        "$(command -v python3.10 2>/dev/null)" \
+        "$(command -v python3.9 2>/dev/null)" \
+        "$(command -v python3 2>/dev/null)" \
+        "$(command -v python 2>/dev/null)"; do
+        [[ -z "$candidate" || ! -x "$candidate" ]] && continue
+        local ver
+        ver=$("$candidate" -c "import sys; print(sys.version_info >= (3,9))" 2>/dev/null)
+        [[ "$ver" == "True" ]] && { echo "$candidate"; return 0; }
+    done
+    return 1
+}
 
-# ── Setup do venv (cria e instala se necessário) ──────────────────────────────
+PYTHON_BASE="$(_find_python)" || {
+    echo "${RED}✘  Python ≥3.9 não encontrado no PATH.${R}"; exit 1
+}
+
+# ── Helper: baixar arquivo com curl ou wget ───────────────────────────────────
+_download() {
+    local url="$1" dest="$2"
+    if command -v curl &>/dev/null; then
+        curl -fsSL --retry 3 "$url" -o "$dest" 2>/dev/null
+    elif command -v wget &>/dev/null; then
+        wget -q --tries=3 "$url" -O "$dest" 2>/dev/null
+    else
+        return 1
+    fi
+    [[ -s "$dest" ]]
+}
+
+# ── Setup do ambiente virtual (sem root, sem conda, sem python3-venv) ─────────
+#
+# Estratégias em cascata:
+#  A) virtualenv.pyz  — zipapp autossuficiente do pypa, não precisa de pip nem venv
+#  B) pip --user virtualenv  — se pip existir no sistema
+#  C) pip --user direto  — sem env isolado, instala em ~/.local
+#  D) PYTHONPATH manual  — último recurso absoluto
+# ──────────────────────────────────────────────────────────────────────────────
 setup_venv() {
-    # Verificar se o venv existe e tem o binário a11y-autofix instalado
     if [[ -x "${VENV_PATH}/bin/a11y-autofix" ]]; then
-        return 0  # já pronto
+        return 0  # já configurado
     fi
 
     echo ""
-    echo "${YELLOW}  Configurando ambiente virtual...${R}"
+    echo "${YELLOW}  Configurando ambiente Python (sem root)...${R}"
+    echo "  Python base: ${PYTHON_BASE} ($("$PYTHON_BASE" --version 2>&1))"
+    echo ""
 
-    # Criar venv se não existir
+    mkdir -p "${VENV_PATH}/bin"
+    local pip_in_venv="${VENV_PATH}/bin/pip"
+
+    # ── A) virtualenv.pyz — não depende de venv/ensurepip do sistema ─────────
     if [[ ! -f "${VENV_PATH}/bin/python" ]]; then
-        echo "  Criando venv em ${VENV_PATH} ..."
-        "$PYTHON_BASE" -m venv "${VENV_PATH}" || {
-            echo "${RED}  ✘  Falha ao criar venv.${R}"; exit 1
-        }
+        echo "  [A] virtualenv.pyz (autossuficiente) ..."
+        local venv_pyz
+        venv_pyz="$(mktemp /tmp/virtualenv-XXXX.pyz)"
+        if _download "https://bootstrap.pypa.io/virtualenv.pyz" "$venv_pyz"; then
+            "$PYTHON_BASE" "$venv_pyz" -q "${VENV_PATH}" 2>&1 \
+                && echo "      ${GREEN}✔ env criado${R}" \
+                || echo "      ${YELLOW}✘ falhou${R}"
+            rm -f "$venv_pyz"
+        else
+            echo "      ${YELLOW}✘ download falhou (sem rede?)${R}"
+            rm -f "$venv_pyz"
+        fi
     fi
 
-    local pip="${VENV_PATH}/bin/pip"
+    # ── B) pip install --user virtualenv (se pip disponível no sistema) ───────
+    if [[ ! -f "${VENV_PATH}/bin/python" ]]; then
+        echo "  [B] pip --user virtualenv ..."
+        local pip3_bin
+        pip3_bin="$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || true)"
 
-    # Instalar o pacote em modo editable
-    echo "  Instalando a11y-autofix (pip install -e .) ..."
-    "$pip" install --quiet --upgrade pip
-    "$pip" install --quiet -e "${SCRIPT_DIR}" || {
-        echo "${RED}  ✘  Falha no pip install. Verifique a saída acima.${R}"; exit 1
-    }
+        # Tentar via -m pip se não encontrou pip direto
+        if [[ -z "$pip3_bin" ]]; then
+            "$PYTHON_BASE" -m pip --version &>/dev/null && pip3_bin="$PYTHON_BASE -m pip"
+        fi
 
+        if [[ -n "$pip3_bin" ]]; then
+            $pip3_bin install --quiet --user virtualenv 2>&1 | tail -2 || true
+            local venv_bin="${HOME}/.local/bin/virtualenv"
+            if [[ -x "$venv_bin" ]]; then
+                "$venv_bin" -q -p "$PYTHON_BASE" "${VENV_PATH}" 2>&1 \
+                    && echo "      ${GREEN}✔ env criado${R}" \
+                    || echo "      ${YELLOW}✘ falhou${R}"
+            fi
+        else
+            echo "      ${YELLOW}✘ pip não encontrado no sistema${R}"
+        fi
+    fi
+
+    # ── Instalar pacote no env criado (A ou B) ────────────────────────────────
+    if [[ -f "${VENV_PATH}/bin/python" ]] && [[ -f "$pip_in_venv" ]]; then
+        echo "  Instalando a11y-autofix no env ..."
+        "$pip_in_venv" install --quiet --upgrade pip 2>/dev/null || true
+        "$pip_in_venv" install --quiet -e "${SCRIPT_DIR}" \
+            && echo "  ${GREEN}✔ instalado com sucesso${R}" \
+            || { echo "${RED}  ✘ pip install -e falhou${R}"; exit 1; }
+
+    # ── C) Sem env isolado: pip install --user diretamente ────────────────────
+    elif [[ ! -x "${VENV_PATH}/bin/a11y-autofix" ]]; then
+        echo "  [C] Sem env isolado — pip install --user ..."
+        echo "  ${DIM}(pacotes em ~/.local, pode conflitar com outros projetos)${R}"
+
+        local sys_pip=""
+        if "$PYTHON_BASE" -m pip --version &>/dev/null; then
+            sys_pip="$PYTHON_BASE -m pip"
+        elif command -v pip3 &>/dev/null; then
+            sys_pip="pip3"
+        fi
+
+        if [[ -z "$sys_pip" ]]; then
+            # ── D) Último recurso: instalar pip via get-pip.py ─────────────────
+            echo "  [D] Bootstrapping pip via get-pip.py ..."
+            local getpip
+            getpip="$(mktemp /tmp/get-pip-XXXX.py)"
+            if _download "https://bootstrap.pypa.io/get-pip.py" "$getpip"; then
+                "$PYTHON_BASE" "$getpip" --user --quiet 2>&1 | tail -3 \
+                    && sys_pip="$PYTHON_BASE -m pip" \
+                    || echo "      ${YELLOW}✘ get-pip.py falhou${R}"
+            fi
+            rm -f "$getpip"
+        fi
+
+        if [[ -z "$sys_pip" ]]; then
+            echo "${RED}  ✘  Nenhum pip disponível. Impossível instalar.${R}"
+            echo ""
+            echo "  Solicite ao administrador:"
+            echo "    sudo apt-get install python3-pip python3-venv"
+            exit 1
+        fi
+
+        $sys_pip install --quiet --user -e "${SCRIPT_DIR}" \
+            || { echo "${RED}  ✘ pip install --user falhou${R}"; exit 1; }
+
+        # Wrapper Python → sistema
+        cat > "${VENV_PATH}/bin/python" <<PYWRAPPER
+#!/usr/bin/env bash
+exec "$PYTHON_BASE" "\$@"
+PYWRAPPER
+        chmod +x "${VENV_PATH}/bin/python"
+
+        # Localizar binário instalado
+        local user_bin
+        user_bin="$("$PYTHON_BASE" -m site --user-base 2>/dev/null)/bin/a11y-autofix"
+        if [[ -x "$user_bin" ]]; then
+            ln -sf "$user_bin" "${VENV_PATH}/bin/a11y-autofix"
+        else
+            # Wrapper direto como último recurso
+            cat > "${VENV_PATH}/bin/a11y-autofix" <<WRAPPER
+#!/usr/bin/env bash
+export PYTHONPATH="${SCRIPT_DIR}\${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON_BASE" -m a11y_autofix.cli "\$@"
+WRAPPER
+            chmod +x "${VENV_PATH}/bin/a11y-autofix"
+        fi
+    fi
+
+    # ── Verificação final ─────────────────────────────────────────────────────
     if [[ ! -x "${VENV_PATH}/bin/a11y-autofix" ]]; then
-        echo "${RED}  ✘  Binário a11y-autofix não encontrado após instalação.${R}"
-        echo "  Verifique o pyproject.toml → [project.scripts]."
+        echo "${RED}  ✘  Falha ao configurar ambiente após todas as tentativas.${R}"
         exit 1
     fi
 
-    echo "${GREEN}  ✔  Ambiente configurado.${R}"
+    echo "${GREEN}  ✔  Ambiente pronto.${R}"
 }
 
 setup_venv
