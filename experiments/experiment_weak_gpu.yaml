@@ -1,50 +1,35 @@
 # experiments/experiment_weak_gpu.yaml
 # ─────────────────────────────────────────────────────────────────────────────
-# Experimento para GPU fraca (≤8 GB VRAM) — Windows / máquina secundária
+# Experimento para GPU com 4 GB VRAM — Windows com venv
 #
 # SELEÇÃO DE MODELOS — RACIOCÍNIO:
 # ═══════════════════════════════════════════════════════════════════════════
 #
-#   GPU forte (RTX 4090, 24 GB VRAM) → experiment_14b_comparison.yaml
-#     └─ Roda modelos ~14B Q4 (~9-10 GB cada): Qwen14B, DeepSeek16B, StarCoder15B
+#   Hardware alvo: 4 GB VRAM + ~16 GB RAM disponível
 #
-#   GPU fraca (≤8 GB VRAM) → ESTE ARQUIVO
-#     └─ Modelos que cabem confortavelmente sem CPU-offload excessivo:
+#   Com 4 GB VRAM, o Ollama usa CPU-offload automático:
+#   os layers que não cabem na GPU são executados na RAM.
+#   Com 16 GB RAM disponível isso é viável para modelos até 7B.
 #
-#   Modelo                VRAM (Q4_K_M)  Backend  Plataforma  Papel
+#   Modelo                VRAM (Q4_K_M)  Comportamento na 4GB GPU
 #   ──────────────────────────────────────────────────────────────────────────
-#   qwen2.5-coder-7b      ~4.1 GB        ollama   Windows ✓   Principal (SOTA 7B)
-#   codellama-7b          ~4.1 GB        ollama   Windows ✓   Comparação (família Meta)
-#   qwen2.5-coder-3b      ~2.0 GB        ollama   Windows ✓   Baseline leve
+#   qwen2.5-coder-3b      ~2.0 GB        100% GPU  → rápido (~5-10 tok/s)
+#   qwen2.5-coder-7b      ~4.1 GB        ~3.5GB GPU + ~0.6GB RAM → médio (~3-6 tok/s)
+#   codellama-7b          ~4.1 GB        ~3.5GB GPU + ~0.6GB RAM → médio (~3-6 tok/s)
 #
-#   EXCLUÍDOS desta configuração (VRAM insuficiente):
-#     qwen2.5-coder-14b   ~8.9 GB  → apenas com CPU offload pesado (muito lento)
-#     deepseek-coder-16b  ~10 GB   → não cabe
-#     starcoder2-15b      ~9  GB   → não cabe
-#     modelos vLLM        vários   → vLLM não suporta Windows nativamente
+#   EXCLUÍDOS:
+#     qwen2.5-coder-14b   ~8.9 GB  → >50% na CPU, muito lento para experimento
+#     modelos vLLM                 → vLLM não suporta Windows nativamente
 #
-# REGRA PRÁTICA DE SELEÇÃO AUTOMÁTICA:
-#   VRAM ≥ 6 GB  → qwen2.5-coder-7b + codellama-7b + qwen2.5-coder-3b  (este YAML)
-#   VRAM < 6 GB  → qwen2.5-coder-3b apenas (editar lista abaixo)
-#   VRAM ≥ 12 GB → experiment_14b_comparison.yaml (GPU forte)
+# EXECUÇÃO (via venv no Windows):
+#   .\run_experiment.ps1                    # roda com configuração padrão
+#   .\run_experiment.ps1 -Output meu_run1   # diretório de saída customizado
 #
-# Estimativa de duração (GPU fraca 6-8 GB, 35 projetos, 3 modelos, 3 reps):
-#   ~3-6 horas total — depende da densidade de issues e da GPU específica
+#   Em outro terminal para monitorar:
+#   .\watch.ps1
 #
-# Hardware alvo: RTX 3060/3070 (8 GB), RTX 4060 (8 GB), GTX 1080 (8 GB),
-#                RTX 2060 (6 GB), GTX 1660 Super (6 GB) etc.
-#
-# Compatibilidade Windows: todos os modelos usam backend=ollama
-#   (vLLM exige Linux; LM Studio funciona mas é mais lento que ollama)
-#
-# Uso:
-#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml
-#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml \
-#       --output experiment-results/weak_gpu_run_1
-#
-# Para retomar após interrupção (usa checkpoints):
-#   a11y-autofix experiment experiments/experiment_weak_gpu.yaml \
-#       --resume experiment-results/weak_gpu_run_1/checkpoints
+# Para retomar após interrupção (checkpoints automáticos):
+#   .\run_experiment.ps1    # detecta checkpoints existentes e retoma
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "7B Code Models — A11y Auto-fix (GPU Fraca / Windows)"
@@ -131,12 +116,13 @@ execution:
   max_concurrent_models: 1   # 1 modelo de cada vez (sem VRAM para mais)
   temperature: 0.1
 
-# ── Timeouts (ajustados para GPU fraca — inferência mais lenta) ───────────────
-# GPU fraca com modelo 7B Q4: ~5-30s por arquivo (vs ~5s no RTX 4090)
-# Margem extra para picos de carga e swapping de KV-cache
-scan_timeout_s: 120          # scanner por arquivo (igual ao experimento principal)
-agent_timeout_s: 300         # LLM por arquivo — 5 min (3× mais que no 4090)
-model_load_timeout_s: 180    # carregamento inicial do modelo (~60s em GPU fraca)
+# ── Timeouts (calibrados para 4 GB VRAM + CPU offload) ───────────────────────
+# 4 GB VRAM com modelo 7B Q4: ~3-6 tok/s (parte na GPU, parte na CPU/RAM)
+# Arquivo típico de 200 linhas com ~5 issues → ~60-180s de inferência
+# Margem: 10 min por arquivo para cobrir projetos com muitas issues
+scan_timeout_s: 120          # scanner por arquivo
+agent_timeout_s: 600         # LLM por arquivo — 10 min (CPU offload é lento)
+model_load_timeout_s: 300    # carregamento do modelo — 5 min (offload demora mais)
 
 # ── Métricas (iguais ao experimento principal para comparabilidade) ────────────
 metrics:
