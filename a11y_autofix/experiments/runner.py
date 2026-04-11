@@ -345,6 +345,38 @@ class ScanResultCache:
     def __len__(self) -> int:
         return len(self._data)
 
+    @staticmethod
+    def _is_page_level_issue(issue: dict[str, Any]) -> bool:
+        """
+        Retorna True se o issue é uma regra de nível de página que gera
+        falso positivo sistemático em harness de componente isolado.
+
+        Essas regras (page-has-heading-one, landmark-one-main, etc.) verificam
+        propriedades da página como um todo e não podem ser corrigidas em
+        componentes individuais. Elas não devem entrar no dataset de experimento.
+
+        A filtragem primária ocorre em DetectionProtocol._group_findings(), mas
+        resultados pré-compilados importados de dataset/results/ bypassam o
+        protocolo, então precisamos re-filtrar aqui.
+        """
+        from a11y_autofix.protocol.detection import PAGE_LEVEL_RULES_EXCLUDED
+
+        # Checar rule_id nos findings (forma mais confiável)
+        for finding in issue.get("findings", []):
+            rule_id = (finding.get("rule_id") or "").lower()
+            if rule_id in PAGE_LEVEL_RULES_EXCLUDED:
+                return True
+
+        # Fallback: checar pelo seletor html + message típica de page-level
+        selector = (issue.get("selector") or "").lower()
+        message = (issue.get("message") or "").lower()
+        if selector == "html" and (
+            "heading" in message or "landmark" in message or "main" in message
+        ):
+            return True
+
+        return False
+
     def import_from_dataset_results(
         self,
         repo_root: Path,
@@ -358,11 +390,16 @@ class ScanResultCache:
         A normalização resolve o sufixo relativo a partir de 'dataset/snapshots/<project>/'
         e o remapeia para o path atual.
 
+        IMPORTANTE: Issues de nível de página (page-has-heading-one, landmark-one-main, etc.)
+        são filtrados durante a importação. Eles bypassam o DetectionProtocol quando carregados
+        de arquivos pré-compilados, gerando 75%+ de falsos positivos não-corrigíveis no dataset.
+
         Retorna o número de entradas novas importadas.
         """
         results_dir = repo_root / "dataset" / "results"
         snapshots_dir = repo_root / "dataset" / "snapshots"
         imported = 0
+        page_level_filtered = 0
 
         for project_id in project_ids:
             scan_file = results_dir / project_id / "scan_results.json"
@@ -414,16 +451,29 @@ class ScanResultCache:
                 entry_copy = dict(entry)
                 entry_copy["file"] = str(local_path)
 
-                # Reescrever 'file' dentro dos issues
+                # Reescrever 'file' dentro dos issues E filtrar issues de nível de página.
+                # Resultados pré-compilados bypassam o DetectionProtocol, então
+                # precisamos re-aplicar o filtro de regras page-level aqui.
                 new_issues = []
                 for iss in entry_copy.get("issues", []):
                     iss2 = dict(iss)
                     iss2["file"] = str(local_path)
+                    if self._is_page_level_issue(iss2):
+                        page_level_filtered += 1
+                        continue
                     new_issues.append(iss2)
                 entry_copy["issues"] = new_issues
 
                 self._data[key] = entry_copy
                 imported += 1
+
+        if page_level_filtered > 0:
+            log.info(
+                "dataset_import_page_level_filtered",
+                filtered=page_level_filtered,
+                reason="page-level rules (page-has-heading-one, landmark-one-main, etc.) "
+                       "generate systematic false positives in component harness",
+            )
 
         return imported
 
@@ -1111,7 +1161,9 @@ class ExperimentRunner:
         checkpoint_dir = checkpoints_dir / model_id.replace("/", "_") / strategy
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        best_attempt = fix_result.best_attempt
+        best_attempt = fix_result.best_attempt  # first successful attempt (or None)
+        # For failure diagnostics, use the last attempt regardless of success
+        last_attempt = fix_result.attempts[-1] if fix_result.attempts else None
         total_input_tokens: int = 0
         total_output_tokens: int = 0
         total_tokens_all: int = 0
@@ -1163,10 +1215,18 @@ class ExperimentRunner:
 
             # Validação
             "validation_layer_rejected": None,  # populated by ValidationPipeline if used
-            "failure_mode": best_attempt.error if (best_attempt and best_attempt.error) else None,
+            # failure_mode: error from the last attempt (not just the first successful one)
+            # This ensures 404 errors and LLM failures are captured even when all attempts fail.
+            "failure_mode": (
+                last_attempt.error if (last_attempt and last_attempt.error)
+                else (best_attempt.error if (best_attempt and best_attempt.error) else None)
+            ),
 
-            # Agente e tentativas
-            "agent_used": best_attempt.agent if best_attempt else "unknown",
+            # Agente e tentativas — use last attempt for agent_used when all failed
+            "agent_used": (
+                best_attempt.agent if best_attempt
+                else (last_attempt.agent if last_attempt else "unknown")
+            ),
             "attempt_number": len(fix_result.attempts),
             "attempts_detail": [
                 {

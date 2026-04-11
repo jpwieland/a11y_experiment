@@ -30,13 +30,204 @@ class PromptingStrategy(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Few-shot examples (Component 5) — included only for FEW_SHOT and CoT
+# Few-shot examples per issue type (Component 5)
+# Organised by the actual distribution of issues in the corpus:
+#   semantic  75.5% (WCAG 2.4.6, 1.3.1) — heading hierarchy, landmarks, div→semantic
+#   aria      22.0% (WCAG 4.1.2)         — button-name, link-name, role attrs
+#   keyboard   2.2% (WCAG 2.1.1)         — click-without-keyboard, focus
+#   label      0.1% (WCAG 3.3.2)         — label association
+#   alt-text   0.1% (WCAG 1.1.1)         — missing alt
 # ---------------------------------------------------------------------------
 
-_FEW_SHOT_EXAMPLES = """
-### Component 5: Few-Shot Examples
+_FEW_SHOT_SEMANTIC = """
+**Example — Missing level-1 heading (WCAG 2.4.6)**
+Issue: page-has-heading-one — component content has no <h1> landmark.
+Before:
+```tsx
+export function Dashboard() {
+  return (
+    <div className="dashboard">
+      <h2>Recent Activity</h2>
+      <ActivityList />
+    </div>
+  );
+}
+```
+After:
+```tsx
+export function Dashboard() {
+  return (
+    <div className="dashboard">
+      <h1 className="sr-only">Dashboard</h1>
+      <h2>Recent Activity</h2>
+      <ActivityList />
+    </div>
+  );
+}
+```
 
-**Example 1 — Missing alt text (WCAG 1.1.1)**
+**Example — Heading hierarchy skip (WCAG 2.4.6)**
+Issue: heading-order — heading levels must not be skipped (h1 → h3 skips h2).
+Before:
+```tsx
+<section>
+  <h1>Settings</h1>
+  <h3>Profile</h3>
+  <h3>Security</h3>
+</section>
+```
+After:
+```tsx
+<section>
+  <h1>Settings</h1>
+  <h2>Profile</h2>
+  <h2>Security</h2>
+</section>
+```
+
+**Example — Non-semantic interactive element (WCAG 1.3.1)**
+Issue: div used as button — must be a native <button>.
+Before:
+```tsx
+<div className="close-btn" onClick={onClose}>×</div>
+```
+After:
+```tsx
+<button
+  type="button"
+  className="close-btn"
+  onClick={onClose}
+  aria-label="Close"
+>
+  ×
+</button>
+```
+
+**Example — Missing landmark (WCAG 1.3.1)**
+Issue: landmark-one-main — page must have exactly one <main> element.
+Before:
+```tsx
+export function PageLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="layout">
+      <header>...</header>
+      <div className="content">{children}</div>
+    </div>
+  );
+}
+```
+After:
+```tsx
+export function PageLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="layout">
+      <header>...</header>
+      <main className="content">{children}</main>
+    </div>
+  );
+}
+```
+""".strip()
+
+_FEW_SHOT_ARIA = """
+**Example — Button without accessible name (WCAG 4.1.2)**
+Issue: button-name — buttons must have discernible text.
+Before:
+```tsx
+<button onClick={toggleMenu} className="menu-btn">
+  <svg aria-hidden="true"><path d="..." /></svg>
+</button>
+```
+After:
+```tsx
+<button onClick={toggleMenu} className="menu-btn" aria-label="Toggle navigation menu">
+  <svg aria-hidden="true"><path d="..." /></svg>
+</button>
+```
+
+**Example — Link without accessible name (WCAG 4.1.2)**
+Issue: link-name — links must have discernible text.
+Before:
+```tsx
+<a href="/profile">
+  <img src="/avatar.png" />
+</a>
+```
+After:
+```tsx
+<a href="/profile">
+  <img src="/avatar.png" alt="Go to user profile" />
+</a>
+```
+
+**Example — Missing required ARIA attribute (WCAG 4.1.2)**
+Issue: aria-required-attr — role="checkbox" requires aria-checked.
+Before:
+```tsx
+<div role="checkbox" onClick={toggleCheck} className="custom-check">
+  {checked ? '✓' : ''}
+</div>
+```
+After:
+```tsx
+<div
+  role="checkbox"
+  aria-checked={checked}
+  tabIndex={0}
+  onClick={toggleCheck}
+  onKeyDown={(e) => e.key === ' ' && toggleCheck()}
+  className="custom-check"
+>
+  {checked ? '✓' : ''}
+</div>
+```
+
+**Example — Invalid ARIA role (WCAG 4.1.2)**
+Issue: aria-roles — role="button" on <input> is invalid.
+Before:
+```tsx
+<input type="text" role="button" onClick={handleClick} />
+```
+After:
+```tsx
+<button type="button" onClick={handleClick} className="input-like" />
+```
+""".strip()
+
+_FEW_SHOT_KEYBOARD = """
+**Example — Click event without keyboard (WCAG 2.1.1)**
+Issue: click-events-have-key-events — interactive elements need keyboard support.
+Before:
+```tsx
+<div onClick={handleSelect} className="option">{label}</div>
+```
+After:
+```tsx
+<div
+  role="button"
+  tabIndex={0}
+  onClick={handleSelect}
+  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSelect(); }}
+  className="option"
+>
+  {label}
+</div>
+```
+""".strip()
+
+_FEW_SHOT_LABEL_AND_ALT = """
+**Example — Missing form label (WCAG 3.3.2)**
+Before:
+```tsx
+<input type="email" placeholder="Enter email" />
+```
+After:
+```tsx
+<label htmlFor="email-input">Email address</label>
+<input id="email-input" type="email" placeholder="Enter email" />
+```
+
+**Example — Missing alt text (WCAG 1.1.1)**
 Before:
 ```tsx
 <img src="/hero.jpg" className="hero-image" />
@@ -45,35 +236,58 @@ After:
 ```tsx
 <img src="/hero.jpg" className="hero-image" alt="Hero banner showing the product dashboard" />
 ```
-
-**Example 2 — Missing form label (WCAG 1.3.1)**
-Before:
-```tsx
-<input type="email" placeholder="Enter email" />
-```
-After:
-```tsx
-<label htmlFor="email-input">Email address</label>
-<input id="email-input" type="email" placeholder="Enter email" aria-describedby="email-hint" />
-<span id="email-hint" className="hint">We will never share your email</span>
-```
-
-**Example 3 — Keyboard inaccessible button (WCAG 2.1.1)**
-Before:
-```tsx
-<div onClick={handleSubmit} className="btn-primary">Submit</div>
-```
-After:
-```tsx
-<button
-  type="button"
-  onClick={handleSubmit}
-  className="btn-primary"
->
-  Submit
-</button>
-```
 """.strip()
+
+
+def _select_few_shot_examples(issues: list["A11yIssue"]) -> str:
+    """
+    Select few-shot examples relevant to the actual issue types present.
+
+    Prioritises examples for the issue types that are most frequent in the
+    file being fixed, ensuring the model sees directly applicable corrections.
+    Falls back to all examples when issue mix is diverse.
+    """
+    from a11y_autofix.config import IssueType
+
+    if not issues:
+        return "\n\n".join([_FEW_SHOT_SEMANTIC, _FEW_SHOT_ARIA])
+
+    types_present = {i.issue_type for i in issues}
+
+    sections: list[str] = []
+
+    # Always include semantic examples (75% of corpus)
+    if IssueType.SEMANTIC in types_present or not sections:
+        sections.append(_FEW_SHOT_SEMANTIC)
+
+    if IssueType.ARIA in types_present:
+        sections.append(_FEW_SHOT_ARIA)
+
+    if IssueType.KEYBOARD in types_present:
+        sections.append(_FEW_SHOT_KEYBOARD)
+
+    if IssueType.LABEL in types_present or IssueType.ALT_TEXT in types_present:
+        sections.append(_FEW_SHOT_LABEL_AND_ALT)
+
+    # If only one type present, also show one extra category for context
+    if len(types_present) == 1 and IssueType.ARIA in types_present:
+        sections.append(_FEW_SHOT_SEMANTIC)
+
+    header = "### Component 5: Few-Shot Examples (tailored to issue types present)\n"
+    return header + "\n\n---\n\n".join(sections)
+
+
+# Legacy combined constant kept for backward compat — now built dynamically
+_FEW_SHOT_EXAMPLES = (
+    "### Component 5: Few-Shot Examples\n\n"
+    + _FEW_SHOT_SEMANTIC
+    + "\n\n---\n\n"
+    + _FEW_SHOT_ARIA
+    + "\n\n---\n\n"
+    + _FEW_SHOT_KEYBOARD
+    + "\n\n---\n\n"
+    + _FEW_SHOT_LABEL_AND_ALT
+)
 
 # ---------------------------------------------------------------------------
 # CoT reasoning instruction appended to Component 6 (chain-of-thought only)
@@ -146,9 +360,11 @@ class PromptBuilder:
         component4 = f"## Accessibility Issues ({len(issues)} total):\n\n{issues_text}"
 
         # Component 5: Few-shot examples (absent for zero-shot)
+        # Examples are selected based on the issue types present in this file,
+        # so the model sees directly relevant corrections rather than generic ones.
         component5 = ""
         if strategy in (PromptingStrategy.FEW_SHOT, PromptingStrategy.CHAIN_OF_THOUGHT):
-            component5 = _FEW_SHOT_EXAMPLES
+            component5 = _select_few_shot_examples(issues)
 
         # Component 6: Output format specification
         component6 = (

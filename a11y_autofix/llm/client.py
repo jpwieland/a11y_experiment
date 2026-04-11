@@ -119,6 +119,22 @@ class LocalLLMClient(BaseLLMClient):
                     f"Original error: {e}"
                 ) from e
 
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise RuntimeError(
+                        f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
+                        f"Model requested: {self.config.model_id}\n"
+                        f"Possible fixes:\n"
+                        f"  1. Verify Ollama is running: ollama serve\n"
+                        f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
+                        f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
+                        f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
+                        f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
+                    ) from e
+                raise RuntimeError(
+                    f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+                ) from e
+
             except (KeyError, IndexError) as e:
                 raise RuntimeError(
                     f"Unexpected LLM response format: {data}\n"
@@ -163,7 +179,23 @@ class LocalLLMClient(BaseLLMClient):
                 json=payload,
                 headers=headers,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise RuntimeError(
+                        f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
+                        f"Model requested: {self.config.model_id}\n"
+                        f"Possible fixes:\n"
+                        f"  1. Verify Ollama is running: ollama serve\n"
+                        f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
+                        f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
+                        f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
+                        f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
+                    ) from e
+                raise RuntimeError(
+                    f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+                ) from e
             data = resp.json()
 
         elapsed = time.perf_counter() - t0
@@ -184,6 +216,30 @@ class LocalLLMClient(BaseLLMClient):
             tokens=metrics["tokens_total"],
         )
         return content, metrics
+
+    async def test_chat(self) -> tuple[bool, str]:
+        """
+        Testa o endpoint /v1/chat/completions com um prompt mínimo.
+
+        Diferente de health_check() que só testa /v1/models, este método
+        verifica se a inferência real está funcionando. Usado como pre-flight
+        antes de processar arquivos para detectar 404 imediatamente.
+
+        Returns:
+            Tupla (ok, mensagem). ok=False indica falha de inferência.
+        """
+        try:
+            result = await self.complete(
+                system="You are a test assistant.",
+                user="Reply with exactly: OK",
+                temperature=0.0,
+                max_tokens=5,
+            )
+            return True, f"Chat endpoint OK (response: {result.strip()[:20]!r})"
+        except RuntimeError as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Unexpected error: {e}"
 
     async def health_check(self) -> tuple[bool, str]:
         """

@@ -110,6 +110,20 @@ class Pipeline:
             log.warning("no_files_found", targets=[str(t) for t in targets])
             return []
 
+        # ── Pre-flight: verificar endpoint de chat ANTES de processar arquivos ──
+        # health_check() só testa /v1/models — não detecta 404 em /v1/chat/completions.
+        # test_chat() envia inferência real para garantir que o modelo responde.
+        if not self.dry_run:
+            ok, msg = await self.llm_client.test_chat()
+            if not ok:
+                raise RuntimeError(
+                    f"LLM pre-flight failed — aborting experiment to avoid wasting scan time.\n"
+                    f"Error: {msg}\n"
+                    f"Fix the LLM endpoint, then restart the experiment "
+                    f"(checkpoints already saved will be reused automatically)."
+                )
+            log.info("preflight_ok", model=self.model_config.model_id, result=msg)
+
         cached_count = sum(
             1 for f in files
             if scan_cache is not None and isinstance(
