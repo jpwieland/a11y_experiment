@@ -151,5 +151,9 @@ advanced:
   checkpoint_dir: experiment-results/weak_gpu_comparison/checkpoints
   save_diffs: true
   typescript_validation: false
-  max_files_per_project: null
+  # Limita a 60 arquivos por projeto (amostragem determinística, seed=42).
+  # Com 35 projetos: máx 2.100 arquivos vs 22.000+ sem limite.
+  # Justificativa: libs com 1.000+ componentes têm cobertura suficiente em 60 arquivos.
+  # Para remover o limite: max_files_per_project: null
+  max_files_per_project: 60
   seed: 42

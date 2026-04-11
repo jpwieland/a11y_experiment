@@ -111,6 +111,30 @@ class ExperimentConfig(BaseModel):
         description="Variantes para ablation study",
     )
 
+    # Limite de arquivos por projeto (evita explodir com componentes internos de libs)
+    max_files_per_project: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Máximo de arquivos por projeto de snapshot. "
+            "None = sem limite. "
+            "Recomendado: 50-100 para GPUs fracas."
+        ),
+    )
+
+    # Diretório de saída (lido do YAML top-level ou advanced.output_dir)
+    output_dir: str | None = Field(
+        default=None,
+        description="Diretório de saída relativo à raiz do projeto.",
+    )
+
+    # Campos extras do bloco advanced (achatados para facilitar acesso)
+    seed: int = Field(default=42, description="Seed para reproducibilidade.")
+    save_diffs: bool = Field(default=True)
+    typescript_validation: bool = Field(default=False)
+    auto_clone_missing_snapshots: bool = Field(default=True)
+    checkpoint_per_project: bool = Field(default=True)
+
     # Execution settings (methodology Section 3.1.3)
     execution: ExecutionConfig = Field(
         default_factory=ExecutionConfig,
@@ -133,22 +157,38 @@ class ExperimentConfig(BaseModel):
         """
         Resolve arquivos a partir dos padrões configurados.
 
+        Se max_files_per_project estiver definido, limita o número de arquivos
+        por entrada em self.files (cada entrada representa um projeto/snapshot).
+        Arquivos são ordenados deterministicamente e amostrados com seed fixo
+        para reproducibilidade entre modelos.
+
         Args:
             base_dir: Diretório base para resolução de paths relativos.
 
         Returns:
             Lista de arquivos encontrados.
         """
+        import random as _random
         from a11y_autofix.utils.files import find_react_files
 
         base = base_dir or Path.cwd()
         resolved: list[Path] = []
+
+        rng = _random.Random(self.seed)
 
         for pattern in self.files:
             path = Path(pattern)
             if not path.is_absolute():
                 path = base / pattern
             found = find_react_files(path)
+
+            # Aplicar limite por projeto
+            if self.max_files_per_project is not None and len(found) > self.max_files_per_project:
+                # Amostragem determinística: shuffle com seed, pegar N primeiros
+                sample = list(found)
+                rng.shuffle(sample)
+                found = sorted(sample[: self.max_files_per_project])
+
             resolved.extend(found)
 
         # Deduplicar mantendo ordem
@@ -181,5 +221,24 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
 
     with open(path) as f:
         data: dict[str, Any] = yaml.safe_load(f) or {}
+
+    # Achatar bloco `advanced` nos campos de nível superior
+    # (compatibilidade com YAMLs legados que usam advanced.max_files_per_project etc.)
+    advanced: dict[str, Any] = data.pop("advanced", {}) or {}
+    for key in (
+        "max_files_per_project", "seed", "save_diffs",
+        "typescript_validation", "auto_clone_missing_snapshots",
+        "checkpoint_per_project",
+    ):
+        if key in advanced and key not in data:
+            data[key] = advanced[key]
+
+    # Mover output_dir do advanced para o nível raiz se necessário
+    if "output_dir" in advanced and "output_dir" not in data:
+        data["output_dir"] = advanced["output_dir"]
+
+    # Remover campos não reconhecidos pelo schema (ignorar sem erro)
+    known_fields = ExperimentConfig.model_fields.keys()
+    data = {k: v for k, v in data.items() if k in known_fields}
 
     return ExperimentConfig(**data)

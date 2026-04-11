@@ -82,122 +82,140 @@ class Pipeline:
         scan_cache: "dict[str, object] | None" = None,
     ) -> list[FixResult]:
         """
-        Executa o pipeline completo para uma lista de targets.
+        Pipeline em streaming: scan e fix acontecem CONCORRENTEMENTE.
+
+        Arquitetura produtora-consumidora:
+          • scan_sem controla quantos scanners rodam em paralelo
+          • fix_sem  controla quantos agentes LLM rodam em paralelo
+          • Cada arquivo entra no fix assim que seu scan termina —
+            o LLM começa a trabalhar nos primeiros arquivos enquanto
+            o scan ainda processa os demais.
+          • scan_cache é lido E escrito: cache hits evitam re-scan
+            em runs subsequentes (modelos 2 e 3 reusam resultados do 1).
 
         Args:
-            targets: Arquivos, diretórios ou padrões glob.
+            targets:    Arquivos, diretórios ou padrões glob.
             wcag_level: Nível WCAG alvo.
             output_dir: Diretório de saída para relatórios.
-            on_file_done: Callback chamado após cada arquivo.
-            scan_cache: Cache de ScanResult por str(file_path). Se fornecido,
-                        arquivos presentes no cache não são re-escaneados.
-                        Produzido por ScanResultCache.to_dict() no runner.
-
-        Returns:
-            Lista de FixResult para cada arquivo processado.
+            on_file_done: Callback async chamado após cada arquivo.
+            scan_cache: Dict mutável {str(path) → ScanResult}. Pipeline
+                        lê hits e escreve misses para uso pelos modelos
+                        seguintes. Persistência em disco é responsabilidade
+                        do runner (ScanResultCache.save()).
         """
-        # 1. Descobrir arquivos
+        from a11y_autofix.config import ScanResult
+
         files = self._discover_files(targets)
         if not files:
             log.warning("no_files_found", targets=[str(t) for t in targets])
             return []
 
-        log.info("pipeline_start", files=len(files), model=self.model_config.model_id)
-
-        # 2. Scan paralelo — usa cache quando disponível
-        if scan_cache:
-            from a11y_autofix.config import ScanResult
-            cached_scans: list[ScanResult] = []
-            files_to_scan: list[Path] = []
-            for f in files:
-                cached = scan_cache.get(str(f))
-                if cached is not None and isinstance(cached, ScanResult):
-                    cached_scans.append(cached)
-                else:
-                    files_to_scan.append(f)
-
-            if files_to_scan:
-                log.info("scan_partial_cache",
-                         cached=len(cached_scans), to_scan=len(files_to_scan))
-                fresh_scans = await self.scanner.scan_files(files_to_scan, wcag_level)
-                # Reconstituir na ordem original dos arquivos
-                fresh_map = {str(r.file): r for r in fresh_scans}
-                scan_results_ordered: list[ScanResult] = []
-                cached_map = {str(r.file): r for r in cached_scans}
-                for f in files:
-                    key = str(f)
-                    scan_results_ordered.append(
-                        cached_map.get(key) or fresh_map.get(key) or
-                        (await self.scanner.scan_file(f, wcag_level))
-                    )
-                scan_results = scan_results_ordered
-            else:
-                log.info("scan_fully_cached", files=len(files))
-                # Reordenar para manter ordem original
-                cached_map2 = {str(r.file): r for r in cached_scans}
-                scan_results = [cached_map2[str(f)] for f in files]
-        else:
-            scan_results = await self.scanner.scan_files(files, wcag_level)
-
-        files_with_issues = [s for s in scan_results if s.has_issues]
+        cached_count = sum(
+            1 for f in files
+            if scan_cache is not None and isinstance(
+                scan_cache.get(str(f)) or scan_cache.get(str(f.resolve())), ScanResult
+            )
+        )
         log.info(
-            "scan_complete",
-            total=len(scan_results),
-            with_issues=len(files_with_issues),
+            "pipeline_start",
+            files=len(files),
+            cache_hits=cached_count,
+            to_scan=len(files) - cached_count,
+            model=self.model_config.model_id,
         )
 
-        if self.dry_run:
-            log.info("dry_run_mode", skipping_fixes=True)
-            return [
-                FixResult(
-                    file=s.file,
-                    scan_result=s,
+        # Semáforos independentes: scan e fix rodam ao mesmo tempo
+        scan_sem = asyncio.Semaphore(self.settings.max_concurrent_scans)
+        fix_sem  = asyncio.Semaphore(self.settings.max_concurrent_agents)
+
+        all_results: list[FixResult] = []
+        results_lock = asyncio.Lock()
+        scanned_count = 0
+        fixed_count   = 0
+
+        async def process_file(file: Path) -> FixResult:
+            nonlocal scanned_count, fixed_count
+
+            # ── Fase 1: Scan (ou hit no cache) ────────────────────────────────
+            cached_sr = None
+            if scan_cache is not None:
+                # Tentar str(file) primeiro, depois str(file.resolve()) como fallback
+                cached_sr = scan_cache.get(str(file))
+                if cached_sr is None:
+                    cached_sr = scan_cache.get(str(file.resolve()))
+
+            if isinstance(cached_sr, ScanResult):
+                scan_result = cached_sr
+            else:
+                async with scan_sem:
+                    scan_result = await self.scanner.scan_file(file, wcag_level)
+                # Escrever no cache com ambas as chaves para lookup consistente
+                if scan_cache is not None:
+                    scan_cache[str(file)] = scan_result
+                    scan_cache[str(file.resolve())] = scan_result
+
+            async with results_lock:
+                scanned_count += 1
+                if scanned_count % 100 == 0 or scanned_count == len(files):
+                    log.info(
+                        "scan_progress",
+                        scanned=scanned_count,
+                        total=len(files),
+                        fixed=fixed_count,
+                    )
+
+            # ── Fase 2: Fix (imediatamente após o scan) ────────────────────────
+            if self.dry_run:
+                result = FixResult(
+                    file=file,
+                    scan_result=scan_result,
                     final_success=False,
                     issues_fixed=0,
-                    issues_pending=len(s.issues),
+                    issues_pending=len(scan_result.issues),
                     total_time=0.0,
                 )
-                for s in scan_results
-            ]
-
-        # 3. Corrigir arquivos com issues
-        sem = asyncio.Semaphore(self.settings.max_concurrent_agents)
-
-        async def fix_with_sem(scan: object) -> FixResult:
-            from a11y_autofix.config import ScanResult
-            if not isinstance(scan, ScanResult):
-                raise TypeError
-            if not scan.has_issues:
+            elif not scan_result.has_issues:
                 result = FixResult(
-                    file=scan.file,
-                    scan_result=scan,
+                    file=file,
+                    scan_result=scan_result,
                     final_success=True,
                     issues_fixed=0,
                     issues_pending=0,
                     total_time=0.0,
                 )
             else:
-                async with sem:
-                    result = await self._fix_file(scan, wcag_level)
+                async with fix_sem:
+                    result = await self._fix_file(scan_result, wcag_level)
+                async with results_lock:
+                    fixed_count += 1
+
+            async with results_lock:
+                all_results.append(result)
+
             if on_file_done is not None:
                 cb = on_file_done(result)
                 if asyncio.iscoroutine(cb):
                     await cb
+
             return result
 
-        fix_results = await asyncio.gather(*[fix_with_sem(s) for s in scan_results])
+        await asyncio.gather(*[process_file(f) for f in files])
 
-        # 4. Gerar relatórios
+        # Relatórios
         if output_dir:
+            scan_results_typed = [
+                r.scan_result for r in all_results
+                if isinstance(r.scan_result, ScanResult)
+            ]
             await self._generate_reports(
-                scan_results=scan_results,
-                fix_results=list(fix_results),
+                scan_results=scan_results_typed,
+                fix_results=all_results,
                 output_dir=output_dir,
                 wcag_level=wcag_level,
             )
 
-        total_fixed = sum(r.issues_fixed for r in fix_results)
-        total_issues = sum(len(r.scan_result.issues) for r in fix_results)
+        total_fixed  = sum(r.issues_fixed for r in all_results)
+        total_issues = sum(len(r.scan_result.issues) for r in all_results)
         log.info(
             "pipeline_complete",
             fixed=total_fixed,
@@ -205,7 +223,7 @@ class Pipeline:
             rate=f"{total_fixed/total_issues*100:.1f}%" if total_issues > 0 else "0%",
         )
 
-        return list(fix_results)
+        return all_results
 
     async def _fix_file(self, scan: object, wcag_level: str) -> FixResult:
         """

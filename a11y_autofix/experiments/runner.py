@@ -345,6 +345,88 @@ class ScanResultCache:
     def __len__(self) -> int:
         return len(self._data)
 
+    def import_from_dataset_results(
+        self,
+        repo_root: Path,
+        project_ids: list[str],
+    ) -> int:
+        """
+        Importa resultados de scan já compilados de dataset/results/<project>/scan_results.json.
+
+        Os paths dentro dos JSONs são absolutos da máquina onde o scan foi feito
+        (podem ser Windows enquanto esta máquina é Linux, ou ter caminhos diferentes).
+        A normalização resolve o sufixo relativo a partir de 'dataset/snapshots/<project>/'
+        e o remapeia para o path atual.
+
+        Retorna o número de entradas novas importadas.
+        """
+        results_dir = repo_root / "dataset" / "results"
+        snapshots_dir = repo_root / "dataset" / "snapshots"
+        imported = 0
+
+        for project_id in project_ids:
+            scan_file = results_dir / project_id / "scan_results.json"
+            if not scan_file.exists():
+                log.debug("dataset_scan_missing", project=project_id)
+                continue
+
+            try:
+                entries: list[dict[str, Any]] = json.loads(
+                    scan_file.read_text(encoding="utf-8")
+                )
+            except Exception as exc:
+                log.warning("dataset_scan_load_failed",
+                            project=project_id, error=str(exc))
+                continue
+
+            project_snap_dir = snapshots_dir / project_id
+
+            for entry in entries:
+                raw_file_str: str = entry.get("file", "")
+                if not raw_file_str:
+                    continue
+
+                # Normalizar path: extrair sufixo relativo ao snapshot do projeto.
+                # O separador pode ser '\' (Windows) ou '/' (Linux/Mac).
+                normalized = raw_file_str.replace("\\", "/")
+
+                # Encontrar o ponto de corte: .../dataset/snapshots/<project>/...
+                marker = f"dataset/snapshots/{project_id}/"
+                idx = normalized.find(marker)
+                if idx == -1:
+                    # Fallback: tentar só pelo nome do projeto
+                    marker2 = f"{project_id}/"
+                    idx2 = normalized.find(marker2)
+                    if idx2 == -1:
+                        continue
+                    rel_suffix = normalized[idx2 + len(marker2):]
+                else:
+                    rel_suffix = normalized[idx + len(marker):]
+
+                # Reconstruir path absoluto correto para esta máquina
+                local_path = (project_snap_dir / rel_suffix).resolve()
+                key = str(local_path)
+
+                if key in self._data:
+                    continue  # já no cache
+
+                # Reescrever 'file' e campos aninhados com o path local
+                entry_copy = dict(entry)
+                entry_copy["file"] = str(local_path)
+
+                # Reescrever 'file' dentro dos issues
+                new_issues = []
+                for iss in entry_copy.get("issues", []):
+                    iss2 = dict(iss)
+                    iss2["file"] = str(local_path)
+                    new_issues.append(iss2)
+                entry_copy["issues"] = new_issues
+
+                self._data[key] = entry_copy
+                imported += 1
+
+        return imported
+
 
 _DEFAULT_SENSITIVITY_TEMPERATURES = [0.0, 0.1, 0.3, 0.5, 1.0]
 
@@ -427,48 +509,42 @@ class ExperimentRunner:
             output=str(output_dir),
         )
 
-        # ── Pre-scan: escanear TODOS os arquivos UMA VEZ antes do loop de modelos
-        # Os resultados são compartilhados entre todos os modelos via ScanResultCache,
-        # reduzindo o tempo total de scan de N_models × T_scan para 1 × T_scan.
+        # ── Scan cache compartilhado entre todos os modelos ──────────────────────
+        # O pipeline ESCREVE resultados de scan neste dict à medida que processa
+        # cada arquivo (streaming). Quando o modelo 2 começa, o cache já está
+        # populado pelo modelo 1 — nenhum arquivo é escaneado duas vezes.
+        # A persistência em disco acontece após cada modelo terminar.
         scan_cache = ScanResultCache(output_dir / "scan_cache.json")
         cached_count = scan_cache.load()
 
-        files_to_scan = [f for f in files if not scan_cache.has(f)]
+        # ── Importar scans já compilados de dataset/results/ ──────────────────
+        # Aproveita os resultados de scan executados anteriormente na fase de
+        # preparação do dataset, evitando qualquer re-scan desses arquivos.
+        repo_root = Path(__file__).parent.parent.parent
+        project_ids = self._extract_project_ids(config)
+        if project_ids:
+            imported = scan_cache.import_from_dataset_results(repo_root, project_ids)
+            if imported > 0:
+                scan_cache.save()
+                log.info(
+                    "dataset_scans_imported",
+                    imported=imported,
+                    total_cached=len(scan_cache),
+                    projects=len(project_ids),
+                )
 
+        # scan_dict é o dict mutável compartilhado — pipeline lê E escreve nele
+        scan_dict: dict[str, Any] = scan_cache.to_dict()
+
+        files_to_scan = len(files) - sum(1 for f in files if str(f.resolve()) in scan_dict or
+                                         str(f) in scan_dict)
         log.info(
-            "pre_scan_plan",
+            "scan_cache_ready",
+            cached=len(scan_cache),
             total_files=len(files),
-            already_cached=cached_count,
-            to_scan=len(files_to_scan),
+            files_to_scan=max(0, files_to_scan),
+            strategy="streaming",
         )
-
-        if files_to_scan:
-            from a11y_autofix.scanner.orchestrator import MultiToolScanner
-
-            # Scan com max concorrência — GPU não é usada nessa fase.
-            # Limita a 8 para não saturar Playwright/Chromium em memória.
-            pre_scan_settings = copy.copy(self.settings)
-            effective_scan_workers = min(len(files_to_scan), 8,
-                                        max(self.settings.max_concurrent_scans, 4))
-            object.__setattr__(pre_scan_settings, "max_concurrent_scans", effective_scan_workers)
-            pre_scanner = MultiToolScanner(pre_scan_settings)
-
-            log.info("pre_scan_start",
-                     files=len(files_to_scan), workers=effective_scan_workers)
-            t_scan_start = time.monotonic()
-            newly_scanned = await pre_scanner.scan_files(files_to_scan, config.wcag_level)
-            for r in newly_scanned:
-                scan_cache.put(r)
-            scan_cache.save()
-            log.info(
-                "pre_scan_complete",
-                scanned=len(newly_scanned),
-                elapsed_s=round(time.monotonic() - t_scan_start, 1),
-                total_cached=len(scan_cache),
-            )
-
-        # Dict pronto para injeção no Pipeline (evita re-scan em cada modelo)
-        scan_dict = scan_cache.to_dict()
 
         # ── Progress tracker (lido por watch_experiment.py) ───────────────────
         tracker = _ProgressTracker(output_dir, models_to_test, len(files))
@@ -529,7 +605,11 @@ class ExperimentRunner:
                     llm_concurrency=llm_concurrency,
                     gpu_monitor=gpu_monitor,
                     scan_cache=scan_cache,
+                    scan_dict=scan_dict,
                 )
+                # Persistir resultados de scan acumulados durante este modelo
+                # para que o próximo modelo os encontre no cache em disco
+                self._flush_scan_dict_to_cache(scan_dict, scan_cache)
                 await tracker.set_model_status(model_name, "done")
                 return result
 
@@ -779,6 +859,7 @@ class ExperimentRunner:
         llm_concurrency: int | None = None,
         gpu_monitor: "GpuMonitor | None" = None,
         scan_cache: "ScanResultCache | None" = None,
+        scan_dict: "dict[str, Any] | None" = None,
     ) -> tuple[str, list[FixResult]]:
         """
         Executa o pipeline para um único modelo.
@@ -847,8 +928,11 @@ class ExperimentRunner:
             llm_concurrency=effective_concurrency,
         )
 
-        # Construir dict de scan para injeção no pipeline (evita re-scan)
-        scan_dict = scan_cache.to_dict() if scan_cache else None
+        # scan_dict é o dict mutável compartilhado passado pelo caller.
+        # O pipeline escreve novos resultados de scan nele (streaming).
+        # Se não recebido, construir a partir do scan_cache local.
+        if scan_dict is None:
+            scan_dict = scan_cache.to_dict() if scan_cache else None
 
         # Callback chamado pelo pipeline após cada arquivo
         async def _on_file_done(fix_result: FixResult) -> None:
@@ -927,6 +1011,26 @@ class ExperimentRunner:
         )
 
         return model_name, results
+
+    def _flush_scan_dict_to_cache(
+        self,
+        scan_dict: dict[str, Any],
+        scan_cache: "ScanResultCache",
+    ) -> None:
+        """
+        Sincroniza novos scan results do dict mutável para o ScanResultCache
+        e salva em disco. Chamado após cada modelo para que o próximo modelo
+        encontre o cache populado sem refazer nenhum scan.
+        """
+        from a11y_autofix.config import ScanResult
+        new_entries = 0
+        for path_str, sr in scan_dict.items():
+            if isinstance(sr, ScanResult) and not scan_cache.has(sr.file):
+                scan_cache.put(sr)
+                new_entries += 1
+        if new_entries > 0:
+            scan_cache.save()
+            log.info("scan_cache_flushed", new_entries=new_entries, total=len(scan_cache))
 
     def _stub_scan(self, file: Path, cp: dict[str, Any]) -> "Any":
         """
@@ -1184,6 +1288,25 @@ class ExperimentRunner:
         log.info("experiment_summary_saved", path=str(summary_path))
 
     # ── Model resolution ───────────────────────────────────────────────────
+
+    def _extract_project_ids(self, config: ExperimentConfig) -> list[str]:
+        """
+        Extrai os IDs de projeto (nome do diretório de snapshot) dos patterns
+        definidos em config.files. Usado para importar scans pré-compilados.
+
+        Exemplo: 'dataset/snapshots/OHIF__Viewers' → 'OHIF__Viewers'
+        """
+        project_ids: list[str] = []
+        for pattern in config.files:
+            normalized = pattern.replace("\\", "/")
+            if "snapshots/" in normalized:
+                # Pegar a parte após 'snapshots/'
+                parts = normalized.split("snapshots/", 1)
+                if len(parts) == 2:
+                    proj = parts[1].split("/")[0].strip()
+                    if proj:
+                        project_ids.append(proj)
+        return list(dict.fromkeys(project_ids))  # deduplicar mantendo ordem
 
     def _resolve_models(self, model_specs: list[str]) -> list[str]:
         """Resolve model names, expanding groups if needed."""
