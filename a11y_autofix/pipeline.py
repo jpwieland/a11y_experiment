@@ -79,6 +79,7 @@ class Pipeline:
         wcag_level: str = "WCAG2AA",
         output_dir: Path | None = None,
         on_file_done: Callable | None = None,
+        scan_cache: "dict[str, object] | None" = None,
     ) -> list[FixResult]:
         """
         Executa o pipeline completo para uma lista de targets.
@@ -87,6 +88,10 @@ class Pipeline:
             targets: Arquivos, diretórios ou padrões glob.
             wcag_level: Nível WCAG alvo.
             output_dir: Diretório de saída para relatórios.
+            on_file_done: Callback chamado após cada arquivo.
+            scan_cache: Cache de ScanResult por str(file_path). Se fornecido,
+                        arquivos presentes no cache não são re-escaneados.
+                        Produzido por ScanResultCache.to_dict() no runner.
 
         Returns:
             Lista de FixResult para cada arquivo processado.
@@ -99,8 +104,40 @@ class Pipeline:
 
         log.info("pipeline_start", files=len(files), model=self.model_config.model_id)
 
-        # 2. Scan paralelo
-        scan_results = await self.scanner.scan_files(files, wcag_level)
+        # 2. Scan paralelo — usa cache quando disponível
+        if scan_cache:
+            from a11y_autofix.config import ScanResult
+            cached_scans: list[ScanResult] = []
+            files_to_scan: list[Path] = []
+            for f in files:
+                cached = scan_cache.get(str(f))
+                if cached is not None and isinstance(cached, ScanResult):
+                    cached_scans.append(cached)
+                else:
+                    files_to_scan.append(f)
+
+            if files_to_scan:
+                log.info("scan_partial_cache",
+                         cached=len(cached_scans), to_scan=len(files_to_scan))
+                fresh_scans = await self.scanner.scan_files(files_to_scan, wcag_level)
+                # Reconstituir na ordem original dos arquivos
+                fresh_map = {str(r.file): r for r in fresh_scans}
+                scan_results_ordered: list[ScanResult] = []
+                cached_map = {str(r.file): r for r in cached_scans}
+                for f in files:
+                    key = str(f)
+                    scan_results_ordered.append(
+                        cached_map.get(key) or fresh_map.get(key) or
+                        (await self.scanner.scan_file(f, wcag_level))
+                    )
+                scan_results = scan_results_ordered
+            else:
+                log.info("scan_fully_cached", files=len(files))
+                # Reordenar para manter ordem original
+                cached_map2 = {str(r.file): r for r in cached_scans}
+                scan_results = [cached_map2[str(f)] for f in files]
+        else:
+            scan_results = await self.scanner.scan_files(files, wcag_level)
 
         files_with_issues = [s for s in scan_results if s.has_issues]
         log.info(

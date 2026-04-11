@@ -18,6 +18,7 @@ Per-condition checkpointing (methodology Section 3.1.3):
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import random
 import subprocess
@@ -261,6 +262,90 @@ class _ProgressTracker:
         except Exception:
             pass
 
+# ── Scan result cache ──────────────────────────────────────────────────────────
+
+class ScanResultCache:
+    """
+    Cache de ScanResult persistido em disco.
+
+    Compartilhado entre TODOS os modelos do experimento: o scan é executado
+    apenas uma vez e os resultados são reutilizados nas rodadas subsequentes,
+    economizando N_models × scan_time por arquivo.
+
+    Formato em disco: scan_cache.json com lista de ScanResult serializados.
+    Chave de busca: str(file.resolve()) para paths absolutos e consistentes.
+    """
+
+    _VERSION = 2
+
+    def __init__(self, cache_path: Path) -> None:
+        self._path = cache_path
+        self._data: dict[str, Any] = {}
+
+    def load(self) -> int:
+        """Carrega cache do disco. Retorna número de entradas carregadas."""
+        if not self._path.exists():
+            return 0
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if raw.get("version", 1) < self._VERSION:
+                log.info("scan_cache_version_mismatch", path=str(self._path))
+                return 0
+            self._data = raw.get("scans", {})
+            log.info("scan_cache_loaded", entries=len(self._data), path=str(self._path))
+            return len(self._data)
+        except Exception as exc:
+            log.warning("scan_cache_load_failed", error=str(exc))
+            self._data = {}
+            return 0
+
+    def save(self) -> None:
+        try:
+            self._path.write_text(
+                json.dumps(
+                    {"version": self._VERSION, "scans": self._data},
+                    ensure_ascii=False,
+                    indent=None,       # compacto — pode ter milhares de entradas
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            log.warning("scan_cache_save_failed", error=str(exc))
+
+    def has(self, file: Path) -> bool:
+        return str(file.resolve()) in self._data
+
+    def get(self, file: Path) -> "Any | None":
+        """Retorna ScanResult desserializado ou None."""
+        from a11y_autofix.config import ScanResult
+        entry = self._data.get(str(file.resolve()))
+        if entry is None:
+            return None
+        try:
+            return ScanResult.model_validate(entry)
+        except Exception:
+            return None
+
+    def put(self, result: "Any") -> None:
+        """Persiste um ScanResult no cache (em memória; chame save() para disco)."""
+        key = str(result.file.resolve())
+        self._data[key] = result.model_dump(mode="json")
+
+    def to_dict(self) -> "dict[str, Any]":
+        """Retorna dict str(path) → ScanResult para injeção no Pipeline."""
+        from a11y_autofix.config import ScanResult
+        out: dict[str, Any] = {}
+        for k, v in self._data.items():
+            try:
+                out[k] = ScanResult.model_validate(v)
+            except Exception:
+                pass
+        return out
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 _DEFAULT_SENSITIVITY_TEMPERATURES = [0.0, 0.1, 0.3, 0.5, 1.0]
 
 
@@ -342,6 +427,49 @@ class ExperimentRunner:
             output=str(output_dir),
         )
 
+        # ── Pre-scan: escanear TODOS os arquivos UMA VEZ antes do loop de modelos
+        # Os resultados são compartilhados entre todos os modelos via ScanResultCache,
+        # reduzindo o tempo total de scan de N_models × T_scan para 1 × T_scan.
+        scan_cache = ScanResultCache(output_dir / "scan_cache.json")
+        cached_count = scan_cache.load()
+
+        files_to_scan = [f for f in files if not scan_cache.has(f)]
+
+        log.info(
+            "pre_scan_plan",
+            total_files=len(files),
+            already_cached=cached_count,
+            to_scan=len(files_to_scan),
+        )
+
+        if files_to_scan:
+            from a11y_autofix.scanner.orchestrator import MultiToolScanner
+
+            # Scan com max concorrência — GPU não é usada nessa fase.
+            # Limita a 8 para não saturar Playwright/Chromium em memória.
+            pre_scan_settings = copy.copy(self.settings)
+            effective_scan_workers = min(len(files_to_scan), 8,
+                                        max(self.settings.max_concurrent_scans, 4))
+            object.__setattr__(pre_scan_settings, "max_concurrent_scans", effective_scan_workers)
+            pre_scanner = MultiToolScanner(pre_scan_settings)
+
+            log.info("pre_scan_start",
+                     files=len(files_to_scan), workers=effective_scan_workers)
+            t_scan_start = time.monotonic()
+            newly_scanned = await pre_scanner.scan_files(files_to_scan, config.wcag_level)
+            for r in newly_scanned:
+                scan_cache.put(r)
+            scan_cache.save()
+            log.info(
+                "pre_scan_complete",
+                scanned=len(newly_scanned),
+                elapsed_s=round(time.monotonic() - t_scan_start, 1),
+                total_cached=len(scan_cache),
+            )
+
+        # Dict pronto para injeção no Pipeline (evita re-scan em cada modelo)
+        scan_dict = scan_cache.to_dict()
+
         # ── Progress tracker (lido por watch_experiment.py) ───────────────────
         tracker = _ProgressTracker(output_dir, models_to_test, len(files))
 
@@ -400,6 +528,7 @@ class ExperimentRunner:
                     tracker=tracker,
                     llm_concurrency=llm_concurrency,
                     gpu_monitor=gpu_monitor,
+                    scan_cache=scan_cache,
                 )
                 await tracker.set_model_status(model_name, "done")
                 return result
@@ -649,19 +778,77 @@ class ExperimentRunner:
         tracker: "_ProgressTracker | None" = None,
         llm_concurrency: int | None = None,
         gpu_monitor: "GpuMonitor | None" = None,
+        scan_cache: "ScanResultCache | None" = None,
     ) -> tuple[str, list[FixResult]]:
-        """Run the full pipeline for a single model and checkpoint each file."""
+        """
+        Executa o pipeline para um único modelo.
+
+        Otimizações:
+        - Arquivos com checkpoint válido são recuperados do disco sem chamar o LLM.
+        - Scan results são injetados do ScanResultCache pré-computado (sem re-scan).
+        - O pipeline processa apenas os arquivos pendentes.
+        """
+        strategy = getattr(config, "strategy", "few-shot")
         model_config = self.registry.get(model_name)
         pipeline = self.pipeline_factory(model_config)
 
         # Usar concorrência dinâmica fornecida ou cair no default das settings
         effective_concurrency = llm_concurrency or self.settings.max_concurrent_agents
-        # Substituir o semáforo padrão do pipeline pelo valor dinâmico
         pipeline.settings = _override_concurrency(pipeline.settings, effective_concurrency)
 
+        # ── Separar arquivos já checkpointed dos pendentes ─────────────────────
+        pending_files: list[Path] = []
+        resumed_results: list[FixResult] = []
+
+        for f in files:
+            if self.is_condition_complete(model_name, strategy, f.stem, checkpoints_dir):
+                cp = self._load_checkpoint(model_name, strategy, f.stem, checkpoints_dir)
+                if cp:
+                    scan = (scan_cache.get(f) if scan_cache else None)
+                    if scan is None:
+                        scan = self._stub_scan(f, cp)
+                    resumed_results.append(self._checkpoint_to_fix_result(cp, f, scan))
+                else:
+                    pending_files.append(f)
+            else:
+                pending_files.append(f)
+
+        if resumed_results:
+            log.info(
+                "checkpoint_resume",
+                model=model_name,
+                skipped=len(resumed_results),
+                pending=len(pending_files),
+            )
+            # Atualizar tracker para arquivos já concluídos (sem bloquear)
+            if tracker:
+                for r in resumed_results:
+                    tokens_out = sum(a.tokens_used or 0 for a in r.attempts)
+                    await tracker.update(
+                        model=model_name,
+                        file_name=r.file.name,
+                        success=r.final_success,
+                        issues_fixed=r.issues_fixed,
+                        issues_total=len(r.scan_result.issues),
+                        time_seconds=r.total_time,
+                        tokens_output=tokens_out,
+                    )
+
+        if not pending_files:
+            log.info("all_files_checkpointed", model=model_name, total=len(resumed_results))
+            return model_name, resumed_results
+
         t0 = time.monotonic()
-        log.info("experiment_model_start", model=model_name, files=len(files),
-                 llm_concurrency=effective_concurrency)
+        log.info(
+            "experiment_model_start",
+            model=model_name,
+            pending=len(pending_files),
+            resumed=len(resumed_results),
+            llm_concurrency=effective_concurrency,
+        )
+
+        # Construir dict de scan para injeção no pipeline (evita re-scan)
+        scan_dict = scan_cache.to_dict() if scan_cache else None
 
         # Callback chamado pelo pipeline após cada arquivo
         async def _on_file_done(fix_result: FixResult) -> None:
@@ -679,38 +866,41 @@ class ExperimentRunner:
             self._save_file_checkpoint(
                 fix_result=fix_result,
                 model_id=model_name,
-                strategy=getattr(config, "strategy", "few-shot"),
+                strategy=strategy,
                 checkpoints_dir=checkpoints_dir,
             )
 
-        results = await pipeline.run(
-            targets=files,
+        new_results = await pipeline.run(
+            targets=pending_files,
             wcag_level=config.wcag_level,
             output_dir=output_dir,
             on_file_done=_on_file_done,
+            scan_cache=scan_dict,
         )
 
         elapsed = time.monotonic() - t0
 
-        # Checkpoint files não cobertos pelo callback (fallback)
-        checkpointed = set()
-        for fix_result in results:
+        # Fallback checkpoint para arquivos que o callback não cobriu
+        for fix_result in new_results:
             fid = fix_result.file.stem
-            cp_path = (checkpoints_dir
-                       / model_name.replace("/", "_")
-                       / getattr(config, "strategy", "few-shot")
-                       / f"{fid}.json")
+            cp_path = (
+                checkpoints_dir
+                / model_name.replace("/", "_")
+                / strategy
+                / f"{fid}.json"
+            )
             if not cp_path.exists():
                 self._save_file_checkpoint(
                     fix_result=fix_result,
                     model_id=model_name,
-                    strategy=getattr(config, "strategy", "few-shot"),
+                    strategy=strategy,
                     checkpoints_dir=checkpoints_dir,
                 )
-            checkpointed.add(fid)
+
+        results = resumed_results + new_results
 
         # Compute per-model metrics for condition_complete log
-        from a11y_autofix.experiments.metrics import compute_sr, compute_ifr, compute_mttr, compute_te
+        from a11y_autofix.experiments.metrics import compute_sr, compute_ifr, compute_mttr
         sr = compute_sr(results)
         ifr, _, total_issues = compute_ifr(results)
         mttr = compute_mttr(results)
@@ -718,12 +908,13 @@ class ExperimentRunner:
         log.info(
             "condition_complete",
             model_id=model_name,
-            strategy=getattr(config, "strategy", "few-shot"),
+            strategy=strategy,
             n_files=len(results),
+            n_resumed=len(resumed_results),
+            n_new=len(new_results),
             sr=round(sr, 4),
             ifr=round(ifr, 4),
             mttr=round(mttr, 3) if mttr else None,
-            te=None,  # TE requires per-call token counts
             elapsed_total_seconds=round(elapsed, 2),
         )
 
@@ -736,6 +927,67 @@ class ExperimentRunner:
         )
 
         return model_name, results
+
+    def _stub_scan(self, file: Path, cp: dict[str, Any]) -> "Any":
+        """
+        Cria ScanResult mínimo a partir dos metadados do checkpoint.
+        Usado quando o scan_cache não tem entrada para o arquivo.
+        """
+        from a11y_autofix.config import (
+            A11yIssue, Complexity, Confidence, IssueType, ScanResult,
+        )
+        n_issues = cp.get("ifr_denominator", 0)
+        issues = [
+            A11yIssue(
+                file=str(file),
+                selector="",
+                issue_type=IssueType.OTHER,
+                complexity=Complexity.SIMPLE,
+                confidence=Confidence.HIGH,
+                message="(restored from checkpoint)",
+            )
+            for _ in range(n_issues)
+        ]
+        return ScanResult(
+            file=file,
+            file_hash="sha256:checkpoint",
+            issues=issues,
+            scan_time=0.0,
+        )
+
+    def _checkpoint_to_fix_result(
+        self,
+        cp: dict[str, Any],
+        file: Path,
+        scan_result: "Any",
+    ) -> FixResult:
+        """Reconstrói FixResult a partir de um checkpoint JSON existente."""
+        from a11y_autofix.config import FixAttempt
+        attempts = [
+            FixAttempt(
+                attempt_number=a.get("n", 1),
+                agent=a.get("agent", "unknown"),
+                model=cp.get("model_id", "unknown"),
+                timestamp=datetime.now(tz=timezone.utc),
+                success=a.get("success", False),
+                tokens_used=a.get("token_total"),
+                tokens_prompt=a.get("token_prompt"),
+                tokens_completion=a.get("token_completion"),
+                time_seconds=a.get("time_s", 0.0),
+            )
+            for a in cp.get("attempts_detail", [])
+        ]
+        n_total = cp.get("ifr_denominator", len(scan_result.issues))
+        n_fixed = cp.get("ifr_numerator", 0)
+        return FixResult(
+            file=file,
+            scan_result=scan_result,
+            attempts=attempts,
+            final_success=cp.get("status") == "success",
+            issues_fixed=n_fixed,
+            issues_pending=max(0, n_total - n_fixed),
+            total_time=cp.get("total_time_seconds", 0.0),
+        )
 
     # ── Checkpointing ──────────────────────────────────────────────────────
 
