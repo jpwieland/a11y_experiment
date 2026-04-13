@@ -529,7 +529,16 @@ class ExperimentRunner:
         config: ExperimentConfig,
         output_dir: Path | None = None,
     ) -> ExperimentResult:
-        """Run a complete experiment from an ExperimentConfig."""
+        """Run a complete experiment from an ExperimentConfig.
+
+        Suporta múltiplas repetições (config.repetitions) para estabilidade
+        estatística. Cada repetição usa um diretório de checkpoints independente
+        (rep_1/, rep_2/, ...) garantindo que os resultados não sejam contaminados
+        por checkpoints de repetições anteriores.
+
+        O scan cache é compartilhado entre todas as repetições — os arquivos
+        são escaneados apenas uma vez, pois o corpus não muda entre repetições.
+        """
         exp_id = str(uuid.uuid4())[:8]
 
         if output_dir is None:
@@ -537,10 +546,8 @@ class ExperimentRunner:
             output_dir = self.settings.results_dir / f"{safe_name}_{exp_id}"
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        checkpoints_dir = output_dir / "checkpoints"
-        checkpoints_dir.mkdir(exist_ok=True)
-
         models_to_test = self._resolve_models(config.models)
+        n_reps = max(1, getattr(config, "repetitions", 1))
 
         # ── Auto-clone snapshots ausentes ─────────────────────────────────────
         cloned = ensure_snapshots(config, output_dir)
@@ -556,20 +563,18 @@ class ExperimentRunner:
             name=config.name,
             models=len(models_to_test),
             files=len(files),
+            repetitions=n_reps,
             output=str(output_dir),
         )
 
-        # ── Scan cache compartilhado entre todos os modelos ──────────────────────
+        # ── Scan cache compartilhado entre todos os modelos E repetições ──────
         # O pipeline ESCREVE resultados de scan neste dict à medida que processa
-        # cada arquivo (streaming). Quando o modelo 2 começa, o cache já está
-        # populado pelo modelo 1 — nenhum arquivo é escaneado duas vezes.
-        # A persistência em disco acontece após cada modelo terminar.
+        # cada arquivo (streaming). Reutilizado entre repetições — o corpus não
+        # muda, então não é necessário rescanear a cada rodada.
         scan_cache = ScanResultCache(output_dir / "scan_cache.json")
         cached_count = scan_cache.load()
 
         # ── Importar scans já compilados de dataset/results/ ──────────────────
-        # Aproveita os resultados de scan executados anteriormente na fase de
-        # preparação do dataset, evitando qualquer re-scan desses arquivos.
         repo_root = Path(__file__).parent.parent.parent
         project_ids = self._extract_project_ids(config)
         if project_ids:
@@ -596,8 +601,12 @@ class ExperimentRunner:
             strategy="streaming",
         )
 
-        # ── Progress tracker (lido por watch_experiment.py) ───────────────────
-        tracker = _ProgressTracker(output_dir, models_to_test, len(files))
+        # ── Limpeza inicial dos snapshots ────────────────────────────────────
+        # Garante que os snapshots estão no estado original ANTES da primeira
+        # repetição. Necessário caso o experimento anterior tenha sido
+        # interrompido antes do git cleanup pós-modelo ser executado.
+        log.info("initial_snapshot_reset", reason="ensuring clean state before experiment")
+        await self._reset_snapshot_dirs(config)
 
         # ── GPU monitor para paralelismo dinâmico ─────────────────────────────
         gpu_monitor = GpuMonitor(poll_interval=5.0)
@@ -607,123 +616,264 @@ class ExperimentRunner:
         else:
             log.info("gpu_monitor_inactive", reason="nvidia-smi not available — using static concurrency")
 
-        sem = asyncio.Semaphore(self.settings.max_concurrent_models)
+        # ══════════════════════════════════════════════════════════════════════
+        # Loop de repetições
+        # Cada repetição usa checkpoints isolados em rep_{i}/checkpoints/
+        # O tracker de progresso é reiniciado a cada repetição para que
+        # watch_experiment.py mostre o progresso da repetição corrente.
+        # ══════════════════════════════════════════════════════════════════════
+        all_rep_results: list[dict[str, list[FixResult]]] = []
+        last_experiment_result: ExperimentResult | None = None
 
-        async def run_model(model_name: str) -> tuple[str, list[FixResult]]:
-            async with sem:
-                model_output = output_dir / model_name.replace("/", "_")
-                model_output.mkdir(exist_ok=True)
-                await tracker.set_model_status(model_name, "loading")
+        for rep_idx in range(n_reps):
+            rep_num = rep_idx + 1
+            rep_label = f"rep_{rep_num}" if n_reps > 1 else "checkpoints"
 
-                # Decidir concorrência de LLM baseada em VRAM disponível
-                # antes do cold-start (modelo ainda não carregado = mais VRAM livre)
-                model_vram_gb = self._estimate_model_vram(model_name)
-                llm_concurrency = gpu_monitor.recommend_concurrency(
-                    model_vram_gb=model_vram_gb,
-                    base=self.settings.max_concurrent_agents,
-                )
-                log.info("dynamic_concurrency_set",
-                         model=model_name,
-                         llm_concurrency=llm_concurrency,
-                         gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
-
-                # Cold-start: stop and restart model server before each condition
-                await self._cold_start_model(model_name, condition_id=f"{model_name}/{config.name}")
-                await tracker.set_model_status(model_name, "running")
-
-                # Após cold-start o modelo está carregado: recalcular com VRAM real
-                await asyncio.sleep(2.0)  # aguardar nvidia-smi atualizar
-                llm_concurrency_loaded = gpu_monitor.recommend_concurrency(
-                    model_vram_gb=model_vram_gb,
-                    base=self.settings.max_concurrent_agents,
-                )
-                if llm_concurrency_loaded != llm_concurrency:
-                    log.info("dynamic_concurrency_adjusted",
-                             model=model_name,
-                             before=llm_concurrency,
-                             after=llm_concurrency_loaded,
-                             gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
-                    llm_concurrency = llm_concurrency_loaded
-
-                result = await self._run_single_model(
-                    model_name=model_name,
-                    files=files,
-                    config=config,
-                    output_dir=model_output,
-                    checkpoints_dir=checkpoints_dir,
-                    tracker=tracker,
-                    llm_concurrency=llm_concurrency,
-                    gpu_monitor=gpu_monitor,
-                    scan_cache=scan_cache,
-                    scan_dict=scan_dict,
-                )
-                # Persistir resultados de scan acumulados durante este modelo
-                # para que o próximo modelo os encontre no cache em disco
-                self._flush_scan_dict_to_cache(scan_dict, scan_cache)
-
-                # ── Git cleanup: reverter patches LLM nos snapshots ──────────────
-                # O LLM modifica arquivos nos snapshots (dataset/snapshots/<proj>/).
-                # Se não revertermos, o próximo modelo começa com arquivos já
-                # alterados — contaminando os resultados comparativos.
-                # Metodologia: cada condição deve receber os arquivos originais.
-                await self._reset_snapshot_dirs(config)
-
-                await tracker.set_model_status(model_name, "done")
-                return result
-
-        model_results = await asyncio.gather(
-            *[run_model(m) for m in models_to_test],
-            return_exceptions=True,
-        )
-
-        results_by_model: dict[str, list[FixResult]] = {}
-        for model_name, result in zip(models_to_test, model_results):
-            if isinstance(result, Exception):
-                log.error("model_run_failed", model=model_name, error=str(result))
-                results_by_model[model_name] = []
+            # Diretório de checkpoints isolado por repetição
+            if n_reps > 1:
+                rep_dir = output_dir / rep_label
+                rep_dir.mkdir(exist_ok=True)
+                checkpoints_dir = rep_dir / "checkpoints"
             else:
-                name, results = result
-                results_by_model[name] = results
+                checkpoints_dir = output_dir / "checkpoints"
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-        metrics = compute_experiment_metrics(results_by_model)
-        tracker.finish()
+            if n_reps > 1:
+                log.info(
+                    "repetition_start",
+                    rep=rep_num,
+                    total_reps=n_reps,
+                    checkpoints=str(checkpoints_dir),
+                )
+
+            # Tracker reiniciado por repetição (mostra progresso atual no watch)
+            tracker = _ProgressTracker(output_dir, models_to_test, len(files))
+            if n_reps > 1:
+                # Indicar repetição corrente no progress JSON para o watch
+                tracker._state["current_repetition"] = rep_num
+                tracker._state["total_repetitions"] = n_reps
+                tracker._flush()
+
+            sem = asyncio.Semaphore(self.settings.max_concurrent_models)
+
+            async def run_model(
+                model_name: str,
+                _checkpoints_dir: Path = checkpoints_dir,
+                _tracker: "_ProgressTracker" = tracker,
+                _rep_num: int = rep_num,
+            ) -> tuple[str, list[FixResult]]:
+                async with sem:
+                    model_output = output_dir / model_name.replace("/", "_")
+                    model_output.mkdir(exist_ok=True)
+                    await _tracker.set_model_status(model_name, "loading")
+
+                    model_vram_gb = self._estimate_model_vram(model_name)
+                    llm_concurrency = gpu_monitor.recommend_concurrency(
+                        model_vram_gb=model_vram_gb,
+                        base=self.settings.max_concurrent_agents,
+                    )
+                    log.info("dynamic_concurrency_set",
+                             model=model_name,
+                             llm_concurrency=llm_concurrency,
+                             rep=_rep_num,
+                             gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
+
+                    # Cold-start: stop and restart model server before each condition
+                    await self._cold_start_model(model_name, condition_id=f"{model_name}/{config.name}/rep{_rep_num}")
+                    await _tracker.set_model_status(model_name, "running")
+
+                    await asyncio.sleep(2.0)
+                    llm_concurrency_loaded = gpu_monitor.recommend_concurrency(
+                        model_vram_gb=model_vram_gb,
+                        base=self.settings.max_concurrent_agents,
+                    )
+                    if llm_concurrency_loaded != llm_concurrency:
+                        log.info("dynamic_concurrency_adjusted",
+                                 model=model_name,
+                                 before=llm_concurrency,
+                                 after=llm_concurrency_loaded,
+                                 gpu_free_gb=f"{gpu_monitor.stats.vram_free_gb:.1f}" if gpu_available else "n/a")
+                        llm_concurrency = llm_concurrency_loaded
+
+                    result = await self._run_single_model(
+                        model_name=model_name,
+                        files=files,
+                        config=config,
+                        output_dir=model_output,
+                        checkpoints_dir=_checkpoints_dir,
+                        tracker=_tracker,
+                        llm_concurrency=llm_concurrency,
+                        gpu_monitor=gpu_monitor,
+                        scan_cache=scan_cache,
+                        scan_dict=scan_dict,
+                    )
+
+                    # Persistir scan results para o próximo modelo / repetição
+                    self._flush_scan_dict_to_cache(scan_dict, scan_cache)
+
+                    # ── Git cleanup: reverter patches LLM nos snapshots ──────────
+                    # Metodologia: cada condição recebe os arquivos originais.
+                    # Sem limpeza, o próximo modelo começa com código já alterado.
+                    await self._reset_snapshot_dirs(config)
+
+                    await _tracker.set_model_status(model_name, "done")
+                    return result
+
+            model_results = await asyncio.gather(
+                *[run_model(m) for m in models_to_test],
+                return_exceptions=True,
+            )
+
+            results_by_model: dict[str, list[FixResult]] = {}
+            for model_name, result in zip(models_to_test, model_results):
+                if isinstance(result, Exception):
+                    log.error("model_run_failed", model=model_name,
+                              rep=rep_num, error=str(result))
+                    results_by_model[model_name] = []
+                else:
+                    name, results = result
+                    results_by_model[name] = results
+
+            all_rep_results.append(results_by_model)
+
+            metrics = compute_experiment_metrics(results_by_model)
+            tracker.finish()
+
+            # Salvar resultado desta repetição individualmente
+            rep_exp_result = ExperimentResult(
+                experiment_id=f"{exp_id}_rep{rep_num}",
+                experiment_name=f"{config.name} [rep {rep_num}/{n_reps}]",
+                timestamp=datetime.now(tz=timezone.utc),
+                models_tested=models_to_test,
+                files_processed=len(files),
+                results_by_model=results_by_model,
+                success_rate_by_model={m: v["success_rate"] for m, v in metrics.items()},
+                avg_time_by_model={m: v["avg_time"] for m, v in metrics.items()},
+                issues_fixed_by_model={m: v["issues_fixed"] for m, v in metrics.items()},
+                config_snapshot=config.model_dump(),
+                tool_versions={},
+            )
+            rep_result_path = (
+                (output_dir / rep_label / "experiment_result.json")
+                if n_reps > 1
+                else (output_dir / "experiment_result.json")
+            )
+            rep_result_path.parent.mkdir(parents=True, exist_ok=True)
+            rep_result_path.write_text(
+                rep_exp_result.model_dump_json(indent=2), encoding="utf-8"
+            )
+            self._aggregate_checkpoints(checkpoints_dir, output_dir if n_reps == 1 else output_dir / rep_label,
+                                        rep_exp_result, metrics)
+
+            last_experiment_result = rep_exp_result
+
+            if n_reps > 1:
+                log.info(
+                    "repetition_done",
+                    rep=rep_num,
+                    total_reps=n_reps,
+                    sr_by_model={m: round(v["success_rate"], 3) for m, v in metrics.items()},
+                )
+
         await gpu_monitor.stop()
 
-        experiment_result = ExperimentResult(
-            experiment_id=exp_id,
-            experiment_name=config.name,
-            timestamp=datetime.now(tz=timezone.utc),
-            models_tested=models_to_test,
-            files_processed=len(files),
-            results_by_model=results_by_model,
-            success_rate_by_model={m: v["success_rate"] for m, v in metrics.items()},
-            avg_time_by_model={m: v["avg_time"] for m, v in metrics.items()},
-            issues_fixed_by_model={m: v["issues_fixed"] for m, v in metrics.items()},
-            config_snapshot=config.model_dump(),
-            tool_versions={},
-        )
+        # ── Agregação multi-repetição ──────────────────────────────────────────
+        if n_reps > 1:
+            aggregated = self._aggregate_repetitions(
+                all_rep_results, models_to_test, exp_id, config, len(files), n_reps
+            )
+            (output_dir / "repetitions_summary.json").write_text(
+                json.dumps(aggregated, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            log.info(
+                "experiment_complete_multi_rep",
+                experiment_id=exp_id,
+                name=config.name,
+                repetitions=n_reps,
+                output=str(output_dir),
+                summary=str(output_dir / "repetitions_summary.json"),
+            )
+        else:
+            log.info(
+                "experiment_complete",
+                experiment_id=exp_id,
+                name=config.name,
+                output=str(output_dir),
+            )
 
-        # Aggregate all checkpoint JSONs into experiment_summary.json
-        self._aggregate_checkpoints(checkpoints_dir, output_dir, experiment_result, metrics)
-
-        result_json = output_dir / "experiment_result.json"
-        result_json.write_text(
-            experiment_result.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
-
+        # Gerar relatório HTML do último resultado (ou único)
         from a11y_autofix.reporter.comparison_reporter import ComparisonReporter
+        rep_metrics = compute_experiment_metrics(all_rep_results[-1])
         reporter = ComparisonReporter()
-        reporter.generate(experiment_result, metrics, output_dir)
+        reporter.generate(last_experiment_result, rep_metrics, output_dir)
 
-        log.info(
-            "experiment_complete",
-            experiment_id=exp_id,
-            name=config.name,
-            output=str(output_dir),
+        # Escrever experiment_result.json raiz com o resultado da última repetição
+        (output_dir / "experiment_result.json").write_text(
+            last_experiment_result.model_dump_json(indent=2), encoding="utf-8"
         )
 
-        return experiment_result
+        return last_experiment_result
+
+    def _aggregate_repetitions(
+        self,
+        all_rep_results: list[dict[str, list[FixResult]]],
+        models: list[str],
+        exp_id: str,
+        config: "ExperimentConfig",
+        n_files: int,
+        n_reps: int,
+    ) -> dict[str, Any]:
+        """
+        Agrega métricas de múltiplas repetições: calcula média e desvio padrão
+        por modelo para SR, IFR e tempo médio.
+
+        Retorna um dict pronto para serialização em repetitions_summary.json.
+        """
+        import statistics
+
+        summary: dict[str, Any] = {
+            "experiment_id": exp_id,
+            "experiment_name": config.name,
+            "n_repetitions": n_reps,
+            "n_files": n_files,
+            "models": {},
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+        for model in models:
+            sr_vals: list[float] = []
+            ifr_vals: list[float] = []
+            time_vals: list[float] = []
+
+            for rep_results in all_rep_results:
+                results = rep_results.get(model, [])
+                if not results:
+                    continue
+                rep_metrics = compute_experiment_metrics({model: results})
+                m = rep_metrics.get(model, {})
+                sr_vals.append(m.get("success_rate", 0.0))
+                ifr_vals.append(m.get("ifr", 0.0))
+                time_vals.append(m.get("avg_time", 0.0))
+
+            def _stats(vals: list[float]) -> dict[str, float]:
+                if not vals:
+                    return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+                return {
+                    "mean": round(statistics.mean(vals), 4),
+                    "std": round(statistics.stdev(vals) if len(vals) > 1 else 0.0, 4),
+                    "min": round(min(vals), 4),
+                    "max": round(max(vals), 4),
+                    "values": [round(v, 4) for v in vals],
+                }
+
+            summary["models"][model] = {
+                "sr": _stats(sr_vals),
+                "ifr": _stats(ifr_vals),
+                "avg_time_s": _stats(time_vals),
+                "n_reps_completed": len(sr_vals),
+            }
+
+        return summary
 
     async def run_sensitivity(
         self,
