@@ -138,20 +138,49 @@ def _count_checkpoints(output_dir: Path) -> dict[str, dict]:
         if not model_dir.is_dir():
             continue
         model = model_dir.name
-        counts[model] = {"success": 0, "failed": 0,
-                         "issues_fixed": 0, "issues_total": 0}
+        counts[model] = {
+            "success": 0, "failed": 0,
+            "issues_fixed": 0, "issues_total": 0,
+            # SR_real: success rate apenas entre arquivos que tinham issues
+            "sr_real_success": 0, "sr_real_total": 0,
+            # breakdown por tipo de issue (se disponível)
+            "issue_types": {},
+            # tokens
+            "tokens_in": 0, "tokens_out": 0,
+        }
         for strategy_dir in model_dir.iterdir():
             if not strategy_dir.is_dir():
                 continue
             for cp_file in strategy_dir.glob("*.json"):
                 try:
                     cp = json.loads(cp_file.read_text(encoding="utf-8"))
-                    if cp.get("status") == "success":
+                    ifr_den = cp.get("ifr_denominator", 0) or 0
+                    ifr_num = cp.get("ifr_numerator", 0) or 0
+                    is_success = cp.get("status") == "success"
+
+                    if is_success:
                         counts[model]["success"] += 1
                     else:
                         counts[model]["failed"] += 1
-                    counts[model]["issues_fixed"] += cp.get("ifr_numerator", 0) or 0
-                    counts[model]["issues_total"] += cp.get("ifr_denominator", 0) or 0
+
+                    counts[model]["issues_fixed"] += ifr_num
+                    counts[model]["issues_total"] += ifr_den
+
+                    # SR_real: contar apenas se o arquivo tinha issues
+                    if ifr_den > 0:
+                        counts[model]["sr_real_total"] += 1
+                        if is_success:
+                            counts[model]["sr_real_success"] += 1
+
+                    # Tokens
+                    counts[model]["tokens_in"]  += cp.get("token_input", 0) or 0
+                    counts[model]["tokens_out"] += cp.get("token_output", 0) or 0
+
+                    # Issue type breakdown
+                    for itype in (cp.get("issue_types") or []):
+                        counts[model]["issue_types"][itype] = (
+                            counts[model]["issue_types"].get(itype, 0) + 1
+                        )
                 except Exception:
                     pass
     return counts
@@ -236,7 +265,7 @@ def _overall_eta(models_state: dict, total_files: int) -> int | None:
     return total_eta if has_estimate else None
 
 
-def render(output_dir: Path) -> list[str]:
+def render(output_dir: Path, interval: int = 4) -> list[str]:
     W = _w()
     lines: list[str] = []
     sep = "─" * W
@@ -306,6 +335,10 @@ def render(output_dir: Path) -> list[str]:
     add(f"  {BOLD}PROGRESSO GERAL{R}  {overall_bar} "
         f"{CYAN}{total_done_cp}/{total_slots}{R} ({overall_pct})   "
         f"ETA: {YELLOW}{_fmt_eta(overall_eta)}{R}")
+    add(
+        f"  {DIM}⚠ Barra pode não chegar a 100% — arquivos com timeout ou erro fatal "
+        f"não disparam o callback de conclusão (comportamento normal){R}"
+    )
     add(f"  {DIM}{sep_thin}{R}")
     add()
 
@@ -323,10 +356,11 @@ def render(output_dir: Path) -> list[str]:
     hdr = (
         f"  {BOLD}{'Modelo':<{col_model}} {'Status':<{col_status}} "
         f"{'Progresso':^{col_bar+2}} {'Files':>{col_cnt}} "
-        f"{'SR':>{col_sr}} {'IFR':>{col_ifr}} "
+        f"{'SR*':>{col_sr}} {'IFR':>{col_ifr}} "
         f"{'Vel':>{col_speed}} {'ETA':>{col_eta}} {'Tokens':>{col_tokens}}{R}"
     )
     add(hdr)
+    add(f"  {DIM}{'SR*=taxa de sucesso só em arquivos com issues  IFR=% issues corrigidas':^{W-4}}{R}")
     add(f"  {DIM}{sep}{R}")
 
     for model, state in models_state.items():
@@ -349,6 +383,11 @@ def render(output_dir: Path) -> list[str]:
             success      = cp["success"]
             issues_fixed = cp["issues_fixed"]
             issues_total = cp["issues_total"]
+            tok_out      = cp.get("tokens_out") or tok_out
+
+        # SR_real (apenas arquivos que tinham issues — mais significativo para o LLM)
+        sr_real_s = cp.get("sr_real_success", 0) if cp else 0
+        sr_real_t = cp.get("sr_real_total", 0) if cp else 0
 
         # Barra de progresso do modelo
         bar_color = (GREEN if status == "done" else
@@ -356,7 +395,13 @@ def render(output_dir: Path) -> list[str]:
                      YELLOW if status == "loading" else DIM)
         bar = _bar(done, total_files, w=col_bar, color=bar_color)
 
-        sr_str  = f"{success/done*100:.0f}%" if done > 0 else "—"
+        # SR: exibir SR_real se disponível (mais informativo)
+        if sr_real_t > 0:
+            sr_str = f"{sr_real_s/sr_real_t*100:.0f}%*"  # * = apenas c/issues
+        elif done > 0:
+            sr_str = f"{success/done*100:.0f}%"
+        else:
+            sr_str = "—"
         ifr_str = f"{issues_fixed/issues_total*100:.0f}%" if issues_total > 0 else "—"
         spd_str = _fmt_speed(avg_t)
         eta_str = _fmt_eta(eta_s) if status not in ("done", "waiting") else (
@@ -403,13 +448,28 @@ def render(output_dir: Path) -> list[str]:
     add(f"  {DIM}{sep_thin}{R}")
     sr_total  = _pct(total_success_cp, total_done_cp)
     ifr_total = _pct(total_issues_fixed_cp, total_issues_cp)
-    add(
-        f"  {BOLD}TOTAL{R}  "
-        f"Arquivos: {CYAN}{total_done_cp}/{total_slots}{R}   "
-        f"SR: {GREEN}{sr_total}{R}   "
-        f"IFR: {YELLOW}{ifr_total}{R}   "
-        f"Issues corrigidas: {GREEN}{total_issues_fixed_cp}/{total_issues_cp}{R}"
+
+    # SR_real: soma de todos os modelos (apenas arquivos com issues)
+    total_sr_real_s = sum(cp.get("sr_real_success", 0) for cp in checkpoints.values())
+    total_sr_real_t = sum(cp.get("sr_real_total", 0) for cp in checkpoints.values())
+    sr_real_str = (
+        f" {DIM}/ SR c/issues: {GREEN}{_pct(total_sr_real_s, total_sr_real_t)}{R}"
+        if total_sr_real_t > 0 else ""
     )
+
+    add(
+        f"  {BOLD}TOTAL ACUMULADO{R}  "
+        f"Arq: {CYAN}{total_done_cp}/{total_slots}{R}   "
+        f"SR: {GREEN}{sr_total}{R}{sr_real_str}   "
+        f"IFR: {YELLOW}{ifr_total}{R}   "
+        f"Issues: {GREEN}{total_issues_fixed_cp}/{total_issues_cp} corrigidas{R}"
+    )
+    if total_issues_cp > 0:
+        pend = total_issues_cp - total_issues_fixed_cp
+        add(
+            f"  {DIM}  └─ pendentes: {pend}  "
+            f"({_pct(pend, total_issues_cp)} ainda com issues){R}"
+        )
     add()
 
     # ── GPU ───────────────────────────────────────────────────────────────────
@@ -424,14 +484,19 @@ def render(output_dir: Path) -> list[str]:
             vram_bar = GREEN + "█" * filled + DIM + "░" * (bar_w - filled) + R
             util_col = (RED if g["util_pct"] > 90 else
                         YELLOW if g["util_pct"] > 70 else GREEN)
+            temp_c = g["temp_c"]
+            temp_col = (RED if temp_c >= 85 else YELLOW if temp_c >= 75 else DIM)
+            temp_warn = f" {RED}⚠ QUENTE{R}" if temp_c >= 85 else (
+                        f" {YELLOW}↑ morno{R}" if temp_c >= 75 else "")
             add(
                 f"  GPU {g['index']} {CYAN}{g['name'][:26]:<26}{R}  "
                 f"VRAM [{vram_bar}] {CYAN}{used_gb:.1f}{R}/{total_gb:.0f} GB  "
-                f"Util {util_col}{g['util_pct']:>3}%{R}  {DIM}{g['temp_c']}°C{R}"
+                f"Util {util_col}{g['util_pct']:>3}%{R}  "
+                f"Temp {temp_col}{temp_c}°C{R}{temp_warn}"
             )
         add()
     else:
-        add(f"  {DIM}GPU: nvidia-smi não encontrado (CPU ou driver não instalado){R}")
+        add(f"  {DIM}GPU: nvidia-smi não encontrado (CPU ou modo CPU-offload){R}")
         add()
 
     # ── Estatísticas parciais detalhadas ──────────────────────────────────────
@@ -441,25 +506,11 @@ def render(output_dir: Path) -> list[str]:
     if done_models or running_models:
         add(f"  {BOLD}ESTATÍSTICAS PARCIAIS{R}")
         # Métricas dos modelos concluídos
-        for model in done_models:
+        for model in done_models + running_models:
+            is_done = model in done_models
+            icon = f"{GREEN}✔{R}" if is_done else f"{CYAN}▶{R}"
             state = models_state[model]
-            done      = state.get("done", 0)
-            success   = state.get("success", 0)
-            iss_fixed = state.get("issues_fixed", 0)
-            iss_total = state.get("issues_total", 0)
-            avg_t     = state.get("avg_time_per_file_s")
-            tok_out   = state.get("tokens_output") or 0
-            short = model.split("/")[-1][:24]
-            add(
-                f"  {GREEN}✔{R} {BOLD}{short:<24}{R}  "
-                f"SR={GREEN}{_pct(success, done)}{R}  "
-                f"IFR={YELLOW}{_pct(iss_fixed, iss_total)}{R}  "
-                f"vel={DIM}{_fmt_speed(avg_t)}{R}  "
-                f"tok={DIM}{_fmt_tokens(tok_out)}{R}"
-            )
-        for model in running_models:
-            state = models_state[model]
-            done      = state.get("done", 0)
+            done_cnt  = state.get("done", 0)
             success   = state.get("success", 0)
             iss_fixed = state.get("issues_fixed", 0)
             iss_total = state.get("issues_total", 0)
@@ -467,14 +518,48 @@ def render(output_dir: Path) -> list[str]:
             eta_s     = state.get("eta_seconds")
             tok_out   = state.get("tokens_output") or 0
             short = model.split("/")[-1][:24]
-            add(
-                f"  {CYAN}▶{R} {BOLD}{short:<24}{R}  "
-                f"SR={GREEN}{_pct(success, done)}{R}  "
-                f"IFR={YELLOW}{_pct(iss_fixed, iss_total)}{R}  "
+
+            # Usar checkpoints como fonte mais precisa
+            cp_key = model.replace("/", "_")
+            cp_data = checkpoints.get(cp_key, {})
+            if cp_data:
+                done_cnt  = cp_data["success"] + cp_data["failed"]
+                success   = cp_data["success"]
+                iss_fixed = cp_data["issues_fixed"]
+                iss_total = cp_data["issues_total"]
+                tok_out   = (cp_data.get("tokens_out") or 0)
+
+            sr_real_s = cp_data.get("sr_real_success", 0) if cp_data else 0
+            sr_real_t = cp_data.get("sr_real_total", 0) if cp_data else 0
+
+            line = (
+                f"  {icon} {BOLD}{short:<24}{R}  "
+                f"SR={GREEN}{_pct(success, done_cnt)}{R}"
+            )
+            # SR_real (apenas arquivos com issues) — mais preciso para avaliar LLM
+            if sr_real_t > 0:
+                line += f" {DIM}({_pct(sr_real_s, sr_real_t)} c/issues){R}"
+            line += (
+                f"  IFR={YELLOW}{_pct(iss_fixed, iss_total)}{R} "
+                f"{DIM}({iss_fixed}/{iss_total}){R}  "
                 f"vel={DIM}{_fmt_speed(avg_t)}{R}  "
-                f"ETA={MAGENTA}{_fmt_eta(eta_s)}{R}  "
                 f"tok={DIM}{_fmt_tokens(tok_out)}{R}"
             )
+            if not is_done:
+                line += f"  ETA={MAGENTA}{_fmt_eta(eta_s)}{R}"
+            add(line)
+
+            # Issue type breakdown (se disponível nos checkpoints)
+            if cp_data and cp_data.get("issue_types"):
+                types = cp_data["issue_types"]
+                total_typed = sum(types.values())
+                if total_typed > 0:
+                    top = sorted(types.items(), key=lambda x: -x[1])[:4]
+                    breakdown = "  ".join(
+                        f"{t}:{YELLOW}{n}{R}{DIM}({n/total_typed*100:.0f}%){R}"
+                        for t, n in top
+                    )
+                    add(f"       {DIM}issues: {breakdown}{R}")
         add()
 
     # ── Auto-clones ───────────────────────────────────────────────────────────
@@ -489,7 +574,8 @@ def render(output_dir: Path) -> list[str]:
         add()
 
     # ── Rodapé ────────────────────────────────────────────────────────────────
-    add(f"  {DIM}Ctrl+C para sair  │  atualiza a cada __INTERVAL__s  │  tmux attach -t a11y-exp{R}")
+    add(f"  {DIM}Ctrl+C para sair  │  atualiza a cada {interval}s  │  tmux attach -t a11y-exp{R}")
+    add(f"  {DIM}SR*=taxa c/issues  IFR=% issues corrigidas  Barra incompleta=normal (timeouts não contabilizados){R}")
     add(f"  {BOLD}{sep}{R}")
 
     return lines
@@ -497,9 +583,7 @@ def render(output_dir: Path) -> list[str]:
 
 def watch(output_dir: Path, interval: int, once: bool) -> None:
     while True:
-        lines = render(output_dir)
-        # Substituir placeholder do intervalo
-        lines = [l.replace("__INTERVAL__", str(interval)) for l in lines]
+        lines = render(output_dir, interval=interval)
         _cls()
         print("\n".join(lines), flush=True)
         if once:

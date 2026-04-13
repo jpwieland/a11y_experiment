@@ -660,6 +660,14 @@ class ExperimentRunner:
                 # Persistir resultados de scan acumulados durante este modelo
                 # para que o próximo modelo os encontre no cache em disco
                 self._flush_scan_dict_to_cache(scan_dict, scan_cache)
+
+                # ── Git cleanup: reverter patches LLM nos snapshots ──────────────
+                # O LLM modifica arquivos nos snapshots (dataset/snapshots/<proj>/).
+                # Se não revertermos, o próximo modelo começa com arquivos já
+                # alterados — contaminando os resultados comparativos.
+                # Metodologia: cada condição deve receber os arquivos originais.
+                await self._reset_snapshot_dirs(config)
+
                 await tracker.set_model_status(model_name, "done")
                 return result
 
@@ -1061,6 +1069,110 @@ class ExperimentRunner:
         )
 
         return model_name, results
+
+    async def _reset_snapshot_dirs(self, config: "ExperimentConfig") -> None:
+        """
+        Reverte as modificações feitas pelo LLM nos diretórios de snapshot.
+
+        O agente LLM aplica patches diretamente nos arquivos de
+        dataset/snapshots/<projeto>/. Sem limpeza, o modelo seguinte
+        recebe código já (parcialmente) modificado pelo anterior —
+        violando a metodologia que exige condições independentes.
+
+        Estratégia conservadora:
+          • git checkout -- .  → reverte arquivos rastreados modificados
+          • git clean -f       → remove arquivos novos não rastreados criados pelo LLM
+            (sem -d para preservar node_modules e outros diretórios grandes)
+
+        Apenas diretórios que são repositórios git válidos são processados.
+        Falhas são logadas mas não interrompem o experimento.
+        """
+        repo_root = Path(__file__).parent.parent.parent
+        snapshot_base = repo_root / "dataset" / "snapshots"
+
+        # Cada entrada em config.files é como "dataset/snapshots/<project_id>"
+        # (relativo à raiz do repo) ou um path absoluto.
+        seen: set[Path] = set()
+        unique_dirs: list[Path] = []
+        for pattern in config.files:
+            p = Path(pattern) if Path(pattern).is_absolute() else repo_root / pattern
+            # Caminhar até encontrar o diretório de projeto imediato sob snapshot_base
+            candidate = p if p.is_dir() else p.parent
+            while True:
+                if candidate.parent == snapshot_base:
+                    break
+                if candidate == repo_root or candidate == candidate.parent:
+                    candidate = Path("")  # nenhum snapshot encontrado
+                    break
+                candidate = candidate.parent
+            if candidate and candidate not in seen and str(candidate) != "":
+                seen.add(candidate)
+                unique_dirs.append(candidate)
+
+        if not unique_dirs:
+            return
+
+        reset_ok = 0
+        reset_skipped = 0
+        reset_failed = 0
+
+        for snap_dir in unique_dirs:
+            if not snap_dir.exists():
+                reset_skipped += 1
+                continue
+            if not (snap_dir / ".git").exists():
+                reset_skipped += 1
+                log.debug("snapshot_reset_skip_no_git", path=str(snap_dir))
+                continue
+
+            try:
+                # Passo 1: reverter arquivos rastreados modificados
+                r1 = await asyncio.create_subprocess_exec(
+                    "git", "checkout", "--", ".",
+                    cwd=str(snap_dir),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr1 = await asyncio.wait_for(r1.communicate(), timeout=30)
+                rc1 = r1.returncode
+
+                # Passo 2: remover arquivos não rastreados criados pelo LLM
+                # -f: forçar; sem -d para não apagar node_modules etc.
+                r2 = await asyncio.create_subprocess_exec(
+                    "git", "clean", "-f",
+                    cwd=str(snap_dir),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr2 = await asyncio.wait_for(r2.communicate(), timeout=30)
+                rc2 = r2.returncode
+
+                if rc1 == 0 and rc2 == 0:
+                    reset_ok += 1
+                    log.debug("snapshot_reset_ok", path=snap_dir.name)
+                else:
+                    reset_failed += 1
+                    log.warning(
+                        "snapshot_reset_partial",
+                        path=snap_dir.name,
+                        checkout_rc=rc1,
+                        clean_rc=rc2,
+                        stderr=(stderr1 or b"").decode(errors="replace")[:200],
+                    )
+            except asyncio.TimeoutError:
+                reset_failed += 1
+                log.warning("snapshot_reset_timeout", path=snap_dir.name)
+            except Exception as exc:
+                reset_failed += 1
+                log.warning("snapshot_reset_error", path=snap_dir.name, error=str(exc))
+
+        log.info(
+            "snapshots_reset_complete",
+            ok=reset_ok,
+            skipped=reset_skipped,
+            failed=reset_failed,
+            total=len(unique_dirs),
+        )
 
     def _flush_scan_dict_to_cache(
         self,
