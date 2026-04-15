@@ -908,9 +908,12 @@ class ExperimentRunner:
             temperatures = _DEFAULT_SENSITIVITY_TEMPERATURES
 
         all_files = config.resolve_files()
-        random.seed(seed)
+        # Usar instância local de Random para não contaminar o estado global
+        # do módulo random (que pode ser usado por outras partes do sistema
+        # concorrentemente).
+        _rng = random.Random(seed)
         sample_size = max(1, int(len(all_files) * 0.10))
-        sampled_files = random.sample(all_files, sample_size)
+        sampled_files = _rng.sample(all_files, sample_size)
 
         log.info(
             "sensitivity_start",

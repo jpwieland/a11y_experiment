@@ -151,9 +151,29 @@ advanced:
   checkpoint_dir: experiment-results/weak_gpu_comparison/checkpoints
   save_diffs: true
   typescript_validation: false
+
+  # ── Amostragem ──────────────────────────────────────────────────────────────
   # Limita a 60 arquivos por projeto (amostragem determinística, seed=42).
   # Com 35 projetos: máx 2.100 arquivos vs 22.000+ sem limite.
   # Justificativa: libs com 1.000+ componentes têm cobertura suficiente em 60 arquivos.
   # Para remover o limite: max_files_per_project: null
   max_files_per_project: 60
   seed: 42
+
+  # Amostragem estratificada por tipo de issue (recomendado: true).
+  #
+  # Quando true: os 60 slots por projeto são distribuídos proporcionalmente
+  # entre os estratos de tipo de issue (keyboard, aria, semantic, alt-text, etc.)
+  # presentes em dataset/results/{project_id}/findings.jsonl, garantindo que
+  # a composição do corpus amostrado reflita a distribuição real do projeto.
+  #
+  # Quando false (padrão anterior): shuffle aleatório + take N — pode resultar
+  # em viés de composição (ex: 99% ARIA em vez de ~15% esperado), comprometendo
+  # a validade externa dos resultados por critério WCAG.
+  #
+  # Impacto no runtime: leve overhead de leitura de findings.jsonl por projeto
+  # (~100ms total) — sem impacto mensurável na duração do experimento.
+  #
+  # Requer: dataset/results/{project_id}/findings.jsonl pré-computados.
+  # Se ausentes, o comportamento cai automaticamente para shuffle aleatório.
+  stratified_sampling: true

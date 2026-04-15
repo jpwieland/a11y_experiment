@@ -299,6 +299,8 @@ def render(output_dir: Path, interval: int = 4) -> list[str]:
     finished = progress.get("finished_at")
     total_files = progress.get("total_files", 0)
     models_state = progress.get("models", {})
+    cur_rep = progress.get("current_repetition")
+    total_reps = progress.get("total_repetitions")
 
     elapsed = _fmt_elapsed(started) if started else "?"
 
@@ -309,7 +311,8 @@ def render(output_dir: Path, interval: int = 4) -> list[str]:
     else:
         status_label = f"{CYAN}EM EXECUÇÃO{R}"
 
-    add(f"  {DIM}Diretório: {BOLD}{output_dir.name}{R}{DIM}   Iniciado há: {elapsed}   {R}{status_label}")
+    rep_info = (f"  {MAGENTA}Rep {cur_rep}/{total_reps}{R}" if cur_rep and total_reps else "")
+    add(f"  {DIM}Diretório: {BOLD}{output_dir.name}{R}{DIM}   Iniciado há: {elapsed}   {R}{status_label}{rep_info}")
     add()
 
     # ── Progresso Geral ───────────────────────────────────────────────────────
@@ -332,9 +335,13 @@ def render(output_dir: Path, interval: int = 4) -> list[str]:
     overall_bar = _bar(total_done_cp, total_slots, w=30)
     overall_pct = _pct(total_done_cp, total_slots) if total_slots > 0 else "—"
 
+    rep_suffix = (
+        f"  {DIM}[repetição {cur_rep} de {total_reps}]{R}"
+        if cur_rep and total_reps else ""
+    )
     add(f"  {BOLD}PROGRESSO GERAL{R}  {overall_bar} "
         f"{CYAN}{total_done_cp}/{total_slots}{R} ({overall_pct})   "
-        f"ETA: {YELLOW}{_fmt_eta(overall_eta)}{R}")
+        f"ETA: {YELLOW}{_fmt_eta(overall_eta)}{R}{rep_suffix}")
     add(
         f"  {DIM}⚠ Barra pode não chegar a 100% — arquivos com timeout ou erro fatal "
         f"não disparam o callback de conclusão (comportamento normal){R}"
@@ -572,6 +579,30 @@ def render(output_dir: Path, interval: int = 4) -> list[str]:
             elapsed_clone = f"  {c.get('elapsed_s', '?')}s" if c.get('elapsed_s') else ""
             add(f"    {icon} {c.get('project_id', '?')}{DIM}{elapsed_clone}{R}")
         add()
+
+    # ── Resumo multi-repetição (se já existir) ────────────────────────────────
+    rep_summary_path = output_dir / "repetitions_summary.json"
+    if rep_summary_path.exists():
+        try:
+            rep_data = json.loads(rep_summary_path.read_text(encoding="utf-8"))
+            n_reps_done = rep_data.get("n_repetitions", 0)
+            add(f"  {BOLD}RESUMO MULTI-REPETIÇÃO{R} {DIM}({n_reps_done} reps concluídas){R}")
+            for m_name, m_stats in rep_data.get("models", {}).items():
+                sr_s   = m_stats.get("sr", {})
+                ifr_s  = m_stats.get("ifr", {})
+                short  = m_name.split("/")[-1][:24]
+                sr_vals  = "±".join([f"{sr_s.get('mean',0)*100:.1f}%",
+                                     f"{sr_s.get('std',0)*100:.1f}%"])
+                ifr_vals = "±".join([f"{ifr_s.get('mean',0)*100:.1f}%",
+                                     f"{ifr_s.get('std',0)*100:.1f}%"])
+                add(
+                    f"  {GREEN}✔{R} {BOLD}{short:<24}{R}  "
+                    f"SR={GREEN}{sr_vals}{R}  "
+                    f"IFR={YELLOW}{ifr_vals}{R}"
+                )
+            add()
+        except Exception:
+            pass
 
     # ── Rodapé ────────────────────────────────────────────────────────────────
     add(f"  {DIM}Ctrl+C para sair  │  atualiza a cada {interval}s  │  tmux attach -t a11y-exp{R}")

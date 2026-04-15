@@ -215,6 +215,12 @@ class Pipeline:
 
         await asyncio.gather(*[process_file(f) for f in files])
 
+        # Reordenar resultados para corresponder à ordem de entrada dos arquivos.
+        # asyncio.gather não garante ordem de inserção em all_results porque
+        # process_file é concorrente — arquivos mais rápidos chegam primeiro.
+        file_order = {f: i for i, f in enumerate(files)}
+        all_results.sort(key=lambda r: file_order.get(r.file, len(files)))
+
         # Relatórios
         if output_dir:
             scan_results_typed = [
@@ -269,12 +275,15 @@ class Pipeline:
         )
 
         current_content = task.file_content
+        # Rastrear issues resolvidas por tentativa (baseado em diff aplicado)
+        resolved_issue_ids: set[str] = set()
 
         for attempt_num in range(1, self.settings.max_retries_per_agent + 1):
+            pending_issues = [i for i in task.issues if i.issue_id not in resolved_issue_ids]
             attempt_task = AgentTask(
                 file=task.file,
                 file_content=current_content,
-                issues=[i for i in task.issues if not i.resolved],
+                issues=pending_issues,
                 wcag_level=task.wcag_level,
             )
 
@@ -306,15 +315,20 @@ class Pipeline:
             attempts.append(attempt)
 
             if patch.success and patch.new_content:
-                # Aplicar correção ao arquivo
                 scan.file.write_text(patch.new_content, encoding="utf-8")
                 current_content = patch.new_content
-                break
+                # Marcar as issues desta tentativa como resolvidas.
+                # O agente recebeu apenas pending_issues, então todas as que
+                # ele tinha como alvo são consideradas corrigidas no patch.
+                for issue in pending_issues:
+                    resolved_issue_ids.add(issue.issue_id)
+                # Continuar o loop: pode haver issues remanescentes de tentativas
+                # anteriores que o agente não incluiu nesta rodada.
 
         total_time = time.perf_counter() - t0
-        final_success = any(a.success for a in attempts)
-        issues_fixed = len(scan.issues) if final_success else 0
-        issues_pending = 0 if final_success else len(scan.issues)
+        issues_fixed = len(resolved_issue_ids)
+        issues_pending = len(scan.issues) - issues_fixed
+        final_success = issues_fixed > 0
 
         return FixResult(
             file=scan.file,
