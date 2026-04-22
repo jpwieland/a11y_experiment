@@ -31,12 +31,13 @@ class PromptingStrategy(str, Enum):
 
 # ---------------------------------------------------------------------------
 # Few-shot examples per issue type (Component 5)
-# Organised by the actual distribution of issues in the corpus:
-#   semantic  75.5% (WCAG 2.4.6, 1.3.1) — heading hierarchy, landmarks, div→semantic
-#   aria      22.0% (WCAG 4.1.2)         — button-name, link-name, role attrs
-#   keyboard   2.2% (WCAG 2.1.1)         — click-without-keyboard, focus
-#   label      0.1% (WCAG 3.3.2)         — label association
-#   alt-text   0.1% (WCAG 1.1.1)         — missing alt
+# Organised by the actual distribution of issues in the corpus
+# (dataset/results/*/summary.json, N=4,472 issues across 183 projects):
+#   keyboard  53.5% (WCAG 2.1.1)         — click-without-keyboard, focus, tabIndex
+#   semantic  16.8% (WCAG 1.3.1, 2.4.6) — heading hierarchy, landmarks, div→semantic
+#   aria      15.4% (WCAG 4.1.2)         — button-name, link-name, role attrs
+#   alt-text  10.5% (WCAG 1.1.1)         — missing/empty alt text
+#   label      3.8% (WCAG 3.3.2)         — label association
 # ---------------------------------------------------------------------------
 
 _FEW_SHOT_SEMANTIC = """
@@ -244,33 +245,51 @@ def _select_few_shot_examples(issues: list["A11yIssue"]) -> str:
     Select few-shot examples relevant to the actual issue types present.
 
     Prioritises examples for the issue types that are most frequent in the
-    file being fixed, ensuring the model sees directly applicable corrections.
-    Falls back to all examples when issue mix is diverse.
+    corpus (keyboard 53.5% → always included first) and then adds examples
+    for any additional types found in the file being fixed. This ensures the
+    model always sees the most common real-world correction pattern and
+    receives directly applicable examples for less-common types.
+
+    Corpus-aligned priority order (Section 3.6.2, methodology):
+      1. keyboard  — 53.5% of issues; always included
+      2. semantic  — 16.8%; included when present or as fallback
+      3. aria      — 15.4%; included when present
+      4. alt-text/label — 10.5% / 3.8%; included when present
     """
     from a11y_autofix.config import IssueType
 
     if not issues:
-        return "\n\n".join([_FEW_SHOT_SEMANTIC, _FEW_SHOT_ARIA])
+        # Default: keyboard (dominant) + semantic (second most common)
+        return (
+            "### Component 5: Few-Shot Examples (tailored to issue types present)\n"
+            + "\n\n---\n\n".join([_FEW_SHOT_KEYBOARD, _FEW_SHOT_SEMANTIC])
+        )
 
     types_present = {i.issue_type for i in issues}
 
     sections: list[str] = []
 
-    # Always include semantic examples (75% of corpus)
-    if IssueType.SEMANTIC in types_present or not sections:
+    # Always include keyboard examples — dominant type at 53.5% of corpus.
+    # Even when a file has no keyboard issues, the model benefits from
+    # seeing the "div → button + tabIndex + onKeyDown" pattern as context.
+    sections.append(_FEW_SHOT_KEYBOARD)
+
+    if IssueType.SEMANTIC in types_present:
         sections.append(_FEW_SHOT_SEMANTIC)
 
     if IssueType.ARIA in types_present:
         sections.append(_FEW_SHOT_ARIA)
 
-    if IssueType.KEYBOARD in types_present:
-        sections.append(_FEW_SHOT_KEYBOARD)
-
     if IssueType.LABEL in types_present or IssueType.ALT_TEXT in types_present:
         sections.append(_FEW_SHOT_LABEL_AND_ALT)
 
-    # If only one type present, also show one extra category for context
-    if len(types_present) == 1 and IssueType.ARIA in types_present:
+    # If file has only ARIA issues (no keyboard) and semantic isn't included,
+    # add semantic for broader context — the model needs landmark patterns.
+    if (
+        len(types_present) == 1
+        and IssueType.ARIA in types_present
+        and _FEW_SHOT_SEMANTIC not in sections
+    ):
         sections.append(_FEW_SHOT_SEMANTIC)
 
     header = "### Component 5: Few-Shot Examples (tailored to issue types present)\n"

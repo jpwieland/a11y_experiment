@@ -407,7 +407,7 @@ class MultiToolScanner:
         self,
         files: list[Path],
         wcag: str,
-        on_file_done: Callable[[ScanResult], None] | None = None,
+        on_file_done: Callable[[ScanResult], None | object] | None = None,
     ) -> list[ScanResult]:
         """
         Escaneia múltiplos arquivos com controle de concorrência.
@@ -428,7 +428,11 @@ class MultiToolScanner:
             async with sem:
                 result = await self.scan_file(f, wcag)
                 if on_file_done is not None:
-                    on_file_done(result)
+                    # Mirror the same async-safe pattern used in Pipeline.run():
+                    # on_file_done may be a regular callable OR an async def.
+                    cb = on_file_done(result)
+                    if asyncio.iscoroutine(cb):
+                        await cb
                 return result
 
         results = await asyncio.gather(*[scan_with_sem(f) for f in files])

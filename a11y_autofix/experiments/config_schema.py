@@ -151,6 +151,18 @@ class ExperimentConfig(BaseModel):
     auto_clone_missing_snapshots: bool = Field(default=True)
     checkpoint_per_project: bool = Field(default=True)
 
+    # Forçar tipo de agente — bypassa o router automático (ablation study C1.4)
+    force_agent_type: str | None = Field(
+        default=None,
+        description=(
+            "Se definido, força o uso deste agente para todos os arquivos, "
+            "ignorando o router automático. Valores válidos: 'openhands', "
+            "'swe-agent', 'direct-llm'. None = roteamento automático. "
+            "Usado em ablation studies para isolar o efeito do agente "
+            "do efeito do modelo LLM (metodologia C1.4)."
+        ),
+    )
+
     # Execution settings (methodology Section 3.1.3)
     execution: ExecutionConfig = Field(
         default_factory=ExecutionConfig,

@@ -31,7 +31,8 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from datetime import datetime, timezone
+from typing import Any, Callable, Literal
 
 # Optional NumPy/SciPy — gracefully degraded if not installed.
 try:
@@ -774,5 +775,595 @@ def compute_regression_rate(
                 ci_upper=round(ci_upper, 4),
                 n=len(binary_outcomes),
             )
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# H1 (Redesign): Detection Rate vs Threshold (Confirmatory)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_h1_detection_rate(
+    detection_rate: float,
+    threshold: float = 0.80,
+    n_issues_detected: int = 0,
+    n_issues_ground_truth: int = 0,
+) -> dict[str, Any]:
+    """
+    H1 (reformulado): Taxa de detecção δ ≥ 0,80 com consenso multi-ferramenta.
+
+    Teste: comparação com threshold pré-definido (one-sample).
+    CONFIRMATORY — pré-registrado.
+
+    ATENÇÃO: δ calculado contra ground truth de ferramentas é CIRCULAR
+    (as mesmas ferramentas definem e verificam). Para δ real, usar
+    ground truth de fixtures sintéticos (C2.1) ou anotação humana (C4.1).
+
+    Args:
+        detection_rate: δ observado (0.0–1.0)
+        threshold: Limiar pré-definido (default 0.80)
+        n_issues_detected: Numerador de δ
+        n_issues_ground_truth: Denominador de δ
+
+    Returns:
+        Dict com resultado do teste H1
+    """
+    passed = detection_rate >= threshold
+    gap = round(detection_rate - threshold, 4)
+
+    return {
+        "hypothesis": "H1",
+        "type": "confirmatory",
+        "description": "Detection rate >= 0.80 with multi-tool consensus",
+        "metric": "detection_rate",
+        "observed": round(detection_rate, 4),
+        "threshold": threshold,
+        "gap": gap,
+        "passed": passed,
+        "n_detected": n_issues_detected,
+        "n_ground_truth": n_issues_ground_truth,
+        "validity_note": (
+            "CIRCULAR if ground_truth derived from same scanner tools. "
+            "Use fixture-based ground truth (C2.1) for valid δ."
+        ),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# H3 (Redesign): Correction Rate vs Threshold (Confirmatory)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_h3_correction_rate_threshold(
+    ifr: float,
+    threshold: float = 0.70,
+    n_fixed: int = 0,
+    n_total: int = 0,
+    effective_sr: float | None = None,
+) -> dict[str, Any]:
+    """
+    H3 (reformulado): Taxa de correção τ ≥ 0,70 (Issue Fix Rate).
+
+    Teste: comparação com threshold pré-definido.
+    CONFIRMATORY — pré-registrado.
+
+    Inclui SR efetivo (com penalidade noop) como métrica secundária.
+    Se effective_sr for fornecido, reportar ambos os valores.
+
+    Args:
+        ifr: Issue Fix Rate observado (0.0–1.0)
+        threshold: Limiar pré-definido (default 0.70)
+        n_fixed: Número de issues corrigidas
+        n_total: Número total de issues
+        effective_sr: SR com penalidade noop (opcional, C1.1)
+
+    Returns:
+        Dict com resultado do teste H3
+    """
+    passed = ifr >= threshold
+
+    result: dict[str, Any] = {
+        "hypothesis": "H3",
+        "type": "confirmatory",
+        "description": "Issue Fix Rate >= 0.70",
+        "metric": "ifr",
+        "observed": round(ifr, 4),
+        "threshold": threshold,
+        "gap": round(ifr - threshold, 4),
+        "passed": passed,
+        "n_fixed": n_fixed,
+        "n_total": n_total,
+    }
+
+    if effective_sr is not None:
+        result["effective_sr"] = round(effective_sr, 4)
+        result["noop_adjustment"] = round(effective_sr - ifr, 4)
+        result["note"] = (
+            "effective_sr penalizes patches with no actual code changes. "
+            "Compare ifr vs effective_sr to assess model conservatism."
+        )
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# H5 (Confirmatory): Regression Rate Threshold Test
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_h5_regression_threshold(
+    regression_rate: float,
+    threshold: float = 0.05,
+    n_regressions: int = 0,
+    n_attempts: int = 0,
+    ci_lower: float | None = None,
+    ci_upper: float | None = None,
+) -> dict[str, Any]:
+    """
+    H5: Taxa de regressão ρ < 5% (confirmatory threshold test).
+
+    ρ = patches rejeitados na Camada 2 / total de patches tentados.
+    Rejeição na Camada 2 = regressão funcional (interface quebrada, export removido).
+
+    CONFIRMATORY — pré-registrado. Complementa compute_regression_rate()
+    que é exploratório/descritivo.
+
+    Args:
+        regression_rate: ρ observado (0.0–1.0)
+        threshold: Limiar pré-definido (default 0.05)
+        n_regressions: Número de regressões observadas
+        n_attempts: Número total de patches tentados
+        ci_lower: Limite inferior do IC 95% (bootstrap, opcional)
+        ci_upper: Limite superior do IC 95% (bootstrap, opcional)
+
+    Returns:
+        Dict com resultado do teste H5
+    """
+    passed = regression_rate < threshold
+
+    result: dict[str, Any] = {
+        "hypothesis": "H5",
+        "type": "confirmatory",
+        "description": "Regression rate rho < 0.05",
+        "metric": "regression_rate",
+        "observed": round(regression_rate, 4),
+        "threshold": threshold,
+        "gap": round(threshold - regression_rate, 4),  # positivo = passou com folga
+        "passed": passed,
+        "n_regressions": n_regressions,
+        "n_attempts": n_attempts,
+    }
+
+    if ci_lower is not None and ci_upper is not None:
+        result["ci_95"] = [round(ci_lower, 4), round(ci_upper, 4)]
+        result["ci_upper_passes"] = ci_upper < threshold
+        result["note"] = (
+            "ci_upper_passes=True means even the upper CI bound is below threshold "
+            "(stronger evidence). ci_upper_passes=False means H5 is marginal."
+        )
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Exploratory: Model Size vs Performance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def explore_model_size_effect(
+    ifr_by_model: dict[str, list[float]],
+    model_sizes_b: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """
+    EXPLORATÓRIO: Correlação entre tamanho do modelo (parâmetros) e IFR.
+
+    Usa Spearman ρ para correlação não-paramétrica (adequado para escala ordinal
+    de tamanho de modelo). Aplica correção de Bonferroni se múltiplos testes.
+
+    POST-HOC EXPLORATORY ANALYSIS — não pré-registrado.
+    P-valores não corrigidos devem ser interpretados com cautela.
+
+    Args:
+        ifr_by_model: {model_name: [ifr_per_file]} — IFR por arquivo por modelo
+        model_sizes_b: {model_name: size_in_billions} — tamanho em bilhões
+
+    Returns:
+        Dict com correlação Spearman e plot_data para visualização
+    """
+    import re
+
+    # Extrair tamanhos se não fornecidos
+    if model_sizes_b is None:
+        model_sizes_b = {}
+        for model_name in ifr_by_model:
+            match = re.search(r'(\d+(?:\.\d+)?)b', model_name.lower())
+            if match:
+                model_sizes_b[model_name] = float(match.group(1))
+
+    sizes: list[float] = []
+    mean_ifrs: list[float] = []
+    model_labels: list[str] = []
+
+    for model_name, ifr_list in ifr_by_model.items():
+        size = model_sizes_b.get(model_name)
+        if size is None or not ifr_list:
+            continue
+        sizes.append(size)
+        mean_ifrs.append(sum(ifr_list) / len(ifr_list))
+        model_labels.append(model_name)
+
+    if len(sizes) < 3:
+        return {
+            "analysis": "model_size_vs_ifr",
+            "type": "exploratory",
+            "error": f"Insufficient data points: {len(sizes)} (need ≥ 3)",
+        }
+
+    # Spearman correlation (rank-based, robust to outliers)
+    spearman_rho, p_value = _spearman_correlation(sizes, mean_ifrs)
+
+    return {
+        "analysis": "model_size_vs_ifr",
+        "type": "exploratory",
+        "test": "Spearman ρ (rank correlation)",
+        "n_models": len(sizes),
+        "spearman_rho": round(spearman_rho, 4),
+        "p_value_uncorrected": round(p_value, 6),
+        "interpretation": _interpret_spearman(spearman_rho, p_value),
+        "plot_data": [
+            {"model": label, "size_b": size, "mean_ifr": round(ifr, 4)}
+            for label, size, ifr in zip(model_labels, sizes, mean_ifrs)
+        ],
+        "caveat": (
+            "Exploratory — not pre-registered. "
+            "p-value not corrected for multiple comparisons. "
+            "Interpret as hypothesis for future confirmatory study."
+        ),
+    }
+
+
+def _spearman_correlation(x: list[float], y: list[float]) -> tuple[float, float]:
+    """Spearman rank correlation with p-value (no scipy dependency)."""
+    n = len(x)
+    if n < 3:
+        return 0.0, 1.0
+
+    def rank(vals: list[float]) -> list[float]:
+        sorted_vals = sorted(enumerate(vals), key=lambda t: t[1])
+        ranks = [0.0] * len(vals)
+        i = 0
+        while i < len(sorted_vals):
+            j = i
+            while j < len(sorted_vals) - 1 and sorted_vals[j + 1][1] == sorted_vals[i][1]:
+                j += 1
+            avg_rank = (i + j) / 2 + 1
+            for k in range(i, j + 1):
+                ranks[sorted_vals[k][0]] = avg_rank
+            i = j + 1
+        return ranks
+
+    rx = rank(x)
+    ry = rank(y)
+
+    # Pearson on ranks = Spearman
+    mx = sum(rx) / n
+    my = sum(ry) / n
+    cov = sum((rx[i] - mx) * (ry[i] - my) for i in range(n))
+    sx = math.sqrt(sum((v - mx) ** 2 for v in rx))
+    sy = math.sqrt(sum((v - my) ** 2 for v in ry))
+
+    if sx == 0 or sy == 0:
+        return 0.0, 1.0
+
+    rho = cov / (sx * sy)
+
+    # t-statistic for significance
+    if abs(rho) >= 1.0:
+        return rho, 0.0
+
+    t = rho * math.sqrt(n - 2) / math.sqrt(1 - rho ** 2)
+    # Approximate p-value (two-sided) via t distribution
+    # Use normal approximation for df > 30, else conservative estimate
+    df = n - 2
+    if df > 30:
+        p = 2 * (1 - _norm_cdf(abs(t)))
+    else:
+        # Very rough approximation
+        p = min(1.0, 2 * math.exp(-0.717 * abs(t) - 0.416 * t * t))
+
+    return round(rho, 6), round(max(0.0, min(1.0, p)), 6)
+
+
+def _interpret_spearman(rho: float, p: float) -> str:
+    """Interpreta a correlação de Spearman."""
+    if p >= 0.05:
+        return f"No significant correlation (ρ={rho:.3f}, p={p:.3f})"
+    strength = "strong" if abs(rho) >= 0.7 else "moderate" if abs(rho) >= 0.4 else "weak"
+    direction = "positive" if rho > 0 else "negative"
+    return f"Significant {strength} {direction} correlation (ρ={rho:.3f}, p={p:.3f})"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Exploratory: Noop Analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def explore_noop_analysis(
+    noop_rates_by_model: dict[str, float],
+    sr_by_model: dict[str, float],
+    effective_sr_by_model: dict[str, float],
+) -> dict[str, Any]:
+    """
+    EXPLORATÓRIO: Analisa o impacto de noop patches no SR por modelo.
+
+    Compara SR original vs SR efetivo (com penalidade noop).
+    Modelos com alta noop_rate estão sendo artificialmente inflados.
+
+    POST-HOC EXPLORATORY ANALYSIS — não pré-registrado.
+
+    Args:
+        noop_rates_by_model: {model: noop_rate}
+        sr_by_model: {model: sr_original}
+        effective_sr_by_model: {model: sr_efetivo}
+
+    Returns:
+        Dict com análise comparativa
+    """
+    comparisons: list[dict[str, Any]] = []
+    for model in noop_rates_by_model:
+        noop_rate = noop_rates_by_model.get(model, 0.0)
+        sr = sr_by_model.get(model, 0.0)
+        eff_sr = effective_sr_by_model.get(model, 0.0)
+        inflation = round(sr - eff_sr, 4)
+        inflation_pct = round(100 * inflation / sr, 1) if sr > 0 else 0.0
+
+        comparisons.append({
+            "model": model,
+            "noop_rate": round(noop_rate, 4),
+            "sr_original": round(sr, 4),
+            "sr_effective": round(eff_sr, 4),
+            "sr_inflation": inflation,
+            "sr_inflation_pct": inflation_pct,
+            "conservatism": (
+                "high" if noop_rate > 0.20 else
+                "medium" if noop_rate > 0.05 else
+                "low"
+            ),
+        })
+
+    comparisons.sort(key=lambda x: x["noop_rate"], reverse=True)
+
+    return {
+        "analysis": "noop_impact",
+        "type": "exploratory",
+        "description": "Impact of noop patches on SR metric",
+        "per_model": comparisons,
+        "most_conservative": comparisons[0]["model"] if comparisons else None,
+        "least_conservative": comparisons[-1]["model"] if comparisons else None,
+        "caveat": (
+            "Exploratory. Models with high noop_rate should have their SR "
+            "results reported with effective_sr (penalized) metric."
+        ),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Exploratory: Contamination Sensitivity Analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def explore_contamination_sensitivity(
+    ifr_all: list[float],
+    ifr_low_risk: list[float],
+    ifr_high_risk: list[float],
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """
+    EXPLORATÓRIO: Analisa se resultados mudam quando projetos de alto risco
+    de contaminação são excluídos.
+
+    Se IFR_all ≈ IFR_low_risk, contamination provavelmente não é um problema.
+    Se IFR_low_risk << IFR_all, existe evidência de inflação por memorização.
+
+    POST-HOC EXPLORATORY ANALYSIS — não pré-registrado.
+
+    Args:
+        ifr_all: IFR com todos os projetos
+        ifr_low_risk: IFR apenas com projetos de baixo risco
+        ifr_high_risk: IFR apenas com projetos de alto risco
+
+    Returns:
+        Dict com análise de sensibilidade
+    """
+    mean_all = sum(ifr_all) / len(ifr_all) if ifr_all else 0.0
+    mean_low = sum(ifr_low_risk) / len(ifr_low_risk) if ifr_low_risk else 0.0
+    mean_high = sum(ifr_high_risk) / len(ifr_high_risk) if ifr_high_risk else 0.0
+
+    delta_low_vs_all = round(mean_all - mean_low, 4)
+    delta_high_vs_low = round(mean_high - mean_low, 4)
+
+    # Teste estatístico: low vs high risk
+    u_stat, p_value = mann_whitney_u(ifr_low_risk, ifr_high_risk)
+    contamination_suspected = p_value < alpha and delta_high_vs_low > 0.05
+
+    return {
+        "analysis": "contamination_sensitivity",
+        "type": "exploratory",
+        "description": "IFR comparison with and without high-contamination-risk projects",
+        "ifr_all_mean": round(mean_all, 4),
+        "ifr_low_risk_mean": round(mean_low, 4),
+        "ifr_high_risk_mean": round(mean_high, 4),
+        "delta_low_vs_all": delta_low_vs_all,
+        "delta_high_vs_low": delta_high_vs_low,
+        "mann_whitney_p": round(p_value, 6),
+        "contamination_suspected": contamination_suspected,
+        "interpretation": (
+            "Contamination likely inflating results — high-risk projects perform "
+            f"significantly better (Δ={delta_high_vs_low:+.4f}, p={p_value:.4f})"
+            if contamination_suspected else
+            "No evidence of contamination — performance similar across risk levels "
+            f"(Δ={delta_high_vs_low:+.4f}, p={p_value:.4f})"
+        ),
+        "recommendation": (
+            "Report results separately for low-risk and high-risk subsets. "
+            "Primary claims should use low-risk subset only."
+            if contamination_suspected else
+            "Contamination analysis supports validity of full-corpus results."
+        ),
+        "caveat": "Exploratory — contamination risk estimated heuristically (see C3.2).",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Convenience: Run All Confirmatory Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def run_all_confirmatory_tests(
+    *,
+    detection_rate: float = 0.0,
+    n_issues_detected: int = 0,
+    n_issues_ground_truth: int = 0,
+    full_results: list[int] | None = None,
+    ablated_results: dict[str, list[int]] | None = None,
+    results_by_strategy: dict[str, list[int]] | None = None,
+    te_by_strategy: dict[str, float] | None = None,
+    zero_shot_te: float = 0.0,
+    results_by_model: dict[str, list[int]] | None = None,
+    ifr_by_category: dict[str, list[int]] | None = None,
+    best_ifr: float = 0.0,
+    n_fixed: int = 0,
+    n_total: int = 0,
+    effective_sr: float | None = None,
+    regression_rate: float = 0.0,
+    n_regressions: int = 0,
+    n_attempts: int = 0,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """
+    Executa TODOS os testes confirmatórios (H1–H5) em sequência.
+
+    Retorna um dict com todos os resultados, marcados como "confirmatory".
+    Deve ser executado UMA ÚNICA VEZ após coleta de todos os dados.
+
+    Args: (todos opcionais — testes sem dados suficientes são pulados)
+
+    Returns:
+        Dict com resultados de H1–H5
+    """
+    results: dict[str, Any] = {
+        "analysis_type": "confirmatory",
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "alpha": alpha,
+        "note": (
+            "These are pre-registered confirmatory tests. "
+            "Do not modify thresholds or test choices after seeing data."
+        ),
+    }
+
+    # H1: Detection rate
+    results["H1"] = test_h1_detection_rate(
+        detection_rate=detection_rate,
+        n_issues_detected=n_issues_detected,
+        n_issues_ground_truth=n_issues_ground_truth,
+    )
+
+    # H1 (ablation, original): scanner ablation
+    if full_results and ablated_results:
+        results["H1_ablation"] = test_h1_ablation(full_results, ablated_results, alpha=alpha)
+
+    # H2: Prompting strategy
+    if results_by_strategy and te_by_strategy:
+        results["H2"] = test_h2_prompting_strategy(
+            results_by_strategy=results_by_strategy,
+            te_by_strategy=te_by_strategy,
+            zero_shot_te=zero_shot_te,
+            alpha=alpha,
+        )
+
+    # H3: LLM architecture comparison
+    if results_by_model:
+        results["H3_architecture"] = test_h3_llm_architecture(
+            results_by_model=results_by_model,
+            alpha=alpha,
+        )
+
+    # H3: Correction rate threshold
+    results["H3_threshold"] = test_h3_correction_rate_threshold(
+        ifr=best_ifr,
+        n_fixed=n_fixed,
+        n_total=n_total,
+        effective_sr=effective_sr,
+    )
+
+    # H4: Issue category
+    if ifr_by_category:
+        results["H4"] = test_h4_issue_category(
+            ifr_by_category=ifr_by_category,
+            alpha=alpha,
+        )
+
+    # H5: Regression rate
+    results["H5"] = test_h5_regression_threshold(
+        regression_rate=regression_rate,
+        n_regressions=n_regressions,
+        n_attempts=n_attempts,
+    )
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Convenience: Run All Exploratory Analyses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def run_all_exploratory_analyses(
+    *,
+    ifr_by_model: dict[str, list[float]] | None = None,
+    noop_rates: dict[str, float] | None = None,
+    sr_by_model: dict[str, float] | None = None,
+    effective_sr_by_model: dict[str, float] | None = None,
+    layer2_rejections: dict[str, dict[str, list[int]]] | None = None,
+    ifr_all: list[float] | None = None,
+    ifr_low_risk: list[float] | None = None,
+    ifr_high_risk: list[float] | None = None,
+) -> dict[str, Any]:
+    """
+    Executa TODAS as análises exploratórias disponíveis.
+
+    Análises exploratórias geram hipóteses para estudos futuros.
+    P-valores NÃO devem ser usados para confirmação sem pré-registro.
+
+    Returns:
+        Dict com todos os resultados exploratórios
+    """
+    results: dict[str, Any] = {
+        "analysis_type": "exploratory",
+        "note": (
+            "Exploratory analyses — not pre-registered. "
+            "Treat p-values as hypothesis-generating, not hypothesis-confirming. "
+            "All findings must be replicated in a pre-registered study."
+        ),
+    }
+
+    if ifr_by_model:
+        results["model_size_effect"] = explore_model_size_effect(ifr_by_model)
+
+    if noop_rates and sr_by_model and effective_sr_by_model:
+        results["noop_impact"] = explore_noop_analysis(
+            noop_rates, sr_by_model, effective_sr_by_model
+        )
+
+    if layer2_rejections:
+        results["regression_rate_by_stratum"] = compute_regression_rate(layer2_rejections)
+
+    if ifr_all and ifr_low_risk is not None and ifr_high_risk is not None:
+        results["contamination_sensitivity"] = explore_contamination_sensitivity(
+            ifr_all=ifr_all,
+            ifr_low_risk=ifr_low_risk,
+            ifr_high_risk=ifr_high_risk,
+        )
 
     return results

@@ -985,7 +985,7 @@ class ExperimentRunner:
             "cold_start",
             model=model_id,
             condition=condition_id,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(tz=timezone.utc).isoformat(),
         )
 
         try:
@@ -1082,7 +1082,29 @@ class ExperimentRunner:
         """
         strategy = getattr(config, "strategy", "few-shot")
         model_config = self.registry.get(model_name)
-        pipeline = self.pipeline_factory(model_config)
+
+        # ── Ablation: force_agent_type bypasses the router (methodology C1.4) ──
+        # If set in ExperimentConfig, pass it as agent_preference to the Pipeline
+        # so the router is short-circuited and a fixed agent is used for all files.
+        from a11y_autofix.config import AgentType
+        force_agent = getattr(config, "force_agent_type", None)
+        agent_preference = AgentType.AUTO
+        if force_agent is not None:
+            try:
+                agent_preference = AgentType(force_agent)
+                log.info(
+                    "ablation_force_agent",
+                    model=model_name,
+                    forced_agent=force_agent,
+                )
+            except ValueError:
+                log.warning(
+                    "invalid_force_agent_type",
+                    value=force_agent,
+                    valid=[e.value for e in AgentType],
+                )
+
+        pipeline = self.pipeline_factory(model_config, agent_preference=agent_preference)
 
         # Usar concorrência dinâmica fornecida ou cair no default das settings
         effective_concurrency = llm_concurrency or self.settings.max_concurrent_agents
@@ -1521,7 +1543,7 @@ class ExperimentRunner:
             },
 
             # Timestamps
-            "cold_start_timestamp": datetime.utcnow().isoformat(),
+            "cold_start_timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "completed_at": datetime.now(tz=timezone.utc).isoformat(),
         }
 

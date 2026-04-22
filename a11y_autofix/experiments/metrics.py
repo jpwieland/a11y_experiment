@@ -106,6 +106,7 @@ def compute_mttr(results: list[FixResult]) -> float | None:
 def compute_experiment_metrics(
     results_by_model: dict[str, list[FixResult]],
     input_tokens_by_model: dict[str, int] | None = None,
+    context_windows_by_model: dict[str, int] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """
     Calcula métricas agregadas por modelo para um experimento.
@@ -171,6 +172,19 @@ def compute_experiment_metrics(
             # Fallback: use total tokens as approximation when prompt_tokens not available
             te = compute_te(ifr, total_issues, total_tokens)
 
+        # Token Efficiency normalizada por janela de contexto (metodologia C1.2)
+        _context_windows = context_windows_by_model or {}
+        context_window = _context_windows.get(model_name, 0)
+        te_normalized: float | None = None
+        if context_window > 0 and input_tokens > 0:
+            te_normalized = compute_te_normalized(ifr, total_issues, input_tokens, context_window)
+        elif context_window > 0 and total_tokens is not None and total_tokens > 0:
+            te_normalized = compute_te_normalized(ifr, total_issues, total_tokens, context_window)
+
+        # Noop rate e SR efetivo (metodologia C1.1)
+        noop_rate, n_noop, n_successful = compute_noop_rate(results)
+        effective_sr = compute_effective_sr(results)
+
         total_pending = sum(r.issues_pending for r in results)
         total_time = sum(r.total_time for r in results)
 
@@ -190,6 +204,10 @@ def compute_experiment_metrics(
             "files_successful": sum(1 for r in results if r.final_success),
             "total_tokens": total_tokens,
             "avg_tokens": (total_tokens / total_attempts) if (total_tokens and total_attempts) else None,
+            "te_normalized": round(te_normalized, 4) if te_normalized is not None else None,
+            "noop_rate": round(noop_rate, 4),
+            "n_noop_patches": n_noop,
+            "effective_sr": effective_sr,
         }
 
     return metrics
@@ -199,39 +217,49 @@ def compute_per_issue_type_metrics(
     results_by_model: dict[str, list[FixResult]],
 ) -> dict[str, dict[str, Any]]:
     """
-    Calcula taxa de sucesso por tipo de issue para cada modelo.
+    Calcula IFR (Issue Fix Rate) por tipo de issue para cada modelo.
 
-    Útil para entender quais tipos de issue cada modelo lida melhor.
+    Usa crédito parcial proporcional: um arquivo com N issues onde k são
+    corrigidas contribui k/N de crédito para cada tipo de issue presente,
+    distribuído proporcionalmente entre os tipos encontrados no arquivo.
+    Isso é consistente com a definição de IFR (Eq. 3.2) e evita o viés
+    binário de contar apenas arquivos com final_success=True.
 
     Args:
         results_by_model: Resultados por modelo.
 
     Returns:
         Dicionário com métricas por tipo de issue por modelo.
+        O campo "fixed" é float (crédito parcial), "rate" é IFR ∈ [0,1].
     """
     metrics: dict[str, dict[str, Any]] = {}
 
     for model_name, results in results_by_model.items():
-        by_type: dict[str, dict[str, int]] = {}
+        by_type: dict[str, dict[str, float]] = {}
 
         for fix_result in results:
             issues = fix_result.scan_result.issues
             if not issues:
                 continue
 
+            n_issues = len(issues)
+            # Crédito proporcional: distribui issues_fixed entre os tipos
+            # presentes no arquivo. Ex.: 3 ARIA + 2 KEYBOARD, 4 corrigidas →
+            # ARIA recebe 4*(3/5)=2.4, KEYBOARD recebe 4*(2/5)=1.6.
+            credit_per_issue = fix_result.issues_fixed / n_issues
+
             for issue in issues:
                 itype = issue.issue_type.value
                 if itype not in by_type:
-                    by_type[itype] = {"total": 0, "fixed": 0}
+                    by_type[itype] = {"total": 0, "fixed": 0.0}
                 by_type[itype]["total"] += 1
-                if fix_result.final_success:
-                    by_type[itype]["fixed"] += 1
+                by_type[itype]["fixed"] += credit_per_issue
 
         metrics[model_name] = {
             itype: {
-                "total": counts["total"],
-                "fixed": counts["fixed"],
-                "rate": (counts["fixed"] / counts["total"] * 100) if counts["total"] > 0 else 0.0,
+                "total": int(counts["total"]),
+                "fixed": round(counts["fixed"], 2),
+                "rate": round(counts["fixed"] / counts["total"], 4) if counts["total"] > 0 else 0.0,
             }
             for itype, counts in by_type.items()
         }
@@ -331,8 +359,10 @@ def compute_per_complexity_metrics(
     results_by_model: dict[str, list[FixResult]],
 ) -> dict[str, dict[str, Any]]:
     """
-    Taxa de sucesso por nível de complexidade do issue (simple/moderate/complex).
+    IFR por nível de complexidade do issue (simple/moderate/complex).
 
+    Usa crédito parcial proporcional (mesmo método de compute_per_issue_type_metrics)
+    para manter consistência com a definição de IFR (Eq. 3.2).
     Permite avaliar se modelos maiores resolvem melhor issues complexas.
 
     Returns:
@@ -340,20 +370,23 @@ def compute_per_complexity_metrics(
     """
     metrics: dict[str, dict[str, Any]] = {}
     for model_name, results in results_by_model.items():
-        by_complexity: dict[str, dict[str, int]] = {}
+        by_complexity: dict[str, dict[str, float]] = {}
         for fix_result in results:
-            for issue in fix_result.scan_result.issues:
+            issues = fix_result.scan_result.issues
+            if not issues:
+                continue
+            credit_per_issue = fix_result.issues_fixed / len(issues)
+            for issue in issues:
                 c = issue.complexity.value
                 if c not in by_complexity:
-                    by_complexity[c] = {"total": 0, "fixed": 0}
+                    by_complexity[c] = {"total": 0, "fixed": 0.0}
                 by_complexity[c]["total"] += 1
-                if fix_result.final_success:
-                    by_complexity[c]["fixed"] += 1
+                by_complexity[c]["fixed"] += credit_per_issue
         metrics[model_name] = {
             c: {
-                "total": v["total"],
-                "fixed": v["fixed"],
-                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+                "total": int(v["total"]),
+                "fixed": round(v["fixed"], 2),
+                "rate": round(v["fixed"] / v["total"], 4) if v["total"] > 0 else 0.0,
             }
             for c, v in by_complexity.items()
         }
@@ -364,10 +397,11 @@ def compute_per_wcag_principle_metrics(
     results_by_model: dict[str, list[FixResult]],
 ) -> dict[str, dict[str, Any]]:
     """
-    Taxa de sucesso por princípio WCAG (P1 Perceivable, P2 Operable,
+    IFR por princípio WCAG (P1 Perceivable, P2 Operable,
     P3 Understandable, P4 Robust).
 
     Princípio derivado do primeiro dígito do critério WCAG (1.x, 2.x, 3.x, 4.x).
+    Usa crédito parcial proporcional para consistência com IFR (Eq. 3.2).
 
     Returns:
         {model: {principle: {total, fixed, rate}}}
@@ -376,21 +410,24 @@ def compute_per_wcag_principle_metrics(
                    "3": "P3_Understandable", "4": "P4_Robust"}
     metrics: dict[str, dict[str, Any]] = {}
     for model_name, results in results_by_model.items():
-        by_principle: dict[str, dict[str, int]] = {}
+        by_principle: dict[str, dict[str, float]] = {}
         for fix_result in results:
-            for issue in fix_result.scan_result.issues:
+            issues = fix_result.scan_result.issues
+            if not issues:
+                continue
+            credit_per_issue = fix_result.issues_fixed / len(issues)
+            for issue in issues:
                 wcag = issue.wcag_criteria or ""
                 principle = _PRINCIPLES.get(wcag[0], "unknown") if wcag else "unknown"
                 if principle not in by_principle:
-                    by_principle[principle] = {"total": 0, "fixed": 0}
+                    by_principle[principle] = {"total": 0, "fixed": 0.0}
                 by_principle[principle]["total"] += 1
-                if fix_result.final_success:
-                    by_principle[principle]["fixed"] += 1
+                by_principle[principle]["fixed"] += credit_per_issue
         metrics[model_name] = {
             p: {
-                "total": v["total"],
-                "fixed": v["fixed"],
-                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+                "total": int(v["total"]),
+                "fixed": round(v["fixed"], 2),
+                "rate": round(v["fixed"] / v["total"], 4) if v["total"] > 0 else 0.0,
             }
             for p, v in by_principle.items()
         }
@@ -503,34 +540,114 @@ def compute_confidence_breakdown(
     results_by_model: dict[str, list[FixResult]],
 ) -> dict[str, dict[str, Any]]:
     """
-    Taxa de correção por nível de confiança do issue (high/medium/low).
+    IFR por nível de confiança do issue (high/medium/low).
 
     Permite verificar se o modelo tem melhor desempenho em issues com
     alta confiança (multi-tool agreement) vs issues detectadas por 1 tool.
+    Usa crédito parcial proporcional para consistência com IFR (Eq. 3.2).
 
     Returns:
         {model: {confidence_level: {total, fixed, rate}}}
     """
     metrics: dict[str, dict[str, Any]] = {}
     for model_name, results in results_by_model.items():
-        by_conf: dict[str, dict[str, int]] = {}
+        by_conf: dict[str, dict[str, float]] = {}
         for fix_result in results:
-            for issue in fix_result.scan_result.issues:
+            issues = fix_result.scan_result.issues
+            if not issues:
+                continue
+            credit_per_issue = fix_result.issues_fixed / len(issues)
+            for issue in issues:
                 conf = issue.confidence.value
                 if conf not in by_conf:
-                    by_conf[conf] = {"total": 0, "fixed": 0}
+                    by_conf[conf] = {"total": 0, "fixed": 0.0}
                 by_conf[conf]["total"] += 1
-                if fix_result.final_success:
-                    by_conf[conf]["fixed"] += 1
+                by_conf[conf]["fixed"] += credit_per_issue
         metrics[model_name] = {
             conf: {
-                "total": v["total"],
-                "fixed": v["fixed"],
-                "rate": v["fixed"] / v["total"] if v["total"] > 0 else 0.0,
+                "total": int(v["total"]),
+                "fixed": round(v["fixed"], 2),
+                "rate": round(v["fixed"] / v["total"], 4) if v["total"] > 0 else 0.0,
             }
             for conf, v in by_conf.items()
         }
     return metrics
+
+
+def compute_noop_rate(results: list[FixResult]) -> tuple[float, int, int]:
+    """
+    Taxa de patches bem-sucedidos que não modificaram nenhuma linha real.
+
+    Um patch é noop quando:
+      1. final_success is True (passou em todas as camadas), E
+      2. best_attempt.diff está vazio ou contém apenas linhas de contexto
+         (nenhuma linha começando com '+' ou '-', excluindo os marcadores '+++/---').
+
+    Modelos conservadores que copiam o código sem alterar nada podem ter
+    SR artificialmente alto sem contribuir com correções reais.
+
+    Returns:
+        (noop_rate, n_noop, n_successful_patches)
+    """
+    n_successful = sum(1 for r in results if r.final_success)
+    n_noop = 0
+    for r in results:
+        if r.final_success and r.best_attempt:
+            diff = r.best_attempt.diff or ""
+            real_changes = [
+                line for line in diff.splitlines()
+                if (line.startswith("+") or line.startswith("-"))
+                and not line.startswith("+++")
+                and not line.startswith("---")
+            ]
+            if not real_changes:
+                n_noop += 1
+    noop_rate = n_noop / n_successful if n_successful > 0 else 0.0
+    return round(noop_rate, 4), n_noop, n_successful
+
+
+def compute_effective_sr(results: list[FixResult]) -> float:
+    """
+    SR efetivo com penalidade por noop patches (metodologia C1.1).
+
+    SR_efetivo = SR × (1 − noop_rate)
+
+    Exemplo: SR=0.80 com noop_rate=0.25 → SR_efetivo=0.60
+    Previne que modelos conservadores (sem alterar código) pontuem bem.
+    """
+    sr = compute_sr(results)
+    noop_rate, _, _ = compute_noop_rate(results)
+    return round(sr * (1.0 - noop_rate), 4)
+
+
+def compute_te_normalized(
+    ifr: float,
+    total_issues: int,
+    total_input_tokens: int,
+    context_window: int,
+) -> float:
+    """
+    Token Efficiency normalizada pela janela de contexto do modelo (metodologia C1.2).
+
+    TE_norm = (IFR × |I|) / (C_total / context_window)
+
+    Remove o viés que penaliza modelos com janelas de contexto maiores.
+    Modelos com context_window maior podem usar mais tokens sem serem
+    penalizados relativamente a modelos com janelas menores.
+
+    Args:
+        ifr: Issue Fix Rate para a condição (0.0–1.0).
+        total_issues: Total de issues |I| na condição.
+        total_input_tokens: Soma de tokens de entrada (C_total).
+        context_window: Tamanho da janela de contexto em tokens (de models.yaml).
+
+    Returns:
+        TE normalizada, ou 0.0 se tokens ou context_window forem zero.
+    """
+    if total_input_tokens == 0 or context_window == 0:
+        return 0.0
+    utilization = total_input_tokens / context_window
+    return round((ifr * total_issues) / utilization, 4)
 
 
 def compute_full_experiment_metrics(
@@ -589,4 +706,13 @@ def compute_full_experiment_metrics(
         "attempt_distribution": attempt_dist,
         "diff_stats": diff_stats,
         "tpf": tpf,
+        "noop_analysis": {
+            model: {
+                "noop_rate": compute_noop_rate(results)[0],
+                "n_noop": compute_noop_rate(results)[1],
+                "n_successful": compute_noop_rate(results)[2],
+                "effective_sr": compute_effective_sr(results),
+            }
+            for model, results in results_by_model.items()
+        },
     }

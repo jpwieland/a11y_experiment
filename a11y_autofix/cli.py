@@ -390,11 +390,11 @@ def experiment_run(
 
     registry = ModelRegistry(settings)
 
-    def pipeline_factory(model_config: object) -> object:
+    def pipeline_factory(model_config: object, **kwargs: object) -> object:
         from a11y_autofix.config import ModelConfig
         if not isinstance(model_config, ModelConfig):
             raise TypeError
-        return Pipeline(settings=settings, model_config=model_config)
+        return Pipeline(settings=settings, model_config=model_config, **kwargs)  # type: ignore[arg-type]
 
     runner = ExperimentRunner(
         settings=settings,
@@ -471,11 +471,11 @@ def experiment_sensitivity(
     settings = Settings()
     registry = ModelRegistry(settings)
 
-    def pipeline_factory(model_config: object) -> object:
+    def pipeline_factory(model_config: object, **kwargs: object) -> object:
         from a11y_autofix.config import ModelConfig
         if not isinstance(model_config, ModelConfig):
             raise TypeError
-        return Pipeline(settings=settings, model_config=model_config)
+        return Pipeline(settings=settings, model_config=model_config, **kwargs)  # type: ignore[arg-type]
 
     runner = ExperimentRunner(
         settings=settings,
