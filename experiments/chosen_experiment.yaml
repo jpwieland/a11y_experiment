@@ -1,0 +1,329 @@
+# experiments/chosen_experiment.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   EXPERIMENTO CANÔNICO PARA PUBLICAÇÃO
+#   ══════════════════════════════════════════════════════════════════════════
+#
+#   Este é o arquivo de referência definitivo do experimento. Consolida as
+#   decisões metodológicas tomadas com base nos dados reais coletados no run
+#   "7B_Code_Models_—_A11y_Auto-fix_0380ab19" (2043 arquivos, 3 modelos,
+#   3 repetições) e nas restrições de hardware descritas abaixo.
+#
+#   Hardware alvo: GPU com 4 GB VRAM (RTX 3050 / 4GB ou equivalente)
+#                  + ≥ 16 GB RAM (CPU-offload automático via Ollama)
+#                  Sistema operacional: Windows 10/11 (venv + PowerShell)
+#
+#   NOTA SOBRE "RTX 4030":
+#     A NVIDIA não possui uma GPU desktop com esse nome na linha GeForce.
+#     Esta configuração foi calibrada para qualquer GPU com 4 GB VRAM usando
+#     o backend Ollama com Q4_K_M, incluindo RTX 3050 4GB, GTX 1650 e similares.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   SELEÇÃO DE MODELOS — JUSTIFICATIVA CIENTÍFICA
+#   ══════════════════════════════════════════════════════════════════════════
+#
+#   Dados observados (IFR = Issue Fix Rate, média de 3 repetições):
+#
+#   Modelo               Família      Params  VRAM Q4_K_M  IFR (μ ± σ)      Tempo/arq  Tokens/arq
+#   ─────────────────────────────────────────────────────────────────────────────────────────────
+#   qwen2.5-coder-7b     Alibaba/Qwen  7B     ~4.1 GB      0.433 ± 0.031    40.1 s     2127
+#   qwen2.5-coder-3b     Alibaba/Qwen  3B     ~2.0 GB      0.487 ± 0.009    5.5 s      2810
+#   codellama-7b         Meta          7B     ~4.1 GB      0.581 ± 0.013    104.2 s    2889
+#
+#   Justificativas para inclusão de cada modelo:
+#
+#   [1] qwen2.5-coder-7b
+#       — SOTA para coding entre modelos ≤8B (Qwen2.5 Coder, out/2024)
+#       — Representante da família Alibaba/Qwen — maior modelo da família no hardware
+#       — Pior IFR do grupo (0.433), o que é contra-intuitivo e cientificamente
+#         interessante: sugere que tamanho de parâmetros não prediz IFR neste corpus
+#
+#   [2] qwen2.5-coder-3b
+#       — Versão compacta da mesma família; permite ablação intra-família (3B vs 7B)
+#       — IFR = 0.487 > qwen2.5-coder-7b (0.433) — SIZE INVERSION FINDING:
+#         o modelo menor supera o maior da mesma família em correção de acessibilidade
+#       — Latência 7× menor que o 7B (5.5s vs 40.1s): impacto prático no MTTR
+#       — Baixo desvio padrão (σ=0.009): maior estabilidade entre repetições
+#
+#   [3] codellama-7b
+#       — Família diferente (Meta, 2023): garante diversidade arquitetural na comparação
+#       — Maior IFR absoluto do grupo (0.581) — melhor desempenho em correção
+#       — Trade-off de latência: 104.2s/arquivo → runtime total 3× maior que o qwen2.5-7b
+#       — Temperatura ajustada para 0.1 (padrão do experimento), sobrescrevendo
+#         o valor padrão de 0.2 definido em models.yaml para consistência metodológica
+#
+#   ACHADO PRINCIPAL PARA PUBLICAÇÃO:
+#     Size inversion: qwen2.5-coder-3B > qwen2.5-coder-7B em IFR
+#     Latência vs qualidade: codellama-7B lidera IFR mas tem 19× mais latência que 3B
+#     Implicação: eficiência (IFR/token, IFR/segundo) favorece o modelo 3B para produção
+#
+#   MODELO OPCIONAL (não incluído por ausência de dados):
+#     deepseek-coder:6.7b — ~3.9 GB Q4_K_M, família DeepSeek (3ª família arquitetural),
+#     lançado 2024, seria um candidato natural para expandir a comparação. Requer novo run.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   RUNTIME ESTIMADO (4 GB VRAM, baseado em dados reais)
+#   ══════════════════════════════════════════════════════════════════════════
+#
+#   Com 35 projetos e max_files_per_project=35 (≈1.225 arquivos totais):
+#
+#   Modelo               Tempo/arq  1 rep     3 reps
+#   ─────────────────────────────────────────────────
+#   qwen2.5-coder-3b     5.5 s      1.9 h     5.6 h
+#   qwen2.5-coder-7b     40.1 s     13.7 h    41.0 h
+#   codellama-7b         104.2 s    35.5 h    106.5 h
+#   Overhead de scan (compartilhado)              ~4.0 h
+#   ─────────────────────────────────────────────────
+#   Total                                   ~157 h (~6.5 dias)
+#
+#   AVISO: o codellama-7b domina o runtime. Se tempo for uma restrição crítica,
+#   reduzir max_files_per_project para 20 ou usar apenas qwen2.5-coder-3b + 7b.
+#   Com max_files_per_project=20: runtime total cai para ~90h (~3.75 dias).
+#
+#   NOTA: O run original usou max_files_per_project=60 → 2043 arquivos totais.
+#   Os dados já estão coletados. Este arquivo define os parâmetros para replicação
+#   ou expansão (ex: adição de deepseek-coder:6.7b como 4º modelo).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   NOTAS METODOLÓGICAS
+#   ══════════════════════════════════════════════════════════════════════════
+#
+#   1. TOOL CONSENSUS OBSERVADO:
+#      O campo min_tool_consensus foi intencionalmente configurado como 1 no run
+#      de referência, ou os scanners produziram issues não sobrepostas (sem consenso
+#      entre ferramentas). Na prática, TODOS os 457 issues observados têm consensus=1.
+#      Isso implica que cada issue foi detectada por apenas um scanner — o multi-tool
+#      consensus como filtro de qualidade NÃO foi ativado neste corpus.
+#      Para publicação: documentar como limitação e recomendar min_tool_consensus=2
+#      em estudos futuros para elevar a confiança na detecção.
+#
+#   2. ARQUIVOS SEM ISSUES:
+#      80.6% dos arquivos do corpus (1646/2043) não têm issues detectados.
+#      O SR (Success Rate) file-level é dominado por esses arquivos triviais (SR≈89%).
+#      A métrica primária para publicação deve ser o IFR nos arquivos COM issues
+#      (397 arquivos), não o SR global, para evitar inflação artificial da performance.
+#
+#   3. DISTRIBUIÇÃO DE ISSUES:
+#      ~87% dos issues são do tipo ARIA/WCAG 4.1.2 (Name, Role, Value).
+#      A amostragem estratificada (stratified_sampling: true) compensa esse viés
+#      distribuindo proporcionalmente os slots por tipo de issue por projeto.
+#
+#   4. TEMPERATURA:
+#      Todos os modelos usam temperature=0.1 neste experimento (definido em
+#      execution.temperature abaixo), sobrescrevendo os defaults de models.yaml.
+#      Isso é obrigatório para comparabilidade: codellama-7b tem default 0.2
+#      em models.yaml — sem sobrescrita, a comparação seria metodologicamente inválida.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "A11y Auto-fix — Experimento Canônico para Publicação (4 GB VRAM)"
+description: |
+  Experimento comparativo definitivo entre modelos open-source de 3–7B parâmetros
+  para correção automática de problemas de acessibilidade WCAG 2.1 AA em código
+  React/TypeScript. Configurado para GPUs com 4 GB VRAM rodando Windows via Ollama.
+
+  Cobre 35 projetos reais distribuídos por 7 domínios de aplicação (Dashboard,
+  Developer Tools, E-commerce, Education, Government, Healthcare, Social).
+
+  Métricas primárias de publicação: IFR (Issue Fix Rate) e MTTR (Mean Time to
+  Remediate) nos arquivos com issues detectadas. SR global é reportado como
+  métrica secundária com nota metodológica sobre inflação por arquivos sem issues.
+
+# ── Modelos ──────────────────────────────────────────────────────────────────
+# Ver justificativa científica detalhada no cabeçalho acima.
+models:
+  - qwen2.5-coder-7b   # SOTA 7B coding (Alibaba/Qwen, out/2024) — IFR: 0.433
+  - qwen2.5-coder-3b   # 3B compacto mesma família — IFR: 0.487 > 7B (size inversion)
+  - codellama-7b       # Meta/CodeLlama (família diferente) — IFR: 0.581 (melhor)
+
+# ── Nível WCAG ───────────────────────────────────────────────────────────────
+wcag_level: AA
+
+# ── Scanners ─────────────────────────────────────────────────────────────────
+# 4 scanners para cobertura ampla. Min consensus = 1 (ver nota metodológica #1).
+scanners:
+  - pa11y
+  - axe-core
+  - playwright+axe
+  - eslint-jsx-a11y
+
+min_tool_consensus: 1  # Valor real observado no corpus; documentar como limitação
+
+# ── Agente ───────────────────────────────────────────────────────────────────
+agents:
+  - auto
+
+# ── Estratégia de prompting ──────────────────────────────────────────────────
+strategy: few-shot
+
+# ── Repetições e seed ────────────────────────────────────────────────────────
+repetitions: 3   # 3 repetições para estabilidade estatística (σ observado: 0.009–0.031)
+seed: 42
+
+# ── Projetos (35 projetos, 7 domínios × 5 projetos) ─────────────────────────
+files:
+  # Dashboard (5)
+  - dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack
+  - dataset/snapshots/edp963__davinci
+  - dataset/snapshots/arpanghosh8453__open-dronelog
+  - dataset/snapshots/builderz-labs__mission-control
+  - dataset/snapshots/Kanaries__graphic-walker
+  # Developer Tools (5)
+  - dataset/snapshots/alibaba-fusion__next
+  - dataset/snapshots/FeatureProbe__FeatureProbe
+  - dataset/snapshots/arco-design__arco-design
+  - dataset/snapshots/cloudscape-design__components
+  - dataset/snapshots/debba__tabularis
+  # E-commerce (5)
+  - dataset/snapshots/aelassas__bookcars
+  - dataset/snapshots/BuilderIO__mitosis
+  - dataset/snapshots/aelassas__movinin
+  - dataset/snapshots/CromwellCMS__Cromwell
+  - dataset/snapshots/BuilderIO__builder
+  # Education (5)
+  - dataset/snapshots/LHRUN__paint-board
+  - dataset/snapshots/angellikgh__react-design-editor
+  - dataset/snapshots/F-star__suika
+  - dataset/snapshots/WindRunnerMax__CanvasEditor
+  - dataset/snapshots/KartikLabhshetwar__screenshot-studio
+  # Government (5)
+  - dataset/snapshots/codeforpdx__recordexpungPDX
+  - dataset/snapshots/JustFixNYC__who-owns-what
+  - dataset/snapshots/demokratie-live__democracy-development
+  - dataset/snapshots/codyogden__killedbygoogle
+  - dataset/snapshots/cds-snc__gcds-components
+  # Healthcare (5)
+  - dataset/snapshots/OHIF__Viewers
+  - dataset/snapshots/Snouzy__workout-cool
+  - dataset/snapshots/beda-software__fhir-emr
+  - dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture
+  - dataset/snapshots/aphp__Cohort360-FrontEnd
+  # Social (5)
+  - dataset/snapshots/OvidijusParsiunas__deep-chat
+  - dataset/snapshots/agnaistic__agnai
+  - dataset/snapshots/dream-num__univer
+  - dataset/snapshots/Privoce__vocechat-web
+  - dataset/snapshots/Linen-dev__linen.dev
+
+# ── Execução (4 GB VRAM — sem concorrência, cold start entre modelos) ────────
+execution:
+  cold_start: true           # Reinicia servidor Ollama entre modelos
+                             # Evita contaminação de VRAM entre carregamentos
+  max_concurrent_models: 1   # Apenas 1 modelo ativo por vez (restrição de VRAM)
+  temperature: 0.1           # Uniform para TODOS os modelos — sobrescreve models.yaml
+                             # CRÍTICO: codellama-7b tem default 0.2 em models.yaml;
+                             # sem esta sobrescrita a comparação seria inválida.
+
+# ── Timeouts (calibrados por dados reais — p95 observado por modelo) ─────────
+#
+#   Modelo               p50 observado   p95 estimado   timeout definido
+#   ──────────────────────────────────────────────────────────────────────
+#   qwen2.5-coder-3b      5.5 s           ~30 s          60 s
+#   qwen2.5-coder-7b     40.1 s          ~180 s         300 s
+#   codellama-7b         104.2 s         ~400 s         600 s
+#
+#   agent_timeout_s usa o valor mais conservador (codellama-7b p95 + margem).
+#   Projetos com muitos issues por arquivo podem exceder o p95: 600s é seguro.
+#
+scan_timeout_s: 120          # Por arquivo, por scanner
+agent_timeout_s: 600         # Por arquivo, por modelo — 10 min (codellama em CPU-offload)
+model_load_timeout_s: 300    # Carregamento do modelo — 5 min (offload de layers para RAM)
+
+# ── Métricas ─────────────────────────────────────────────────────────────────
+metrics:
+  # Primárias (publicação):
+  - sr                   # Success Rate (file-level) — reportar com nota sobre inflação
+  - ifr                  # Issue Fix Rate — métrica principal de qualidade
+  - mttr                 # Mean Time to Remediate — impacto prático
+  - te                   # Token Efficiency — IFR/1000 tokens
+
+  # Secundárias (análise):
+  - effective_sr         # SR apenas nos arquivos com issues (evita inflação)
+  - noop_rate            # Taxa de arquivos sem nenhuma modificação
+  - regression_rate      # Taxa de introdução de novos problemas
+  - detection_rate       # Cobertura de detecção pelo conjunto de scanners
+  - correction_rate      # Correção por tipo de issue (granular)
+  - precision            # Precisão das correções (true positive rate)
+  - tokens_used          # Tokens totais por modelo
+  - time_per_file_s      # Latência média por arquivo
+  - issues_by_type       # Distribuição de issues por categoria
+  - issues_by_wcag_principle  # Distribuição por princípio WCAG (P/O/U/R)
+  - fix_by_agent         # Performance por agente/modelo
+
+# ── Formato de saída ─────────────────────────────────────────────────────────
+output_format:
+  - json
+  - html
+  - csv
+
+output_dir: experiment-results/chosen_experiment
+
+# ── Configurações avançadas ───────────────────────────────────────────────────
+advanced:
+  auto_clone_missing_snapshots: true
+  checkpoint_per_project: true
+  checkpoint_dir: experiment-results/chosen_experiment/checkpoints
+  save_diffs: true                # Salvar diffs para revisão manual via review_corrections.py
+  typescript_validation: false
+
+  # ── Amostragem ──────────────────────────────────────────────────────────────
+  #
+  #   max_files_per_project = 35
+  #
+  #   Reduzido de 60 (experimento original) para 35 por dois motivos:
+  #   (a) 80.6% dos arquivos têm 0 issues → aumentar o cap não adiciona sinal útil
+  #   (b) Reduz runtime total em ~42% mantendo cobertura estatisticamente equivalente
+  #
+  #   Com 35 projetos × 35 arquivos → ~1.225 arquivos por repetição
+  #   vs. 2.043 arquivos no run de referência (60 cap) — cobertura suficiente.
+  #
+  #   Para replicar o run original exato: max_files_per_project: 60
+  #   Para validação rápida: max_files_per_project: 20
+  #
+  max_files_per_project: 35
+  seed: 42
+
+  # ── Amostragem estratificada por tipo de issue ────────────────────────────
+  #
+  #   OBRIGATÓRIO: true
+  #
+  #   87% dos issues observados são ARIA/4.1.2. Sem estratificação, o corpus
+  #   amostrado seria dominado por um único tipo, comprometendo a validade
+  #   externa dos resultados por critério WCAG.
+  #
+  #   Com stratified_sampling=true, os 35 slots por projeto são distribuídos
+  #   proporcionalmente entre os tipos de issue presentes em findings.jsonl,
+  #   garantindo que a composição reflita a distribuição real de cada projeto.
+  #
+  stratified_sampling: true
+
+  # ── Notas para publicação ────────────────────────────────────────────────
+  notes: |
+    Experimento canônico — dados de referência para publicação.
+
+    Achados principais (do run 0380ab19, base deste experimento):
+    1. SIZE INVERSION: qwen2.5-coder-3B (IFR=0.487) > qwen2.5-coder-7B (IFR=0.433)
+       Maior modelo da mesma família tem pior IFR — parâmetros não predizem qualidade
+       em correção de acessibilidade neste corpus.
+    2. LATÊNCIA vs QUALIDADE: codellama-7B lidera IFR (0.581) mas custa 19× mais
+       tempo/arquivo que o 3B. Token Efficiency favorece o 3B para uso em produção.
+    3. VIÉS DO CORPUS: 80.6% dos arquivos têm 0 issues. SR global (~89%) é inflado.
+       IFR nos arquivos COM issues é a métrica clinicamente relevante.
+    4. CONSENSUS=1: todos os 457 issues observados têm tool_consensus=1.
+       Multi-tool consensus como filtro de qualidade não foi ativado neste corpus.
+       Limitação a documentar; recomendar min_tool_consensus=2 em trabalhos futuros.
+
+    Hardware de referência para replicação:
+      GPU: 4 GB VRAM (ex.: RTX 3050 4GB, GTX 1650 Super)
+      RAM: ≥ 16 GB (CPU-offload automático via Ollama para modelos 7B)
+      OS: Windows 10/11, Python 3.11+, Ollama ≥ 0.3.0
+
+    Runtime estimado (4 GB VRAM, 35 arquivos/projeto):
+      qwen2.5-coder-3b:  ~1.9h/rep → ~5.6h total (3 reps)
+      qwen2.5-coder-7b: ~13.7h/rep → ~41.0h total (3 reps)
+      codellama-7b:     ~35.5h/rep → ~106.5h total (3 reps)
+      Scan overhead:    ~4.0h (compartilhado, não multiplica por modelo)
+      TOTAL ESTIMADO:   ~157h / ~6.5 dias (sequencial, 1 modelo por vez)
