@@ -1,0 +1,106 @@
+# Catálogo de fixtures sintéticos para avaliação de modelos LLM
+# Metodologia: C2.1 do PLANO_CORRECAO_METODOLOGICA.md
+#
+# Cada fixture tem violações WCAG injetadas precisamente,
+# com versão correta como gold standard.
+
+version: "1.0"
+wcag_version: "2.2"
+total_fixtures: 12
+
+fixtures:
+  - id: "missing_alt_001"
+    title: "img sem alt-text"
+    wcag_criteria: ["1.1.1"]
+    issue_types: ["alt-text"]
+    complexity: "simple"
+    component: "ProductCard"
+    violations_count: 2
+
+  - id: "invalid_aria_role_001"
+    title: "role ARIA inválido em elemento div"
+    wcag_criteria: ["4.1.2"]
+    issue_types: ["aria"]
+    complexity: "simple"
+    component: "NavigationMenu"
+    violations_count: 2
+
+  - id: "missing_label_001"
+    title: "input sem label associado"
+    wcag_criteria: ["1.3.1", "4.1.2"]
+    issue_types: ["label"]
+    complexity: "simple"
+    component: "SearchForm"
+    violations_count: 3
+
+  - id: "keyboard_trap_001"
+    title: "elemento não-interativo com onClick sem suporte a teclado"
+    wcag_criteria: ["2.1.1"]
+    issue_types: ["keyboard"]
+    complexity: "moderate"
+    component: "ClickableCard"
+    violations_count: 2
+
+  - id: "missing_button_name_001"
+    title: "botão ícone sem nome acessível"
+    wcag_criteria: ["4.1.2"]
+    issue_types: ["aria"]
+    complexity: "simple"
+    component: "IconButton"
+    violations_count: 3
+
+  - id: "link_no_text_001"
+    title: "link sem texto descritivo"
+    wcag_criteria: ["2.4.4"]
+    issue_types: ["label"]
+    complexity: "simple"
+    component: "SocialLinks"
+    violations_count: 3
+
+  - id: "focus_not_visible_001"
+    title: "outline de foco removido via CSS inline"
+    wcag_criteria: ["2.4.7"]
+    issue_types: ["focus"]
+    complexity: "simple"
+    component: "CustomButton"
+    violations_count: 2
+
+  - id: "heading_hierarchy_001"
+    title: "hierarquia de headings inconsistente"
+    wcag_criteria: ["1.3.1", "2.4.6"]
+    issue_types: ["semantic"]
+    complexity: "moderate"
+    component: "ArticleCard"
+    violations_count: 2
+
+  - id: "mixed_violations_001"
+    title: "múltiplas violações mistas (alt-text + aria + label)"
+    wcag_criteria: ["1.1.1", "4.1.2", "1.3.1"]
+    issue_types: ["alt-text", "aria", "label"]
+    complexity: "moderate"
+    component: "UserProfile"
+    violations_count: 5
+
+  - id: "tabindex_positive_001"
+    title: "tabindex positivo que quebra ordem de foco natural"
+    wcag_criteria: ["2.4.3"]
+    issue_types: ["keyboard"]
+    complexity: "simple"
+    component: "ContactForm"
+    violations_count: 3
+
+  - id: "aria_expanded_missing_001"
+    title: "accordion sem aria-expanded"
+    wcag_criteria: ["4.1.2"]
+    issue_types: ["aria"]
+    complexity: "moderate"
+    component: "AccordionPanel"
+    violations_count: 2
+
+  - id: "lang_missing_001"
+    title: "elemento html sem atributo lang"
+    wcag_criteria: ["3.1.1"]
+    issue_types: ["semantic"]
+    complexity: "simple"
+    component: "RootLayout"
+    violations_count: 1

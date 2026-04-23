@@ -1,0 +1,28 @@
+fixture_id: "invalid_aria_role_001"
+title: "role ARIA inválido em elemento div"
+component: "NavigationMenu"
+wcag_criteria:
+  - criterion: "4.1.2"
+    title: "Name, Role, Value"
+    level: "AA"
+violations:
+  - id: "V1"
+    type: "aria"
+    element: "div"
+    attribute: "role"
+    invalid_value: "navigation-menu"
+    description: "role='navigation-menu' não é um ARIA role válido. Usar 'navigation' ou elemento semântico <nav>."
+    fix: "Substituir div[role='navigation-menu'] por <nav>"
+  - id: "V2"
+    type: "aria"
+    element: "li"
+    attribute: "role"
+    invalid_value: "nav-item"
+    description: "role='nav-item' não é um ARIA role válido. Elementos <li> já têm role implícito 'listitem'."
+    fix: "Remover role='nav-item' do elemento <li>"
+complexity: "simple"
+violations_count: 2
+tags:
+  - "aria-role"
+  - "invalid-role"
+  - "semantic-html"

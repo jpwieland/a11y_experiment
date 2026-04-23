@@ -1,0 +1,27 @@
+fixture_id: "heading_hierarchy_001"
+title: "hierarquia de headings inconsistente"
+component: "ArticleCard"
+wcag_criteria:
+  - criterion: "1.3.1"
+    title: "Info and Relationships"
+    level: "A"
+  - criterion: "2.4.6"
+    title: "Headings and Labels"
+    level: "AA"
+violations:
+  - id: "V1"
+    type: "semantic"
+    element: "h4"
+    description: "Heading salta de h2 para h4, pulando h3 — quebra a hierarquia lógica do documento."
+    fix: "Substituir <h4> por <h3>"
+  - id: "V2"
+    type: "semantic"
+    element: "h6"
+    description: "Byline do autor usa <h6> — heading sem propósito de seção, confunde estrutura do documento."
+    fix: "Substituir <h6> por <p>"
+complexity: "moderate"
+violations_count: 2
+tags:
+  - "heading-hierarchy"
+  - "document-structure"
+  - "semantic-html"

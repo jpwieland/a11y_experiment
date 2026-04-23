@@ -1,0 +1,61 @@
+# Ablation Study — Agente Fixo por Condição
+# Metodologia: C1.4 do PLANO_CORRECAO_METODOLOGICA.md
+#
+# Design: 3 modelos × 3 agentes = 9 condições experimentais
+# Permite decompor o efeito do LLM separado do efeito do scaffolding.
+#
+# ANÁLISE ESTATÍSTICA: Two-way interaction (Modelo × Agente) via Kruskal-Wallis
+# Hipótese implícita: se o interaction term for significativo (p < 0.05),
+# algum modelo é especialmente beneficiado por algum agente específico.
+
+name: "Ablation — Agent Fixed (3×3 Design)"
+description: >
+  Experimento fatorial 3×3: cada modelo executado com cada tipo de agente
+  fixado explicitamente (sem roteamento automático).
+  Permite isolar o efeito do LLM (model) do efeito do scaffolding (agent).
+  Subconjunto de 15 projetos representativos do corpus principal.
+
+models:
+  - qwen2.5-coder-7b
+  - qwen2.5-coder-14b
+  - qwen2.5-coder-32b
+
+files:
+  # 15 projetos estratificados (2-3 por domínio)
+  - "dataset/snapshots/vercel__next.js/**/*.tsx"
+  - "dataset/snapshots/shadcn-ui__ui/**/*.tsx"
+  - "dataset/snapshots/recharts__recharts/**/*.tsx"
+  - "dataset/snapshots/ant-design__ant-design/**/*.tsx"
+  - "dataset/snapshots/mui__material-ui/**/*.tsx"
+
+wcag_level: "AA"
+strategy: "few-shot"
+repetitions: 3
+seed: 42
+
+# Forçar agente — bypassa o router
+# IMPORTANTE: executar o experimento 3 vezes, cada vez com um agente diferente
+force_agent_type: "direct-llm"  # Alterar para: "openhands" | "swe-agent" | "direct-llm"
+
+max_files_per_project: 20
+stratified_sampling: true
+
+metrics:
+  - sr
+  - ifr
+  - mttr
+  - te
+  - effective_sr
+  - noop_rate
+  - regression_rate
+
+output_format:
+  - json
+  - html
+  - csv
+
+advanced:
+  seed: 42
+  save_diffs: true
+  checkpoint_per_project: true
+  output_dir: "experiment-results/ablation_agent_fixed"

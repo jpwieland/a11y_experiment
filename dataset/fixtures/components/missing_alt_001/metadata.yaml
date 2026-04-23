@@ -1,0 +1,37 @@
+fixture_id: "missing_alt_001"
+title: "ProductCard com img sem alt e button sem nome acessível"
+component: "ProductCard"
+wcag_version: "2.2"
+
+violations:
+  - id: "V1"
+    wcag: "1.1.1"
+    type: "alt-text"
+    complexity: "simple"
+    element: "img"
+    line: 19
+    description: "img element missing alt attribute — screen readers announce filename"
+    detectable_by: ["axe-core", "pa11y", "eslint-jsx-a11y", "lighthouse"]
+    correctable_by_eslint_fix: false
+    correction_requires: "descriptive_inference"
+    notes: "ESLint pode forçar presença de alt='', mas inferir texto descritivo requer LLM"
+
+  - id: "V2"
+    wcag: "4.1.2"
+    type: "aria"
+    complexity: "simple"
+    element: "button"
+    line: 23
+    description: "button has no accessible name — icon-only button without aria-label"
+    detectable_by: ["axe-core", "pa11y"]
+    correctable_by_eslint_fix: false
+    correction_requires: "aria_label_with_context"
+
+ground_truth_corrections:
+  V1: "Add alt attribute with descriptive text referencing product name"
+  V2: "Add aria-label='Adicionar {name} ao carrinho' or equivalent"
+
+evaluation_hints:
+  accept_partial: true
+  min_acceptable_alt: "Non-empty alt attribute present"
+  min_acceptable_button: "aria-label or aria-labelledby present"

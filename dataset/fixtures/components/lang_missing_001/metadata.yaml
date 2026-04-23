@@ -1,0 +1,20 @@
+fixture_id: "lang_missing_001"
+title: "elemento html sem atributo lang"
+component: "RootLayout"
+wcag_criteria:
+  - criterion: "3.1.1"
+    title: "Language of Page"
+    level: "A"
+violations:
+  - id: "V1"
+    type: "semantic"
+    element: "html"
+    attribute: "lang"
+    description: "Elemento <html> sem atributo lang — leitores de tela não conseguem selecionar síntese de voz correta para o idioma."
+    fix: "Adicionar lang='pt-BR' (ou locale apropriado) ao elemento <html>"
+complexity: "simple"
+violations_count: 1
+tags:
+  - "language"
+  - "lang-attribute"
+  - "screen-reader"

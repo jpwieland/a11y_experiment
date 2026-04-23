@@ -1,0 +1,37 @@
+fixture_id: "keyboard_trap_001"
+title: "ClickableCard com elementos interativos inacessíveis por teclado"
+component: "ClickableCard"
+wcag_version: "2.2"
+
+violations:
+  - id: "V1"
+    wcag: "2.1.1"
+    type: "keyboard"
+    complexity: "moderate"
+    element: "div.card"
+    line: 22
+    description: "div with onClick has no keyboard handler, role, or tabIndex"
+    detectable_by: ["eslint-jsx-a11y"]
+    correctable_by_eslint_fix: false
+    correction_requires: "add_role_tabindex_keydown"
+
+  - id: "V2"
+    wcag: "2.1.1"
+    type: "keyboard"
+    complexity: "simple"
+    element: "span.expand-button"
+    line: 26
+    description: "Interactive span should be a button element"
+    detectable_by: ["eslint-jsx-a11y", "axe-core"]
+    correctable_by_eslint_fix: false
+    correction_requires: "replace_with_button"
+
+ground_truth_corrections:
+  V1: "Add role='button', tabIndex={0}, onKeyDown handler"
+  V2: "Replace <span onClick> with <button type='button'>"
+
+evaluation_hints:
+  accept_partial: true
+  alternatives_for_V1:
+    - "Replace div with <button> element"
+    - "Add role='button' + tabIndex={0} + onKeyDown"

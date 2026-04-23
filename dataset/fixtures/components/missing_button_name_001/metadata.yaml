@@ -1,0 +1,44 @@
+fixture_id: "missing_button_name_001"
+title: "IconButtons — três botões ícone sem nomes acessíveis"
+component: "IconButtons"
+wcag_version: "2.2"
+
+violations:
+  - id: "V1"
+    wcag: "4.1.2"
+    type: "aria"
+    complexity: "simple"
+    element: "button:first-child"
+    line: 17
+    description: "Close icon button has no accessible name"
+    detectable_by: ["axe-core", "pa11y"]
+    correctable_by_eslint_fix: false
+
+  - id: "V2"
+    wcag: "4.1.2"
+    type: "aria"
+    complexity: "simple"
+    element: "button:nth-child(2)"
+    line: 24
+    description: "Share icon button has no accessible name"
+    detectable_by: ["axe-core", "pa11y"]
+    correctable_by_eslint_fix: false
+
+  - id: "V3"
+    wcag: "4.1.2"
+    type: "aria"
+    complexity: "simple"
+    element: "button:nth-child(3)"
+    line: 33
+    description: "Edit icon button has no accessible name"
+    detectable_by: ["axe-core", "pa11y"]
+    correctable_by_eslint_fix: false
+
+ground_truth_corrections:
+  V1: "Add aria-label='Fechar' to close button"
+  V2: "Add aria-label='Compartilhar' to share button"
+  V3: "Add aria-label='Editar' to edit button"
+
+evaluation_hints:
+  accept_partial: true
+  note: "Any descriptive aria-label is acceptable — Portuguese or English"

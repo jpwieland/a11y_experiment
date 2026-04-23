@@ -1,0 +1,56 @@
+# Experimento Baseline Determinístico — ESLint jsx-a11y autofix
+# Metodologia: C1.3 do PLANO_CORRECAO_METODOLOGICA.md
+#
+# Este experimento executa o DeterministicBaselineAgent (zero tokens, zero LLM)
+# sobre o corpus completo para estabelecer o piso de performance.
+#
+# Resultados são usados como:
+#   1. Baseline para cálculo de contribuição incremental dos LLMs
+#   2. Filtro: issues já resolvidas pelo baseline não contam para SR/IFR dos LLMs
+#   3. Referência para o teste H2 (roteamento automático vs. agente fixo)
+#
+# EXECUÇÃO: python -m a11y_autofix.agents.deterministic_baseline --corpus dataset/snapshots
+# (ver DeterministicBaselineAgent.run_batch para API programática)
+
+name: "Deterministic Baseline — ESLint jsx-a11y"
+description: >
+  Condição de controle zero-token: ESLint jsx-a11y com --fix aplicado
+  sobre o corpus completo. Estabelece o piso de performance sem LLM.
+  Deve ser executado ANTES de qualquer experimento com LLM.
+
+# O baseline não usa modelos LLM — lista vazia (modelo = "eslint-autofix")
+models: []
+
+agent: "deterministic-baseline"
+
+files:
+  - "dataset/snapshots/**/*.tsx"
+  - "dataset/snapshots/**/*.ts"
+  - "dataset/snapshots/**/*.jsx"
+  - "dataset/snapshots/**/*.js"
+
+wcag_level: "AA"
+strategy: "autofix"
+repetitions: 1
+seed: 42
+
+metrics:
+  - sr
+  - ifr
+  - mttr
+  # te não se aplica: tokens = 0, mas registrar como 0 por completude
+  - te
+
+output_format:
+  - json
+  - csv
+
+advanced:
+  seed: 42
+  save_diffs: true
+  checkpoint_per_project: true
+  output_dir: "experiment-results/deterministic_baseline"
+  notes: >
+    Tokens = 0, MTTR = tempo ESLint por arquivo.
+    SR e IFR medem apenas o que ESLint consegue corrigir automaticamente.
+    Cobertura esperada: 20-35% das violações WCAG AA.

@@ -1,0 +1,28 @@
+fixture_id: "focus_not_visible_001"
+title: "outline de foco removido via CSS inline"
+component: "CustomButton"
+wcag_criteria:
+  - criterion: "2.4.7"
+    title: "Focus Visible"
+    level: "AA"
+violations:
+  - id: "V1"
+    type: "focus"
+    element: "button"
+    attribute: "style.outline"
+    invalid_value: "none"
+    description: "outline: 'none' no estilo inline remove o indicador de foco — usuários de teclado não conseguem ver onde estão."
+    fix: "Remover outline: 'none' do estilo inline"
+  - id: "V2"
+    type: "focus"
+    element: "button"
+    attribute: "style.outline"
+    invalid_value: "0"
+    description: "outline: 0 no estilo inline remove o indicador de foco."
+    fix: "Remover outline: 0 do estilo inline"
+complexity: "simple"
+violations_count: 2
+tags:
+  - "focus-visible"
+  - "css-outline"
+  - "keyboard-navigation"

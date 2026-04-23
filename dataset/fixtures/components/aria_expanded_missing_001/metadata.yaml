@@ -1,0 +1,26 @@
+fixture_id: "aria_expanded_missing_001"
+title: "accordion sem aria-expanded"
+component: "AccordionPanel"
+wcag_criteria:
+  - criterion: "4.1.2"
+    title: "Name, Role, Value"
+    level: "AA"
+violations:
+  - id: "V1"
+    type: "aria"
+    element: "button.accordion-toggle"
+    attribute: "aria-expanded"
+    description: "Botão de accordion sem aria-expanded — leitores de tela não sabem se o painel está aberto ou fechado."
+    fix: "Adicionar aria-expanded={isOpen} e aria-controls ao botão"
+  - id: "V2"
+    type: "aria"
+    element: "div.accordion-content"
+    attribute: "aria-hidden"
+    description: "Painel do accordion sem aria-hidden correspondente ao estado — estado não é comunicado corretamente."
+    fix: "Adicionar aria-hidden={!isOpen} e hidden={!isOpen} ao painel"
+complexity: "moderate"
+violations_count: 2
+tags:
+  - "aria-expanded"
+  - "accordion"
+  - "dynamic-content"
