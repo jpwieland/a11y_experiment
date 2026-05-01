@@ -836,6 +836,8 @@ async def _main() -> None:
 
 
 def main() -> None:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     asyncio.run(_main())
 
 
