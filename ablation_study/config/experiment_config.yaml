@@ -1,0 +1,101 @@
+# ablation_study/config/experiment_config.yaml
+#
+# Global experiment settings for the prompt-component ablation study.
+# All values here are logged verbatim into every result record to ensure
+# full reproducibility from raw JSONL alone.
+
+experiment:
+  name: "prompt_component_ablation_v1"
+  description: >
+    Ablation study isolating the contribution of each of the six prompt
+    components to Issue Fix Rate (IFR) and Success Rate (SR). Motivated by
+    reviewer Question 5 and the internal validity threat documented in
+    Section 6 (Threats to Validity) of the paper.
+  version: "1.0.0"
+  paper_section: "Section 4.2 / Threats to Validity"
+
+# ── Corpus ──────────────────────────────────────────────────────────────────
+corpus:
+  violations_file: "../dataset/violations.json"
+  # Only process files that have at least one detected violation.
+  # Regression-guard files (no violations) are excluded from ablation
+  # because they contribute trivially to SR and add compute cost
+  # without informative signal for prompt-component analysis.
+  include_regression_guards: false
+  # Subset size for exploratory runs (null = full corpus of 338 violations)
+  subset_size: null
+  # Stratify subset by WCAG category to maintain distribution
+  stratify_subset: true
+
+# ── Models ──────────────────────────────────────────────────────────────────
+# One model per run to isolate prompt effects from model effects.
+# All three models from Table 1 are evaluated; CodeLlama is the primary
+# model (lowest within-condition variance = cleanest signal).
+models:
+  primary: "qwen2.5-coder-3b"
+  all:
+    - "qwen2.5-coder-3b"
+    - "codellama-7b"
+    - "qwen2.5-coder-7b"
+  hardware_constraint_gb: 4
+
+# ── Repetitions & Randomization ─────────────────────────────────────────────
+repetitions:
+  n: 3
+  # Seeds are fixed and pre-determined (not chosen post-hoc) to support
+  # independent replication. Each seed controls the file-processing order
+  # within a repetition; all conditions within a repetition use the same
+  # seed so that order effects are held constant across conditions.
+  seeds: [42, 137, 2025]
+
+# ── Agent Configuration ──────────────────────────────────────────────────────
+agent:
+  primary: "swe-agent"
+  fallback: "openhands"
+  max_retries_per_file: 3
+  max_issues_per_session: 4
+  temperature: 0.2
+  # Timeout per repair attempt (seconds). Prevents runaway sessions
+  # from inflating MTTR in specific conditions.
+  timeout_per_attempt_s: 120
+
+# ── Validation Pipeline ──────────────────────────────────────────────────────
+# All four layers remain active for all conditions, including raw_baseline.
+# Disabling validation layers would confound prompt effects with oracle effects.
+validation:
+  layer1_syntax: true
+  layer2_functional: true
+  layer3_domain: true       # Pa11y re-scan
+  layer4_quality: true      # ESLint + cyclomatic complexity
+  domain_oracle: "pa11y"    # sole domain oracle; axe not re-run (see paper)
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output:
+  results_dir: "results"
+  # Per-attempt records written as newline-delimited JSON (JSONL).
+  # One file per (condition, model, repetition) tuple.
+  format: "jsonl"
+  # Aggregated summary per condition written after all reps complete.
+  write_summary: true
+  # Write a full audit log including prompts sent (for manual inspection).
+  write_prompt_log: true
+  prompt_log_max_chars: 8000
+
+# ── Statistical Analysis (post-hoc, documented in ANALYSIS_PLAN.md) ──────────
+statistics:
+  primary_metric: "ifr"          # micro-averaged IFR over all violations
+  secondary_metrics:
+    - "sr_violation_files"       # SR restricted to violation-bearing files
+    - "mttr_s"                   # mean time to repair (seconds/file)
+    - "tokens_output_per_fix"    # output tokens per resolved violation
+    - "layer1_fail_rate"         # Layer 1 failure rate (syntax)
+    - "layer2_fail_rate"         # Layer 2 failure rate (functional regression)
+    - "layer3_fail_rate"         # Layer 3 failure rate (domain)
+    - "retry_exhaustion_rate"    # fraction of violations exhausting all retries
+  test: "wilcoxon_signed_rank"   # paired, non-parametric
+  effect_size: "rank_biserial_r"
+  correction: "holm_bonferroni"  # 7 pairwise tests (each condition vs. full)
+  ci_method: "bootstrap"
+  ci_n_bootstrap: 10000
+  ci_level: 0.95
+  alpha: 0.05

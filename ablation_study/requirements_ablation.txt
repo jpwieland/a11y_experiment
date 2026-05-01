@@ -1,0 +1,29 @@
+# ablation_study/requirements_ablation.txt
+# Dependencies for the prompt-component ablation study.
+# Install with: pip install -r ablation_study/requirements_ablation.txt
+#
+# The core a11y_autofix package (../a11y_experiment) must be installed
+# separately (pip install -e ../a11y_experiment).
+
+# ── Statistical analysis ─────────────────────────────────────────────────────
+scipy>=1.11.0
+statsmodels>=0.14.0
+numpy>=1.26.0
+
+# ── Data handling ─────────────────────────────────────────────────────────────
+pandas>=2.1.0
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ── Logging & config ─────────────────────────────────────────────────────────
+structlog>=24.1.0
+pyyaml>=6.0
+
+# ── Terminal dashboard ────────────────────────────────────────────────────────
+rich>=13.0.0
+
+# ── Typing helpers ────────────────────────────────────────────────────────────
+# (already present in the base environment)
+# pydantic>=2.0.0

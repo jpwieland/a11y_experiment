@@ -1,0 +1,139 @@
+# ablation_study/config/prompt_ablation.yaml
+#
+# Defines the 8 prompt-component ablation conditions.
+# Each condition specifies which of the six prompt components are active.
+# Component presence is boolean; component-level configuration overrides
+# are allowed via the `overrides` key.
+#
+# Condition naming follows the convention used in the paper (Section 4.2):
+#   full            — all six components active (experimental baseline)
+#   minus_<name>    — one component removed, all others active
+#   raw_baseline    — no structured prompt; raw scanner output passed directly
+
+conditions:
+
+  - id: full
+    label: "Full Prompt (Baseline)"
+    description: >
+      All six components active. This is the experimental baseline against
+      which all ablation conditions are compared. IFR from this condition
+      should match Table 1 values within repetition variance.
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        true   # sub-field of violation_context
+      code_context:       true
+      constraints:        true
+      few_shot:           true
+      output_format:      true
+
+  - id: minus_role
+    label: "− Role Definition (C1)"
+    description: >
+      Component 1 (role definition) removed. Tests whether persona priming
+      ("expert React accessibility engineer") activates domain-relevant
+      knowledge patterns beyond what the violation context provides.
+    components:
+      role_definition:    false
+      violation_context:  true
+      user_impact:        true
+      code_context:       true
+      constraints:        true
+      few_shot:           true
+      output_format:      true
+
+  - id: minus_user_impact
+    label: "− User Impact field (C2 partial)"
+    description: >
+      Component 2 is present but the USER_IMPACT sentence is omitted.
+      Tests whether framing violations in terms of affected users steers
+      the agent toward semantically correct repairs vs. technically compliant
+      but experientially incorrect ones (e.g., alt="decorative image").
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        false
+      code_context:       true
+      constraints:        true
+      few_shot:           true
+      output_format:      true
+
+  - id: minus_code_context
+    label: "− Code Context (C3)"
+    description: >
+      Component 3 (component source, framework/styling metadata) removed.
+      Agent receives violation description and element selector only.
+      Tests whether codebase-awareness prevents context-blind fixes
+      (e.g., document.getElementById in a useRef project).
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        true
+      code_context:       false
+      constraints:        true
+      few_shot:           true
+      output_format:      true
+
+  - id: minus_constraints
+    label: "− Constraints (C4)"
+    description: >
+      Component 4 (positive/negative repair directives) removed.
+      Tests whether explicit constraints reduce over-engineering and
+      scope creep vs. implicit guidance from examples and role.
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        true
+      code_context:       true
+      constraints:        false
+      few_shot:           true
+      output_format:      true
+
+  - id: minus_few_shot
+    label: "− Few-Shot Examples (C5)"
+    description: >
+      Component 5 removed (zero-shot condition). Tests the contribution
+      of semantically-selected violation-fix examples. Equivalent to
+      PromptingStrategy.ZERO_SHOT in the existing codebase.
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        true
+      code_context:       true
+      constraints:        true
+      few_shot:           false
+      output_format:      true
+
+  - id: minus_output_format
+    label: "− Output Format (C6)"
+    description: >
+      Component 6 (structured JSON output specification) removed.
+      Agent produces free-form text; patch extraction uses heuristic
+      code-block parsing. Tests whether format constraints reduce
+      generative degrees of freedom and improve repair coherence.
+    components:
+      role_definition:    true
+      violation_context:  true
+      user_impact:        true
+      code_context:       true
+      constraints:        true
+      few_shot:           true
+      output_format:      false
+
+  - id: raw_baseline
+    label: "Raw Baseline (no structured prompt)"
+    description: >
+      No structured six-component template. Raw scanner JSON output
+      (Pa11y report object) is passed directly to SWE-Agent as the
+      task description, without enrichment, context extraction, or
+      format specification. Establishes the lower bound for prompt
+      engineering contribution.
+    components:
+      role_definition:    false
+      violation_context:  false   # replaced by raw scanner JSON
+      user_impact:        false
+      code_context:       false
+      constraints:        false
+      few_shot:           false
+      output_format:      false
+    raw_scanner_output: true       # inject raw Pa11y JSON as task body
