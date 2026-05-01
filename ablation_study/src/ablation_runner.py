@@ -40,6 +40,35 @@ from typing import Any
 import structlog
 import yaml
 
+# ── Utilities (defined early — used by StatusWriter and run_all below) ─────────
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_truncated(text: str) -> bool:
+    stripped = text.rstrip()
+    if not stripped:
+        return True
+    return stripped[-1] not in {"}", "`", '"', "'"}
+
+
+def _try_parse_json(text: str) -> bool:
+    import re
+    try:
+        obj = json.loads(text)
+        return isinstance(obj, dict) and "fixed_code" in obj
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return "fixed_code" in json.loads(m.group())
+        except Exception:
+            pass
+    return False
+
+
 # ── Status writer (feeds progress_dashboard.py) ────────────────────────────────
 
 class StatusWriter:
@@ -843,37 +872,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# ── Utilities ──────────────────────────────────────────────────────────────────
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _is_truncated(text: str) -> bool:
-    """Heuristic: response ends mid-token or missing closing delimiter."""
-    stripped = text.rstrip()
-    if not stripped:
-        return True
-    if stripped[-1] not in {"}", "`", '"', "'"}:
-        return True
-    return False
-
-
-def _try_parse_json(text: str) -> bool:
-    try:
-        obj = json.loads(text)
-        return isinstance(obj, dict) and "fixed_code" in obj
-    except Exception:
-        pass
-    # Try to find JSON block
-    import re
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group())
-            return "fixed_code" in obj
-        except Exception:
-            pass
-    return False
