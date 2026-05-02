@@ -53,6 +53,39 @@ def _is_truncated(text: str) -> bool:
     return stripped[-1] not in {"}", "`", '"', "'"}
 
 
+def _model_config_from_yaml(model_name: str, temperature_override: float) -> ModelConfig:
+    """
+    Build a ModelConfig by reading models.yaml from the repo root.
+    The temperature comes from the ablation config (overrides models.yaml default).
+    """
+    models_file = _REPO_ROOT / "models.yaml"
+    if not models_file.exists():
+        raise FileNotFoundError(
+            f"models.yaml not found at {models_file}\n"
+            f"Expected in the a11y_experiment root directory."
+        )
+    all_models = yaml.safe_load(models_file.read_text(encoding="utf-8")).get("models", {})
+    if model_name not in all_models:
+        available = ", ".join(all_models.keys())
+        raise ValueError(
+            f"Model '{model_name}' not found in models.yaml.\n"
+            f"Available: {available}"
+        )
+    spec = all_models[model_name]
+    return ModelConfig(
+        name=model_name,
+        backend=LLMBackend(spec["backend"]),
+        model_id=spec["model_id"],
+        base_url=spec.get("base_url", ""),
+        temperature=temperature_override,
+        max_tokens=spec.get("max_tokens", 8192),
+        family=spec.get("family", ""),
+        size=spec.get("size", ""),
+        quantization=spec.get("quantization", ""),
+        tags=spec.get("tags", []),
+    )
+
+
 def _try_parse_json(text: str) -> bool:
     import re
     try:
@@ -167,6 +200,7 @@ from a11y_autofix.config import (
     A11yIssue,
     AgentTask,
     AgentType,
+    LLMBackend,
     ModelConfig,
     Settings,
 )
@@ -752,10 +786,7 @@ class SingleRunOrchestrator:
         )
 
     def _build_pipeline(self) -> Pipeline:
-        model_cfg = ModelConfig(
-            model_name=self.model_name,
-            temperature=self.temperature,
-        )
+        model_cfg = _model_config_from_yaml(self.model_name, self.temperature)
         settings = Settings()
         return Pipeline(settings=settings, model_config=model_cfg, agent_preference=AgentType.AUTO)
 
