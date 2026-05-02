@@ -124,9 +124,19 @@ class StatusWriter:
         with self._lock:
             self._state.update(kwargs)
             payload = {**self._base, **self._state}
-            tmp = self._path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-            tmp.replace(self._path)
+            content = json.dumps(payload, default=str)
+            if sys.platform == "win32":
+                # Windows: os.replace() raises PermissionError when target is
+                # held open by the monitor process. status.json is read-only
+                # monitoring data so a direct overwrite is safe.
+                try:
+                    self._path.write_text(content, encoding="utf-8")
+                except PermissionError:
+                    pass  # monitor is mid-read; skip this tick, next will land
+            else:
+                tmp = self._path.with_suffix(".json.tmp")
+                tmp.write_text(content, encoding="utf-8")
+                tmp.replace(self._path)
 
     def cell_start(
         self,
