@@ -209,26 +209,85 @@ def _git_hash() -> str:
 
 # ── Corpus loading ─────────────────────────────────────────────────────────────
 
-def load_violations(
-    violations_file: Path,
-    include_regression_guards: bool = False,
+# scan_results.json issue_type values → canonical wcag_category names
+_ISSUE_TYPE_MAP: dict[str, str] = {
+    "alt-text":  "alt_text",
+    "alt_text":  "alt_text",
+    "label":     "label",
+    "semantic":  "semantic",
+    "contrast":  "contrast",
+    "aria":      "aria",
+    "keyboard":  "keyboard",
+    "focus":     "focus",
+}
+
+
+def _normalise_category(raw: str) -> str:
+    return _ISSUE_TYPE_MAP.get(raw, raw)
+
+
+def _issue_confidence(issue: dict) -> str:
+    """HIGH if 2+ tools detected the violation, STANDARD otherwise."""
+    return "HIGH" if issue.get("tool_consensus", 1) >= 2 else "STANDARD"
+
+
+def load_corpus(
+    corpus_results_dir: Path,
     subset_size: int | None = None,
     stratify_subset: bool = True,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
     """
-    Load violations from the corpus JSON file.
+    Read violations from dataset/results/*/scan_results.json.
 
-    Returns a list of dicts, each representing one file's violations:
-      {"file_path": str, "issues": [A11yIssue, ...], "wcag_category": str, ...}
+    Returns one dict per FILE that has at least one unresolved issue:
+      {
+        "file_path":    str,   # absolute path to the .tsx source file
+        "file_content": str,   # source code (read from disk; "" if missing)
+        "issues":       list,  # raw issue dicts from scan_results.json
+      }
+
+    Each issue dict retains all original fields (issue_type, tool_consensus,
+    found_by, confidence, wcag_criteria, selector, message, context, …) so
+    that the runner loop can extract per-issue metadata directly.
     """
-    with violations_file.open() as fh:
-        corpus = json.load(fh)
+    entries: list[dict] = []
 
-    entries = [e for e in corpus if e.get("issues")]
+    for scan_file in sorted(corpus_results_dir.glob("*/scan_results.json")):
+        try:
+            data = json.loads(scan_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("scan_file_read_error", path=str(scan_file), error=str(exc))
+            continue
 
-    if not include_regression_guards:
-        entries = [e for e in entries if e.get("issues")]
+        for file_entry in data:
+            file_path = file_entry.get("file", "")
+            unresolved = [
+                i for i in file_entry.get("issues", [])
+                if not i.get("resolved", False)
+            ]
+            if not unresolved:
+                continue
+
+            # Read source from disk; fall back to "" if the path is inaccessible
+            content = ""
+            try:
+                content = Path(file_path).read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+            entries.append({
+                "file_path":    file_path,
+                "file_content": content,
+                "issues":       unresolved,
+            })
+
+    if not entries:
+        raise FileNotFoundError(
+            f"No scan_results.json files with unresolved issues found under:\n"
+            f"  {corpus_results_dir}\n"
+            f"Check that the path is correct and that the experiment has been run."
+        )
 
     if subset_size is not None and subset_size < len(entries):
         if stratify_subset:
@@ -245,18 +304,18 @@ def _stratified_sample(
     n: int,
     seed: int,
 ) -> list[dict]:
-    """Sample n entries proportionally from each WCAG category."""
+    """Sample n entries proportionally across WCAG categories of first issue."""
     from collections import defaultdict
 
     by_cat: dict[str, list] = defaultdict(list)
     for e in entries:
-        cat = e.get("wcag_category", "unknown")
+        first_issue = e["issues"][0] if e["issues"] else {}
+        cat = _normalise_category(first_issue.get("issue_type", "unknown"))
         by_cat[cat].append(e)
 
     rng = random.Random(seed)
     sampled: list[dict] = []
     remaining = n
-
     cats = sorted(by_cat)
     per_cat = max(1, n // len(cats))
 
@@ -266,7 +325,6 @@ def _stratified_sample(
         sampled.extend(rng.sample(pool, k))
         remaining -= k
 
-    # Fill remaining slots from the full pool
     taken_ids = {id(e) for e in sampled}
     leftover = [e for e in entries if id(e) not in taken_ids]
     if remaining > 0 and leftover:
@@ -480,19 +538,19 @@ class SingleRunOrchestrator:
         seed: int,
         config: dict[str, Any],
         results_dir: Path,
-        violations_file: Path,
+        corpus_results_dir: Path,
         status_writer: "StatusWriter | None" = None,
         cells_done_so_far: int = 0,
     ) -> None:
-        self.condition         = condition
-        self.model_name        = model_name
-        self.repetition        = repetition
-        self.seed              = seed
-        self.config            = config
-        self.results_dir       = results_dir
-        self.violations_file   = violations_file
-        self.status_writer     = status_writer
-        self.cells_done_so_far = cells_done_so_far
+        self.condition          = condition
+        self.model_name         = model_name
+        self.repetition         = repetition
+        self.seed               = seed
+        self.config             = config
+        self.results_dir        = results_dir
+        self.corpus_results_dir = corpus_results_dir
+        self.status_writer      = status_writer
+        self.cells_done_so_far  = cells_done_so_far
 
         self.run_id  = str(uuid.uuid4())
         self.git_hash = _git_hash()
@@ -514,9 +572,8 @@ class SingleRunOrchestrator:
     async def run(self) -> None:
         log.info("run_start", condition=self.condition.id, model=self.model_name, rep=self.repetition)
 
-        entries = load_violations(
-            self.violations_file,
-            include_regression_guards=self.include_guards,
+        entries = load_corpus(
+            self.corpus_results_dir,
             subset_size=self.subset_size,
             stratify_subset=self.stratify,
             seed=self.seed,
@@ -574,25 +631,34 @@ class SingleRunOrchestrator:
         for entry in entries:
             file_path   = entry["file_path"]
             issues_raw  = entry.get("issues", [])
-            confidence  = entry.get("confidence", "STANDARD")
-            n_tools     = entry.get("n_tools_detected", 1)
-            tools_by    = entry.get("tools_detected_by", [])
-            wcag_cat    = entry.get("wcag_category", "aria")
+            file_content = entry.get("file_content", "")
 
-            issues = [A11yIssue(**i) if isinstance(i, dict) else i for i in issues_raw]
+            issues: list[A11yIssue] = []
+            for raw in issues_raw:
+                try:
+                    issues.append(A11yIssue(**raw) if isinstance(raw, dict) else raw)
+                except Exception:
+                    pass
             if not issues:
                 continue
 
             file_attempts:   list[AttemptRecord] = []
             file_violations = []
 
-            for issue in issues:
+            for issue, raw_issue in zip(issues, issues_raw):
+                # Read per-issue metadata directly from the scan_results fields
+                raw_dict    = raw_issue if isinstance(raw_issue, dict) else {}
+                confidence  = _issue_confidence(raw_dict)
+                n_tools     = raw_dict.get("tool_consensus", 1)
+                tools_by    = raw_dict.get("found_by", [])
+                wcag_cat    = _normalise_category(raw_dict.get("issue_type", "aria"))
+
                 violation_id = f"{file_path}:{issue.selector}:{issue.wcag_criteria}"
                 violation_attempts: list[AttemptRecord] = []
 
                 task = AgentTask(
                     file=Path(file_path),
-                    file_content=entry.get("file_content", ""),
+                    file_content=file_content,
                     issues=[issue],
                 )
 
@@ -705,7 +771,12 @@ class AblationStudyOrchestrator:
     after partial failures without re-running completed cells.
     """
 
-    def __init__(self, config_path: Path, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        dry_run: bool = False,
+        corpus_dir_override: Path | None = None,
+    ) -> None:
         self.config_path = config_path
         self.dry_run = dry_run
 
@@ -717,8 +788,21 @@ class AblationStudyOrchestrator:
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         corpus_cfg = self.config.get("corpus", {})
-        violations_rel = corpus_cfg.get("violations_file", "../dataset/violations.json")
-        self.violations_file = (exp_dir / violations_rel).resolve()
+        if corpus_dir_override is not None:
+            self.corpus_results_dir = corpus_dir_override.resolve()
+        else:
+            corpus_rel = corpus_cfg.get("corpus_results_dir", "../dataset/results")
+            self.corpus_results_dir = (exp_dir / corpus_rel).resolve()
+
+        if not self.corpus_results_dir.exists():
+            raise FileNotFoundError(
+                f"\n\nCorpus directory not found:\n"
+                f"  {self.corpus_results_dir}\n\n"
+                f"Expected: dataset/results/ containing */scan_results.json files.\n"
+                f"Override with --corpus-dir:\n"
+                f"  python -m ablation_study.src.ablation_runner "
+                f"--corpus-dir path\\to\\dataset\\results\n"
+            )
 
         models_cfg = self.config.get("models", {})
         self.models: list[str] = models_cfg.get("all", [models_cfg.get("primary", "qwen2.5-coder-3b")])
@@ -790,7 +874,7 @@ class AblationStudyOrchestrator:
                         seed=seed,
                         config=self.config,
                         results_dir=self.results_dir,
-                        violations_file=self.violations_file,
+                        corpus_results_dir=self.corpus_results_dir,
                         status_writer=status_writer,
                         cells_done_so_far=done,
                     )
@@ -841,6 +925,13 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print all conditions and exit",
     )
+    p.add_argument(
+        "--corpus-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Path to dataset/results/ directory (overrides experiment_config.yaml)",
+    )
     return p.parse_args()
 
 
@@ -856,6 +947,7 @@ async def _main() -> None:
     orchestrator = AblationStudyOrchestrator(
         config_path=args.config,
         dry_run=args.dry_run,
+        corpus_dir_override=args.corpus_dir,
     )
     await orchestrator.run_all(
         condition_filter=args.condition,

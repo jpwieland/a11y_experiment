@@ -16,7 +16,7 @@ experiment:
 
 # ── Corpus ──────────────────────────────────────────────────────────────────
 corpus:
-  violations_file: "../dataset/violations.json"
+  corpus_results_dir: "../dataset/results"
   # Only process files that have at least one detected violation.
   # Regression-guard files (no violations) are excluded from ablation
   # because they contribute trivially to SR and add compute cost

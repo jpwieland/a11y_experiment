@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Experiment outputs — large generated data, not source
+ablation_study/results/
+experiment-results/
+
+# Scan corpus data (stays on the machine where scans were run; too large for git)
+dataset/results/
+dataset/snapshots/
+
+# Logs
+*.log
+setup.log
+
+# Logs
+*.log
+setup.log
