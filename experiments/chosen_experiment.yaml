@@ -9,14 +9,14 @@
 #   "7B_Code_Models_—_A11y_Auto-fix_0380ab19" (2043 arquivos, 3 modelos,
 #   3 repetições) e nas restrições de hardware descritas abaixo.
 #
-#   Hardware alvo: GPU com 4 GB VRAM (RTX 3050 / 4GB ou equivalente)
+#   Hardware alvo: GPU com 4 GB VRAM (RTX 3050 4GB ou equivalente)
 #                  + ≥ 16 GB RAM (CPU-offload automático via Ollama)
 #                  Sistema operacional: Windows 10/11 (venv + PowerShell)
 #
 #   NOTA SOBRE "RTX 4030":
-#     A NVIDIA não possui uma GPU desktop com esse nome na linha GeForce.
-#     Esta configuração foi calibrada para qualquer GPU com 4 GB VRAM usando
-#     o backend Ollama com Q4_K_M, incluindo RTX 3050 4GB, GTX 1650 e similares.
+#     A NVIDIA não possui GPU desktop com esse nome. Esta configuração foi
+#     calibrada para qualquer GPU com 4 GB VRAM via Ollama Q4_K_M:
+#     RTX 3050 4GB, GTX 1650, GTX 1650 Super e similares.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -28,94 +28,149 @@
 #   Modelo               Família      Params  VRAM Q4_K_M  IFR (μ ± σ)      Tempo/arq  Tokens/arq
 #   ─────────────────────────────────────────────────────────────────────────────────────────────
 #   qwen2.5-coder-7b     Alibaba/Qwen  7B     ~4.1 GB      0.433 ± 0.031    40.1 s     2127
-#   qwen2.5-coder-3b     Alibaba/Qwen  3B     ~2.0 GB      0.487 ± 0.009    5.5 s      2810
-#   codellama-7b         Meta          7B     ~4.1 GB      0.581 ± 0.013    104.2 s    2889
+#   qwen2.5-coder-3b     Alibaba/Qwen  3B     ~2.0 GB      0.487 ± 0.009     5.5 s     2810
+#   codellama-7b         Meta          7B     ~4.1 GB      0.581 ± 0.013   104.2 s     2889
 #
-#   Justificativas para inclusão de cada modelo:
+#   [1] qwen2.5-coder-7b — SOTA 7B coding (Qwen2.5, out/2024). Maior da família
+#       no hardware alvo. IFR pior do grupo (0.433): contra-intuitivo e
+#       cientificamente relevante (tamanho ≠ qualidade neste corpus).
 #
-#   [1] qwen2.5-coder-7b
-#       — SOTA para coding entre modelos ≤8B (Qwen2.5 Coder, out/2024)
-#       — Representante da família Alibaba/Qwen — maior modelo da família no hardware
-#       — Pior IFR do grupo (0.433), o que é contra-intuitivo e cientificamente
-#         interessante: sugere que tamanho de parâmetros não prediz IFR neste corpus
+#   [2] qwen2.5-coder-3b — Versão compacta da mesma família. Ablação intra-família
+#       (3B vs 7B). SIZE INVERSION FINDING: IFR 0.487 > 7B (0.433). Latência
+#       7× menor (5.5s vs 40.1s). Maior estabilidade (σ=0.009).
 #
-#   [2] qwen2.5-coder-3b
-#       — Versão compacta da mesma família; permite ablação intra-família (3B vs 7B)
-#       — IFR = 0.487 > qwen2.5-coder-7b (0.433) — SIZE INVERSION FINDING:
-#         o modelo menor supera o maior da mesma família em correção de acessibilidade
-#       — Latência 7× menor que o 7B (5.5s vs 40.1s): impacto prático no MTTR
-#       — Baixo desvio padrão (σ=0.009): maior estabilidade entre repetições
+#   [3] codellama-7b — Meta/2023; 3ª família arquitetural, diversidade estrutural.
+#       Maior IFR absoluto (0.581). Trade-off: 104.2s/arquivo → runtime 3×
+#       maior que qwen2.5-7b. Temperatura forçada a 0.1 (ver execution abaixo).
 #
-#   [3] codellama-7b
-#       — Família diferente (Meta, 2023): garante diversidade arquitetural na comparação
-#       — Maior IFR absoluto do grupo (0.581) — melhor desempenho em correção
-#       — Trade-off de latência: 104.2s/arquivo → runtime total 3× maior que o qwen2.5-7b
-#       — Temperatura ajustada para 0.1 (padrão do experimento), sobrescrevendo
-#         o valor padrão de 0.2 definido em models.yaml para consistência metodológica
-#
-#   ACHADO PRINCIPAL PARA PUBLICAÇÃO:
-#     Size inversion: qwen2.5-coder-3B > qwen2.5-coder-7B em IFR
-#     Latência vs qualidade: codellama-7B lidera IFR mas tem 19× mais latência que 3B
-#     Implicação: eficiência (IFR/token, IFR/segundo) favorece o modelo 3B para produção
-#
-#   MODELO OPCIONAL (não incluído por ausência de dados):
-#     deepseek-coder:6.7b — ~3.9 GB Q4_K_M, família DeepSeek (3ª família arquitetural),
-#     lançado 2024, seria um candidato natural para expandir a comparação. Requer novo run.
+#   ACHADOS PARA PUBLICAÇÃO:
+#     • Size inversion: 3B > 7B na mesma família em IFR
+#     • Latência vs qualidade: codellama lidera IFR mas custa 19× mais tempo que 3B
+#     • Eficiência (IFR/segundo) favorece qwen2.5-coder-3b para uso em produção
 #
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#   RUNTIME ESTIMADO (4 GB VRAM, baseado em dados reais)
+#   SELEÇÃO DE PROJETOS — ANÁLISE DE COBERTURA DO CORPUS
 #   ══════════════════════════════════════════════════════════════════════════
 #
-#   Com 35 projetos e max_files_per_project=35 (≈1.225 arquivos totais):
+#   Corpus disponível (dataset/catalog/projects.yaml, status=scanned):
+#     143 projetos  |  45.826 arquivos  |  3.595 issues detectados
 #
-#   Modelo               Tempo/arq  1 rep     3 reps
+#   Distribuição por domínio (corpus completo):
+#   ─────────────────────────────────────────────────────────────────────────
+#   Domínio           Projetos  Arquivos  Issues  Issues/arquivo
+#   dashboard               30     8.471     621           0.073
+#   developer_tools         20    11.271     661           0.059
+#   ecommerce               22     7.040     552           0.078
+#   education               18     5.572     267           0.048
+#   government               4       420      85           0.202  ← único domínio com 4 proj. scanned
+#   healthcare              12     4.509     230           0.051
+#   social                  37     8.543   1.179           0.138  ← maior densidade de issues
+#   ─────────────────────────────────────────────────────────────────────────
+#
+#   Distribuição de tipos de issue (corpus completo, n=3.595):
+#     keyboard   : 1.925  (53.5%)
+#     semantic   :   630  (17.5%)
+#     aria       :   517  (14.4%)
+#     alt-text   :   400  (11.1%)
+#     contrast   :    70  ( 1.9%)
+#     label      :    33  ( 0.9%)
+#     other      :    20  ( 0.6%)
+#
+#   PROBLEMAS IDENTIFICADOS NA SELEÇÃO ANTERIOR (experiment_weak_gpu.yaml):
+#   ─────────────────────────────────────────────────────────────────────────
+#   [P1] 4 projetos sem scan (status=snapshotted, sem findings.jsonl):
+#        edp963__davinci               → dashboard, large
+#        debba__tabularis              → developer_tools, medium
+#        demokratie-live__democracy-development → government, medium
+#        dream-num__univer             → social, large
+#        Impacto: referências inválidas; o runner não encontrará os arquivos de scan.
+#
+#   [P2] Social sub-representado: 4/37 projetos (10.8%) mas domínio tem
+#        32.8% dos issues do corpus. Um experimento de acessibilidade que
+#        ignora social perde o domínio com maior densidade de problemas.
+#
+#   [P3] Government: 5 slots alocados, mas apenas 4 projetos scanned existem.
+#        demokratie-live (slot 5) não está scanned → slot morto.
+#
+#   [P4] Distribuição de tamanhos em developer_tools: 3/4 projetos eram large
+#        (alibaba-fusion=1397 arq, arco-design=sem dados, cloudscape=1176 arq).
+#        Viés de tamanho: sem projetos small para comparação.
+#
+#   CORREÇÕES APLICADAS:
+#   ─────────────────────────────────────────────────────────────────────────
+#   [C1] Substituição de 4 projetos sem scan:
+#        edp963__davinci           → briefercloud__briefer (dashboard, medium, 40 issues, 387 arq)
+#        debba__tabularis          → BradGroux__veritas-kanban (dev_tools, medium, 32 issues, 224 arq)
+#        demokratie-live           → removido (government agora usa todos os 4 scanned existentes)
+#        dream-num__univer         → 79E__ChatGpt-Web (social, medium, 67 issues, 97 arq)
+#
+#   [C2] Social expandido de 4 para 7 projetos (+ 2 projetos com alta densidade):
+#        + dafengzhen__youdeyiwu (social, large,  59 issues, 488 arq)
+#        + 3xpyth0n__ideon       (social, medium, 53 issues, 252 arq)
+#        Justificativa: social representa 32.8% dos issues; com 4 projetos estava
+#        sub-representado vs. education (5 projetos, 7.4% dos issues).
+#
+#   [C3] Government corrigido para 4 projetos (todos scanned disponíveis).
+#        Sem alocação artificial de slot para projeto não-scanned.
+#
+#   SELEÇÃO FINAL — 36 PROJETOS:
+#   ─────────────────────────────────────────────────────────────────────────
+#   Domínio           Projetos  Arquivos  Issues  Cob. issues  Tamanhos
+#   dashboard                5     1.442     396       63.8%   S=1 M=3 L=1
+#   developer_tools          5     3.567     531       80.3%   S=0 M=2 L=3
+#   ecommerce                5     2.682     452       81.9%   S=2 M=1 L=2
+#   education                5       752     186       69.7%   S=2 M=3 L=0
+#   government               4       420      85      100.0%   S=1 M=3 L=0  (exaustivo)
+#   healthcare               5     3.260     204       88.7%   S=0 M=4 L=1
+#   social                   7     2.694     839       71.1%   S=1 M=3 L=3
+#   ─────────────────────────────────────────────────────────────────────────
+#   TOTAL                   36    14.817   2.693
+#   Cobertura corpus:   32.3% dos arquivos  |  74.9% dos issues
+#
+#   Distribuição de tipos na seleção (n=2.693):
+#     keyboard   : 1.485  (55.1%)
+#     semantic   :   415  (15.4%)
+#     aria       :   388  (14.4%)
+#     alt-text   :   341  (12.7%)
+#     contrast   :    27  ( 1.0%)
+#     label      :    23  ( 0.9%)
+#     other      :    14  ( 0.5%)
+#   → Distribuição fiel ao corpus completo (desvio < 3 p.p. em todos os tipos)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   RUNTIME ESTIMADO (4 GB VRAM, max_files_per_project=35)
+#   ══════════════════════════════════════════════════════════════════════════
+#
+#   Modelo               Tempo/arq   1 rep     3 reps
 #   ─────────────────────────────────────────────────
-#   qwen2.5-coder-3b     5.5 s      1.9 h     5.6 h
-#   qwen2.5-coder-7b     40.1 s     13.7 h    41.0 h
-#   codellama-7b         104.2 s    35.5 h    106.5 h
-#   Overhead de scan (compartilhado)              ~4.0 h
+#   qwen2.5-coder-3b       5.5 s     2.0 h     6.0 h
+#   qwen2.5-coder-7b      40.1 s    14.1 h    42.3 h
+#   codellama-7b          104.2 s   36.6 h   109.8 h
+#   Scan overhead (compartilhado)              ~4.0 h
 #   ─────────────────────────────────────────────────
-#   Total                                   ~157 h (~6.5 dias)
+#   Total (36 proj. × 35 arq. = ~1.260 arq.)  ~162 h / ~6.8 dias
 #
-#   AVISO: o codellama-7b domina o runtime. Se tempo for uma restrição crítica,
-#   reduzir max_files_per_project para 20 ou usar apenas qwen2.5-coder-3b + 7b.
-#   Com max_files_per_project=20: runtime total cai para ~90h (~3.75 dias).
-#
-#   NOTA: O run original usou max_files_per_project=60 → 2043 arquivos totais.
-#   Os dados já estão coletados. Este arquivo define os parâmetros para replicação
-#   ou expansão (ex: adição de deepseek-coder:6.7b como 4º modelo).
+#   Para reduzir runtime: max_files_per_project: 20 → ~93h / ~3.9 dias
 #
 # ─────────────────────────────────────────────────────────────────────────────
 #
 #   NOTAS METODOLÓGICAS
 #   ══════════════════════════════════════════════════════════════════════════
 #
-#   1. TOOL CONSENSUS OBSERVADO:
-#      O campo min_tool_consensus foi intencionalmente configurado como 1 no run
-#      de referência, ou os scanners produziram issues não sobrepostas (sem consenso
-#      entre ferramentas). Na prática, TODOS os 457 issues observados têm consensus=1.
-#      Isso implica que cada issue foi detectada por apenas um scanner — o multi-tool
-#      consensus como filtro de qualidade NÃO foi ativado neste corpus.
-#      Para publicação: documentar como limitação e recomendar min_tool_consensus=2
-#      em estudos futuros para elevar a confiança na detecção.
+#   1. TOOL CONSENSUS OBSERVADO = 1:
+#      Todos os 457 issues observados têm consensus=1 (detectados por 1 scanner).
+#      Multi-tool consensus como filtro de qualidade não foi ativado neste corpus.
+#      Documentar como limitação; recomendar min_tool_consensus=2 em trabalhos futuros.
 #
-#   2. ARQUIVOS SEM ISSUES:
-#      80.6% dos arquivos do corpus (1646/2043) não têm issues detectados.
-#      O SR (Success Rate) file-level é dominado por esses arquivos triviais (SR≈89%).
-#      A métrica primária para publicação deve ser o IFR nos arquivos COM issues
-#      (397 arquivos), não o SR global, para evitar inflação artificial da performance.
+#   2. ARQUIVOS SEM ISSUES (80.6% do corpus original):
+#      SR file-level (~89%) é inflado por arquivos triviais.
+#      Métrica primária de publicação: IFR nos arquivos COM issues detectadas.
 #
-#   3. DISTRIBUIÇÃO DE ISSUES:
-#      ~87% dos issues são do tipo ARIA/WCAG 4.1.2 (Name, Role, Value).
-#      A amostragem estratificada (stratified_sampling: true) compensa esse viés
-#      distribuindo proporcionalmente os slots por tipo de issue por projeto.
-#
-#   4. TEMPERATURA:
-#      Todos os modelos usam temperature=0.1 neste experimento (definido em
-#      execution.temperature abaixo), sobrescrevendo os defaults de models.yaml.
-#      Isso é obrigatório para comparabilidade: codellama-7b tem default 0.2
-#      em models.yaml — sem sobrescrita, a comparação seria metodologicamente inválida.
+#   3. TEMPERATURA UNIFORME:
+#      Todos os modelos usam temperature=0.1, sobrescrevendo o default 0.2
+#      do codellama-7b em models.yaml. Obrigatório para comparabilidade.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -123,137 +178,147 @@ name: "A11y Auto-fix — Experimento Canônico para Publicação (4 GB VRAM)"
 description: |
   Experimento comparativo definitivo entre modelos open-source de 3–7B parâmetros
   para correção automática de problemas de acessibilidade WCAG 2.1 AA em código
-  React/TypeScript. Configurado para GPUs com 4 GB VRAM rodando Windows via Ollama.
+  React/TypeScript. Configurado para GPUs com 4 GB VRAM via Ollama (Windows).
 
-  Cobre 35 projetos reais distribuídos por 7 domínios de aplicação (Dashboard,
-  Developer Tools, E-commerce, Education, Government, Healthcare, Social).
-
-  Métricas primárias de publicação: IFR (Issue Fix Rate) e MTTR (Mean Time to
-  Remediate) nos arquivos com issues detectadas. SR global é reportado como
-  métrica secundária com nota metodológica sobre inflação por arquivos sem issues.
+  36 projetos reais distribuídos por 7 domínios de aplicação, selecionados do
+  corpus de 143 projetos scanned (dataset/catalog/projects.yaml). Cobre 74.9%
+  dos issues do corpus total com distribuição de tipos fiel ao dataset completo.
 
 # ── Modelos ──────────────────────────────────────────────────────────────────
-# Ver justificativa científica detalhada no cabeçalho acima.
 models:
   - qwen2.5-coder-7b   # SOTA 7B coding (Alibaba/Qwen, out/2024) — IFR: 0.433
-  - qwen2.5-coder-3b   # 3B compacto mesma família — IFR: 0.487 > 7B (size inversion)
-  - codellama-7b       # Meta/CodeLlama (família diferente) — IFR: 0.581 (melhor)
+  - qwen2.5-coder-3b   # 3B mesma família — IFR: 0.487 > 7B (size inversion)
+  - codellama-7b       # Meta/CodeLlama (3ª família) — IFR: 0.581 (melhor absoluto)
 
 # ── Nível WCAG ───────────────────────────────────────────────────────────────
 wcag_level: AA
 
 # ── Scanners ─────────────────────────────────────────────────────────────────
-# 4 scanners para cobertura ampla. Min consensus = 1 (ver nota metodológica #1).
 scanners:
   - pa11y
   - axe-core
   - playwright+axe
   - eslint-jsx-a11y
 
-min_tool_consensus: 1  # Valor real observado no corpus; documentar como limitação
+min_tool_consensus: 1  # Valor real observado (ver nota metodológica #1)
 
-# ── Agente ───────────────────────────────────────────────────────────────────
+# ── Agente e estratégia ───────────────────────────────────────────────────────
 agents:
   - auto
-
-# ── Estratégia de prompting ──────────────────────────────────────────────────
 strategy: few-shot
 
 # ── Repetições e seed ────────────────────────────────────────────────────────
-repetitions: 3   # 3 repetições para estabilidade estatística (σ observado: 0.009–0.031)
+repetitions: 3
 seed: 42
 
-# ── Projetos (35 projetos, 7 domínios × 5 projetos) ─────────────────────────
+# ── Projetos (36 projetos, 7 domínios) ───────────────────────────────────────
+
 files:
-  # Dashboard (5)
-  - dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack
-  - dataset/snapshots/edp963__davinci
-  - dataset/snapshots/arpanghosh8453__open-dronelog
-  - dataset/snapshots/builderz-labs__mission-control
-  - dataset/snapshots/Kanaries__graphic-walker
-  # Developer Tools (5)
-  - dataset/snapshots/alibaba-fusion__next
-  - dataset/snapshots/FeatureProbe__FeatureProbe
-  - dataset/snapshots/arco-design__arco-design
-  - dataset/snapshots/cloudscape-design__components
-  - dataset/snapshots/debba__tabularis
-  # E-commerce (5)
-  - dataset/snapshots/aelassas__bookcars
-  - dataset/snapshots/BuilderIO__mitosis
-  - dataset/snapshots/aelassas__movinin
-  - dataset/snapshots/CromwellCMS__Cromwell
-  - dataset/snapshots/BuilderIO__builder
-  # Education (5)
-  - dataset/snapshots/LHRUN__paint-board
-  - dataset/snapshots/angellikgh__react-design-editor
-  - dataset/snapshots/F-star__suika
-  - dataset/snapshots/WindRunnerMax__CanvasEditor
-  - dataset/snapshots/KartikLabhshetwar__screenshot-studio
-  # Government (5)
-  - dataset/snapshots/codeforpdx__recordexpungPDX
-  - dataset/snapshots/JustFixNYC__who-owns-what
-  - dataset/snapshots/demokratie-live__democracy-development
-  - dataset/snapshots/codyogden__killedbygoogle
-  - dataset/snapshots/cds-snc__gcds-components
-  # Healthcare (5)
-  - dataset/snapshots/OHIF__Viewers
-  - dataset/snapshots/Snouzy__workout-cool
-  - dataset/snapshots/beda-software__fhir-emr
-  - dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture
-  - dataset/snapshots/aphp__Cohort360-FrontEnd
-  # Social (5)
-  - dataset/snapshots/OvidijusParsiunas__deep-chat
-  - dataset/snapshots/agnaistic__agnai
-  - dataset/snapshots/dream-num__univer
-  - dataset/snapshots/Privoce__vocechat-web
-  - dataset/snapshots/Linen-dev__linen.dev
+  # ── Dashboard (5 projetos | 1.442 arq. | 396 issues | S=1 M=3 L=1) ────────
+  # Todos scanned, com findings.jsonl verificados.
+  # briefercloud__briefer substitui edp963__davinci (status=snapshotted, sem scan).
+  - dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack  # medium | 153 arq | 13 issues
+  - dataset/snapshots/arpanghosh8453__open-dronelog         # large  | 308 arq | 77 issues
+  - dataset/snapshots/builderz-labs__mission-control        # medium | 387 arq | 226 issues
+  - dataset/snapshots/Kanaries__graphic-walker              # small  |  21 arq | 40 issues
+  - dataset/snapshots/briefercloud__briefer                 # medium | 387 arq |  40 issues ← substituição
+
+  # ── Developer Tools (5 projetos | 3.567 arq. | 531 issues | S=0 M=2 L=3) ──
+  # BradGroux__veritas-kanban substitui debba__tabularis (status=snapshotted, sem scan).
+  # Nota: 3 projetos large é característica do domínio (chakra-ui, cloudscape,
+  # alibaba-fusion são bibliotecas de componentes de grande escala — inevitável).
+  - dataset/snapshots/alibaba-fusion__next          # large  | 1.397 arq | 169 issues
+  - dataset/snapshots/FeatureProbe__FeatureProbe    # medium |   135 arq |  29 issues
+  - dataset/snapshots/arco-design__arco-design      # large  |   486 arq | 238 issues
+  - dataset/snapshots/cloudscape-design__components # large  | 1.176 arq |  63 issues
+  - dataset/snapshots/BradGroux__veritas-kanban     # medium |   224 arq |  32 issues ← substituição
+
+  # ── E-commerce (5 projetos | 2.682 arq. | 452 issues | S=2 M=1 L=2) ───────
+  - dataset/snapshots/aelassas__bookcars    # small | 23 arq |  43 issues
+  - dataset/snapshots/BuilderIO__mitosis    # large | 426 arq | 127 issues
+  - dataset/snapshots/aelassas__movinin     # small | 18 arq |  68 issues
+  - dataset/snapshots/CromwellCMS__Cromwell # medium | 792 arq | 120 issues
+  - dataset/snapshots/BuilderIO__builder    # large | 1.223 arq |  94 issues
+
+  # ── Education (5 projetos | 752 arq. | 186 issues | S=2 M=3 L=0) ───────────
+  # Os 5 melhores do domínio em número de issues. Education tem densidade baixa
+  # (0.048 issues/arq) — limitação estrutural do corpus, não da seleção.
+  - dataset/snapshots/LHRUN__paint-board                # medium | 162 arq | 64 issues
+  - dataset/snapshots/angellikgh__react-design-editor   # medium | 214 arq | 35 issues
+  - dataset/snapshots/KartikLabhshetwar__screenshot-studio # small | 27 arq | 34 issues
+  - dataset/snapshots/F-star__suika                    # medium | 234 arq | 28 issues
+  - dataset/snapshots/WindRunnerMax__CanvasEditor       # small  | 115 arq | 25 issues
+
+  # ── Government (4 projetos | 420 arq. | 85 issues | S=1 M=3 L=0) ───────────
+  # EXAUSTIVO: todos os 4 projetos scanned do domínio.
+  # demokratie-live__democracy-development (5º slot original) tem status=snapshotted
+  # e não possui scan — removido. Não existem outros projetos scanned neste domínio.
+  - dataset/snapshots/codeforpdx__recordexpungPDX  # medium | 126 arq | 66 issues
+  - dataset/snapshots/JustFixNYC__who-owns-what    # medium | 107 arq | 18 issues
+  - dataset/snapshots/codyogden__killedbygoogle    # small  |  19 arq |  1 issue
+  - dataset/snapshots/cds-snc__gcds-components     # medium | 168 arq |  0 issues  ← mantido: cobertura exhaustiva
+
+  # ── Healthcare (5 projetos | 3.260 arq. | 204 issues | S=0 M=4 L=1) ────────
+  - dataset/snapshots/OHIF__Viewers                       # large  | 1.520 arq | 60 issues
+  - dataset/snapshots/Snouzy__workout-cool                # medium |   120 arq | 48 issues
+  - dataset/snapshots/beda-software__fhir-emr             # medium |   413 arq | 30 issues
+  - dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture # medium | 835 arq | 38 issues
+  - dataset/snapshots/aphp__Cohort360-FrontEnd            # medium |   372 arq | 28 issues
+
+  # ── Social (7 projetos | 2.694 arq. | 839 issues | S=1 M=3 L=3) ────────────
+  # EXPANSÃO: de 4 para 7 projetos (de 10.8% para 18.9% dos projetos do domínio).
+  # Justificativa: social = 32.8% dos issues do corpus mas estava com 4 slots.
+  # dream-num__univer (original) tem status=snapshotted — substituído por
+  # 79E__ChatGpt-Web (67 issues — maior issue count do domínio fora dos originais).
+  # Dois projetos adicionais para compensar sub-representação histórica.
+  - dataset/snapshots/OvidijusParsiunas__deep-chat  # large  | 384 arq | 184 issues
+  - dataset/snapshots/agnaistic__agnai              # large  | 665 arq | 222 issues
+  - dataset/snapshots/Privoce__vocechat-web         # medium | 124 arq | 136 issues
+  - dataset/snapshots/Linen-dev__linen.dev          # large  | 684 arq | 175 issues
+  - dataset/snapshots/79E__ChatGpt-Web              # medium |  97 arq |  67 issues ← substituição
+  - dataset/snapshots/dafengzhen__youdeyiwu         # large  | 488 arq |  59 issues ← expansão
+  - dataset/snapshots/3xpyth0n__ideon               # medium | 252 arq |  53 issues ← expansão
 
 # ── Execução (4 GB VRAM — sem concorrência, cold start entre modelos) ────────
 execution:
-  cold_start: true           # Reinicia servidor Ollama entre modelos
-                             # Evita contaminação de VRAM entre carregamentos
-  max_concurrent_models: 1   # Apenas 1 modelo ativo por vez (restrição de VRAM)
-  temperature: 0.1           # Uniform para TODOS os modelos — sobrescreve models.yaml
-                             # CRÍTICO: codellama-7b tem default 0.2 em models.yaml;
-                             # sem esta sobrescrita a comparação seria inválida.
+  cold_start: true           # Reinicia o servidor Ollama entre modelos
+  max_concurrent_models: 1   # 1 modelo ativo por vez (restrição de VRAM)
+  temperature: 0.1           # Uniforme para TODOS os modelos.
+                             # CRÍTICO: sobrescreve o default 0.2 do codellama-7b
+                             # em models.yaml — sem isso a comparação é inválida.
 
-# ── Timeouts (calibrados por dados reais — p95 observado por modelo) ─────────
+# ── Timeouts (calibrados por dados reais — p95 observado) ────────────────────
 #
-#   Modelo               p50 observado   p95 estimado   timeout definido
-#   ──────────────────────────────────────────────────────────────────────
-#   qwen2.5-coder-3b      5.5 s           ~30 s          60 s
-#   qwen2.5-coder-7b     40.1 s          ~180 s         300 s
-#   codellama-7b         104.2 s         ~400 s         600 s
+#   Modelo               p50       p95 est.   timeout
+#   qwen2.5-coder-3b     5.5 s     ~30 s       60 s
+#   qwen2.5-coder-7b    40.1 s    ~180 s      300 s
+#   codellama-7b        104.2 s   ~400 s      600 s
 #
-#   agent_timeout_s usa o valor mais conservador (codellama-7b p95 + margem).
-#   Projetos com muitos issues por arquivo podem exceder o p95: 600s é seguro.
-#
-scan_timeout_s: 120          # Por arquivo, por scanner
-agent_timeout_s: 600         # Por arquivo, por modelo — 10 min (codellama em CPU-offload)
-model_load_timeout_s: 300    # Carregamento do modelo — 5 min (offload de layers para RAM)
+scan_timeout_s: 120
+agent_timeout_s: 600         # Conservador: cobre codellama-7b em CPU-offload
+model_load_timeout_s: 300
 
 # ── Métricas ─────────────────────────────────────────────────────────────────
 metrics:
   # Primárias (publicação):
-  - sr                   # Success Rate (file-level) — reportar com nota sobre inflação
-  - ifr                  # Issue Fix Rate — métrica principal de qualidade
-  - mttr                 # Mean Time to Remediate — impacto prático
-  - te                   # Token Efficiency — IFR/1000 tokens
+  - sr             # Success Rate file-level — reportar com nota sobre inflação por arquivos sem issues
+  - ifr            # Issue Fix Rate — métrica principal
+  - mttr           # Mean Time to Remediate
+  - te             # Token Efficiency (IFR/1000 tokens)
+  # Secundárias:
+  - effective_sr        # SR apenas em arquivos com issues (evita inflação)
+  - noop_rate           # Taxa de arquivos sem modificação
+  - regression_rate     # Taxa de introdução de novos problemas
+  - detection_rate
+  - correction_rate
+  - precision
+  - tokens_used
+  - time_per_file_s
+  - issues_by_type
+  - issues_by_wcag_principle
+  - fix_by_agent
 
-  # Secundárias (análise):
-  - effective_sr         # SR apenas nos arquivos com issues (evita inflação)
-  - noop_rate            # Taxa de arquivos sem nenhuma modificação
-  - regression_rate      # Taxa de introdução de novos problemas
-  - detection_rate       # Cobertura de detecção pelo conjunto de scanners
-  - correction_rate      # Correção por tipo de issue (granular)
-  - precision            # Precisão das correções (true positive rate)
-  - tokens_used          # Tokens totais por modelo
-  - time_per_file_s      # Latência média por arquivo
-  - issues_by_type       # Distribuição de issues por categoria
-  - issues_by_wcag_principle  # Distribuição por princípio WCAG (P/O/U/R)
-  - fix_by_agent         # Performance por agente/modelo
-
-# ── Formato de saída ─────────────────────────────────────────────────────────
+# ── Saída ────────────────────────────────────────────────────────────────────
 output_format:
   - json
   - html
@@ -261,27 +326,26 @@ output_format:
 
 output_dir: experiment-results/chosen_experiment
 
-# ── Configurações avançadas ───────────────────────────────────────────────────
+# ── Avançado ─────────────────────────────────────────────────────────────────
 advanced:
   auto_clone_missing_snapshots: true
   checkpoint_per_project: true
   checkpoint_dir: experiment-results/chosen_experiment/checkpoints
-  save_diffs: true                # Salvar diffs para revisão manual via review_corrections.py
+  save_diffs: true
   typescript_validation: false
 
   # ── Amostragem ──────────────────────────────────────────────────────────────
   #
   #   max_files_per_project = 35
   #
-  #   Reduzido de 60 (experimento original) para 35 por dois motivos:
-  #   (a) 80.6% dos arquivos têm 0 issues → aumentar o cap não adiciona sinal útil
-  #   (b) Reduz runtime total em ~42% mantendo cobertura estatisticamente equivalente
+  #   Calibrado para equilibrar cobertura e runtime:
+  #   • 36 projetos × 35 arquivos → ~1.260 arquivos por repetição
+  #   • 80.6% dos arquivos têm 0 issues — aumentar o cap não adiciona sinal útil
+  #   • Reduz runtime em ~42% vs. cap=60 mantendo cobertura estatisticamente válida
   #
-  #   Com 35 projetos × 35 arquivos → ~1.225 arquivos por repetição
-  #   vs. 2.043 arquivos no run de referência (60 cap) — cobertura suficiente.
-  #
-  #   Para replicar o run original exato: max_files_per_project: 60
-  #   Para validação rápida: max_files_per_project: 20
+  #   Alternativas:
+  #     max_files_per_project: 20  → ~720 arq/rep, ~93h total (3 reps)
+  #     max_files_per_project: 60  → ~2.160 arq/rep, ~270h total (replicação exata)
   #
   max_files_per_project: 35
   seed: 42
@@ -290,40 +354,41 @@ advanced:
   #
   #   OBRIGATÓRIO: true
   #
-  #   87% dos issues observados são ARIA/4.1.2. Sem estratificação, o corpus
+  #   55.1% dos issues são do tipo keyboard. Sem estratificação, o corpus
   #   amostrado seria dominado por um único tipo, comprometendo a validade
   #   externa dos resultados por critério WCAG.
-  #
-  #   Com stratified_sampling=true, os 35 slots por projeto são distribuídos
-  #   proporcionalmente entre os tipos de issue presentes em findings.jsonl,
-  #   garantindo que a composição reflita a distribuição real de cada projeto.
+  #   Os 35 slots por projeto são distribuídos proporcionalmente entre os tipos
+  #   de issue em findings.jsonl, garantindo representação fiel.
   #
   stratified_sampling: true
 
-  # ── Notas para publicação ────────────────────────────────────────────────
   notes: |
     Experimento canônico — dados de referência para publicação.
 
-    Achados principais (do run 0380ab19, base deste experimento):
-    1. SIZE INVERSION: qwen2.5-coder-3B (IFR=0.487) > qwen2.5-coder-7B (IFR=0.433)
-       Maior modelo da mesma família tem pior IFR — parâmetros não predizem qualidade
-       em correção de acessibilidade neste corpus.
-    2. LATÊNCIA vs QUALIDADE: codellama-7B lidera IFR (0.581) mas custa 19× mais
-       tempo/arquivo que o 3B. Token Efficiency favorece o 3B para uso em produção.
-    3. VIÉS DO CORPUS: 80.6% dos arquivos têm 0 issues. SR global (~89%) é inflado.
-       IFR nos arquivos COM issues é a métrica clinicamente relevante.
-    4. CONSENSUS=1: todos os 457 issues observados têm tool_consensus=1.
-       Multi-tool consensus como filtro de qualidade não foi ativado neste corpus.
-       Limitação a documentar; recomendar min_tool_consensus=2 em trabalhos futuros.
+    Corpus: 36/143 projetos scanned, 7 domínios, 74.9% dos issues do dataset.
+    36 projetos: dashboard=5, dev_tools=5, ecommerce=5, education=5,
+                 government=4 (exaustivo), healthcare=5, social=7
 
-    Hardware de referência para replicação:
-      GPU: 4 GB VRAM (ex.: RTX 3050 4GB, GTX 1650 Super)
-      RAM: ≥ 16 GB (CPU-offload automático via Ollama para modelos 7B)
+    Mudanças em relação ao experiment_weak_gpu.yaml:
+    - 4 projetos sem scan substituídos por equivalentes scanned no mesmo domínio
+    - Social expandido 4→7 (domínio com 32.8% dos issues estava sub-representado)
+    - Government reduzido 5→4 (apenas 4 projetos scanned existem no corpus)
+    - Distribuição de tipos de issue fica dentro de ±3 p.p. do corpus completo
+
+    Achados principais (run 0380ab19):
+    1. SIZE INVERSION: qwen2.5-coder-3B (IFR=0.487) > qwen2.5-coder-7B (IFR=0.433)
+    2. LATÊNCIA vs QUALIDADE: codellama-7B lidera IFR (0.581) mas custa 19× mais tempo
+    3. VIÉS DO CORPUS: 80.6% dos arquivos têm 0 issues; IFR é métrica primária
+    4. CONSENSUS=1: todos os issues observados têm tool_consensus=1 (limitação)
+
+    Hardware de referência:
+      GPU: 4 GB VRAM (RTX 3050 4GB, GTX 1650 etc.)
+      RAM: ≥ 16 GB
       OS: Windows 10/11, Python 3.11+, Ollama ≥ 0.3.0
 
-    Runtime estimado (4 GB VRAM, 35 arquivos/projeto):
-      qwen2.5-coder-3b:  ~1.9h/rep → ~5.6h total (3 reps)
-      qwen2.5-coder-7b: ~13.7h/rep → ~41.0h total (3 reps)
-      codellama-7b:     ~35.5h/rep → ~106.5h total (3 reps)
-      Scan overhead:    ~4.0h (compartilhado, não multiplica por modelo)
-      TOTAL ESTIMADO:   ~157h / ~6.5 dias (sequencial, 1 modelo por vez)
+    Runtime estimado (4 GB VRAM, 36 proj × 35 arq = ~1.260 arq/rep):
+      qwen2.5-coder-3b:   ~2.0h/rep →   ~6.0h (3 reps)
+      qwen2.5-coder-7b:  ~14.1h/rep →  ~42.3h (3 reps)
+      codellama-7b:      ~36.6h/rep → ~109.8h (3 reps)
+      Scan overhead:      ~4.0h (não multiplica por modelo)
+      TOTAL ESTIMADO:    ~162h / ~6.8 dias
