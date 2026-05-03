@@ -1123,10 +1123,12 @@ class AblationAttemptRunner:
             record.failure_layer = 1
             record.failure_type = "invalid_patch"
             record.layer1_error_msg = f"Timeout after {self.timeout_s}s"
+            _vprint(f"        [bold red]LLM TIMEOUT after {self.timeout_s}s[/bold red]")
         except Exception as exc:  # noqa: BLE001
             record.failure_layer = 1
             record.failure_type = "invalid_patch"
             record.layer1_error_msg = str(exc)[:500]
+            _vprint(f"        [bold red]LLM ERROR: {str(exc)[:200]}[/bold red]")
 
         record.time_total_s = time.perf_counter() - t_total_start
         record.timestamp_end = _now_iso()
@@ -1179,24 +1181,33 @@ class AblationAttemptRunner:
         prompt: str,
         record: AttemptRecord,
     ) -> None:
-        """Delegate to the pipeline's agent and populate validation fields."""
-        task_with_prompt = task.model_copy(
-            update={"context": {**task.context, "_ablation_prompt": prompt}}
-        )
+        """
+        Call the LLM and run validation layers.
 
+        complete_with_metrics(system, user) → (str, dict) is the correct
+        interface: system carries the role/persona, user carries the full
+        ablation prompt (which already includes role text when the condition
+        includes C1, so we keep the system prompt minimal here).
+        """
         t_inf = time.perf_counter()
-        patch = await self.pipeline.llm_client.complete(
-            prompt=prompt,
-            temperature=0.2,
+        response_text, llm_metrics = await self.pipeline.llm_client.complete_with_metrics(
+            system=(
+                "You are an expert React accessibility engineer. "
+                "Fix the accessibility violation in the provided component "
+                "while preserving all existing functionality."
+            ),
+            user=prompt,
+            temperature=self.condition.flags.role_definition and 0.2 or 0.2,
         )
         record.time_inference_s = time.perf_counter() - t_inf
 
-        record.tokens_output = patch.tokens_completion or 0
-        record.response_truncated = _is_truncated(patch.content)
-        record.json_parse_success = _try_parse_json(patch.content)
+        record.tokens_output      = llm_metrics.get("tokens_completion") or 0
+        record.tokens_input_estimated = llm_metrics.get("tokens_prompt") or record.tokens_input_estimated
+        record.response_truncated = _is_truncated(response_text)
+        record.json_parse_success = _try_parse_json(response_text)
 
         t_val = time.perf_counter()
-        await self._run_validation(task, patch.content, record)
+        await self._run_validation(task, response_text, record)
         record.time_validation_s = time.perf_counter() - t_val
 
     async def _run_validation(
