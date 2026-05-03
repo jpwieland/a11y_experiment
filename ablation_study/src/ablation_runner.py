@@ -11,6 +11,7 @@ only the ablation-specific prompt variation is swapped in.
 Entry point:
     python -m ablation_study.src.ablation_runner [--config path] [--dry-run]
     python -m ablation_study.src.ablation_runner --condition full --model qwen2.5-coder-3b --rep 1
+    python -m ablation_study.src.ablation_runner --reset   # wipe results and start fresh
 
 Design decisions:
 - One repetition = one fresh Pipeline (model reloaded) to prevent cross-rep state.
@@ -29,6 +30,7 @@ import hashlib
 import json
 import logging
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +41,201 @@ from typing import Any
 
 import structlog
 import yaml
+
+import urllib.request
+
+from rich.console import Console
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
+# ── Verbose console (human-readable progress alongside structlog) ──────────────
+
+_console = Console(highlight=False)
+
+
+def _vprint(msg: str = "", style: str = "") -> None:
+    """Print a line to the rich console (no-op if stdout is not a tty)."""
+    _console.print(msg, style=style)
+
+
+def _vsection(title: str) -> None:
+    _console.print(Rule(f"[bold]{title}[/bold]", style="bright_blue"))
+
+
+def _vstep(icon: str, label: str, value: str = "", style: str = "white") -> None:
+    parts = f"  {icon}  [dim]{label}[/dim]"
+    if value:
+        parts += f"  [bold {style}]{value}[/bold {style}]"
+    _console.print(parts)
+
+
+# ── Ollama pre-flight validation ───────────────────────────────────────────────
+
+def _ollama_base_url(models_yaml_path: Path, model_name: str) -> str:
+    """Return the Ollama base URL for the given model (default: localhost:11434)."""
+    try:
+        spec = yaml.safe_load(models_yaml_path.read_text(encoding="utf-8"))
+        m = spec.get("models", {}).get(model_name, {})
+        url = m.get("base_url", "")
+        if url:
+            # strip /v1 suffix — Ollama native API lives at the root
+            return url.rstrip("/").removesuffix("/v1")
+    except Exception:
+        pass
+    return "http://localhost:11434"
+
+
+def _check_ollama(
+    model_names: list[str],
+    models_yaml_path: Path,
+    abort_on_error: bool = True,
+) -> bool:
+    """
+    Validate that Ollama is reachable and every required model is available.
+
+    Checks performed:
+      1. Ollama server responds to GET /api/tags (is it running?)
+      2. Each model_id appears in the tag list (is the model pulled?)
+      3. Each model responds to a minimal /api/generate call (does inference work?)
+
+    Prints a formatted summary table and returns True if all checks pass.
+    If abort_on_error=True, raises SystemExit on failure.
+    """
+    _vsection("OLLAMA PRE-FLIGHT CHECK")
+
+    # Resolve model_ids from models.yaml
+    try:
+        all_specs = yaml.safe_load(models_yaml_path.read_text(encoding="utf-8")).get("models", {})
+    except Exception as exc:
+        _vstep("✗", "Cannot read models.yaml:", str(exc), style="red")
+        if abort_on_error:
+            raise SystemExit(1)
+        return False
+
+    # Only check Ollama-backend models
+    ollama_models: list[tuple[str, str, str]] = []  # (name, model_id, base_url)
+    for name in model_names:
+        spec = all_specs.get(name, {})
+        if spec.get("backend", "") != "ollama":
+            continue
+        model_id = spec.get("model_id", name)
+        base_url = spec.get("base_url", "").rstrip("/").removesuffix("/v1") or "http://localhost:11434"
+        ollama_models.append((name, model_id, base_url))
+
+    if not ollama_models:
+        _vstep("ℹ", "No Ollama-backend models in this run — skipping check.", style="dim")
+        _vprint()
+        return True
+
+    all_ok = True
+    results: list[tuple[str, str, str, str]] = []  # (name, model_id, status_icon, message)
+
+    # Check each unique base_url
+    checked_servers: dict[str, bool] = {}
+
+    for name, model_id, base_url in ollama_models:
+        # ── 1. Server reachability ────────────────────────────────────────
+        if base_url not in checked_servers:
+            try:
+                with urllib.request.urlopen(f"{base_url}/api/tags", timeout=4) as r:
+                    tags_data = json.loads(r.read())
+                checked_servers[base_url] = True
+            except Exception as exc:
+                checked_servers[base_url] = False
+                msg = str(exc)
+                if "Connection refused" in msg or "refused" in msg.lower():
+                    hint = "Ollama not running — start it with: ollama serve"
+                elif "timed out" in msg.lower():
+                    hint = "Connection timed out — is Ollama listening?"
+                else:
+                    hint = msg[:80]
+                results.append((name, model_id, "✗", f"SERVER UNREACHABLE: {hint}"))
+                all_ok = False
+                continue
+
+        if not checked_servers[base_url]:
+            results.append((name, model_id, "✗", "SERVER UNREACHABLE (see above)"))
+            all_ok = False
+            continue
+
+        # ── 2. Model availability ─────────────────────────────────────────
+        available_tags = [m.get("name", "") for m in tags_data.get("models", [])]
+        # Ollama tags may include ":latest" suffix; match on prefix
+        model_tag_prefix = model_id.split(":")[0]
+        matched = any(t == model_id or t.startswith(model_tag_prefix) for t in available_tags)
+
+        if not matched:
+            pull_cmd = f"ollama pull {model_id}"
+            results.append((name, model_id, "✗", f"NOT PULLED — run: {pull_cmd}"))
+            all_ok = False
+            continue
+
+        # ── 3. Test inference (tiny prompt, 1 token) ──────────────────────
+        try:
+            payload = json.dumps({
+                "model": model_id,
+                "prompt": "Hi",
+                "stream": False,
+                "options": {"num_predict": 1},
+            }).encode()
+            req = urllib.request.Request(
+                f"{base_url}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as r:
+                resp = json.loads(r.read())
+            if resp.get("done") is False and "response" not in resp:
+                raise ValueError(f"Unexpected response: {str(resp)[:80]}")
+            results.append((name, model_id, "✓", "OK — inference working"))
+        except Exception as exc:
+            msg = str(exc)
+            if "model" in msg.lower() and "not found" in msg.lower():
+                results.append((name, model_id, "✗", f"MODEL NOT LOADED: {msg[:80]}"))
+            elif "timed out" in msg.lower():
+                results.append((name, model_id, "⚠", f"INFERENCE TIMEOUT (30s) — model may be loading"))
+                all_ok = False  # treat timeout as warning; don't hard-abort
+            else:
+                results.append((name, model_id, "⚠", f"INFERENCE ERROR: {msg[:80]}"))
+                all_ok = False
+
+    # ── Print results table ───────────────────────────────────────────────
+    t = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 2))
+    t.add_column("Model name",  style="cyan",  min_width=22)
+    t.add_column("Model ID",    style="dim",   min_width=26)
+    t.add_column("Status",      justify="center", min_width=4)
+    t.add_column("Details",     min_width=40)
+
+    for name, model_id, icon, msg in results:
+        if icon == "✓":
+            icon_text = Text("✓", style="bold green")
+            msg_text  = Text(msg, style="dim green")
+        elif icon == "⚠":
+            icon_text = Text("⚠", style="bold yellow")
+            msg_text  = Text(msg, style="yellow")
+        else:
+            icon_text = Text("✗", style="bold red")
+            msg_text  = Text(msg, style="red")
+        t.add_row(name, model_id, icon_text, msg_text)
+
+    _console.print(t)
+    _vprint()
+
+    if all_ok:
+        _vstep("✓", "All Ollama models healthy — experiment can proceed.", style="green")
+    else:
+        _vprint("  [bold red]✗  One or more Ollama checks failed.[/bold red]")
+        _vprint("  [dim]Fix the issues above, then re-run the experiment.[/dim]")
+        _vprint("  [dim]Pass --skip-ollama-check to bypass this check (not recommended).[/dim]")
+        if abort_on_error:
+            _vprint()
+            raise SystemExit(1)
+
+    _vprint()
+    return all_ok
+
 
 # ── Utilities (defined early — used by StatusWriter and run_all below) ─────────
 
@@ -53,7 +250,7 @@ def _is_truncated(text: str) -> bool:
     return stripped[-1] not in {"}", "`", '"', "'"}
 
 
-def _model_config_from_yaml(model_name: str, temperature_override: float) -> ModelConfig:
+def _model_config_from_yaml(model_name: str, temperature_override: float) -> "ModelConfig":
     """
     Build a ModelConfig by reading models.yaml from the repo root.
     The temperature comes from the ablation config (overrides models.yaml default).
@@ -100,6 +297,18 @@ def _try_parse_json(text: str) -> bool:
         except Exception:
             pass
     return False
+
+
+def _reset_results(results_dir: Path) -> None:
+    """Delete results_dir entirely and recreate it empty."""
+    if results_dir.exists():
+        _vprint()
+        _vsection("RESET")
+        _vstep("⚠", "Deleting results directory:", str(results_dir), style="red")
+        shutil.rmtree(results_dir)
+        _vstep("✓", "Directory removed. Starting from scratch.", style="green")
+        _vprint()
+    results_dir.mkdir(parents=True, exist_ok=True)
 
 
 # ── Status writer (feeds progress_dashboard.py) ────────────────────────────────
@@ -157,6 +366,7 @@ class StatusWriter:
             violations_done=0,
             violations_resolved=0,
             current_violation_id="",
+            current_file="",
             current_attempt=1,
             max_retries=max_retries,
             n_attempts=0,
@@ -165,6 +375,8 @@ class StatusWriter:
             layer3_fail_rate=None,
             layer4_fail_rate=None,
             cells_done=cells_done,
+            last_attempt_result="",
+            last_attempt_layers="",
         )
 
     def violation_update(
@@ -174,6 +386,7 @@ class StatusWriter:
         violations_done: int,
         violations_resolved: int,
         attempts: "list",
+        current_file: str = "",
     ) -> None:
         n_att = len(attempts)
         def _rate(layer: int) -> float | None:
@@ -184,6 +397,7 @@ class StatusWriter:
         self.update(
             stage="fixing",
             current_violation_id=violation_id,
+            current_file=current_file,
             current_attempt=attempt_number,
             violations_done=violations_done,
             violations_resolved=violations_resolved,
@@ -197,8 +411,17 @@ class StatusWriter:
             ) / n_att if n_att else None,
         )
 
-    def cell_done(self) -> None:
-        self.update(stage="done")
+    def attempt_done(self, result: str, layers_info: str) -> None:
+        self.update(last_attempt_result=result, last_attempt_layers=layers_info)
+
+    def cell_done(self, ifr: float, n_resolved: int, n_total: int, wall_s: float) -> None:
+        self.update(
+            stage="done",
+            last_cell_ifr=round(ifr, 4),
+            last_cell_resolved=n_resolved,
+            last_cell_total=n_total,
+            last_cell_wall_s=round(wall_s, 1),
+        )
 
 
 # ── Path bootstrap ─────────────────────────────────────────────────────────────
@@ -253,6 +476,39 @@ def _git_hash() -> str:
 
 # ── Corpus loading ─────────────────────────────────────────────────────────────
 
+def _load_selected_projects(selection_file: Path) -> frozenset[str]:
+    """
+    Parse the canonical experiment manifest (chosen_experiment.yaml) and return
+    the set of project folder names that should be included in the ablation.
+
+    The manifest's `files:` list contains paths like:
+        dataset/snapshots/agnaistic__agnai
+    We extract just the final component (the project name), which is also the
+    folder name under dataset/results/.
+
+    Returns frozenset of project names, or empty frozenset if file is missing.
+    """
+    if not selection_file.exists():
+        _vstep("⚠", "project_selection_file not found:", str(selection_file), style="yellow")
+        _vstep("  →", "Falling back to full corpus (all projects).", style="yellow")
+        return frozenset()
+
+    try:
+        data = yaml.safe_load(selection_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _vstep("⚠", "Cannot parse project_selection_file:", str(exc), style="yellow")
+        return frozenset()
+
+    file_entries = data.get("files", [])
+    if not file_entries:
+        _vstep("⚠", "No 'files:' list found in selection manifest.", style="yellow")
+        return frozenset()
+
+    projects = frozenset(Path(p).name for p in file_entries if p)
+    _vstep("  📋", f"Project selection loaded:", f"{len(projects)} projects from {selection_file.name}")
+    return projects
+
+
 # scan_results.json issue_type values → canonical wcag_category names
 _ISSUE_TYPE_MAP: dict[str, str] = {
     "alt-text":  "alt_text",
@@ -280,6 +536,7 @@ def load_corpus(
     subset_size: int | None = None,
     stratify_subset: bool = True,
     seed: int = 42,
+    selected_projects: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Read violations from dataset/results/*/scan_results.json.
@@ -291,29 +548,56 @@ def load_corpus(
         "issues":       list,  # raw issue dicts from scan_results.json
       }
 
-    Each issue dict retains all original fields (issue_type, tool_consensus,
-    found_by, confidence, wcag_criteria, selector, message, context, …) so
-    that the runner loop can extract per-issue metadata directly.
+    If selected_projects is provided (non-empty frozenset of project folder names),
+    only scan_results.json files whose parent directory name is in that set are
+    loaded — matching the 36-project canonical experiment corpus.
     """
-    entries: list[dict] = []
+    _vstep("📂", "Loading corpus from:", str(corpus_results_dir))
 
-    for scan_file in sorted(corpus_results_dir.glob("*/scan_results.json")):
+    entries: list[dict] = []
+    scan_files = sorted(corpus_results_dir.glob("*/scan_results.json"))
+
+    if not scan_files:
+        raise FileNotFoundError(
+            f"No scan_results.json files found under:\n"
+            f"  {corpus_results_dir}\n"
+        )
+
+    # Apply project filter when a selection manifest was loaded
+    if selected_projects:
+        all_count = len(scan_files)
+        scan_files = [f for f in scan_files if f.parent.name in selected_projects]
+        _vstep(
+            "  🔍", "Project filter applied:",
+            f"{len(scan_files)} selected / {all_count} total projects"
+        )
+        missing = selected_projects - {f.parent.name for f in scan_files}
+        if missing:
+            _vstep(
+                "  ⚠", f"{len(missing)} selected project(s) have no scan_results.json:",
+                "  ".join(sorted(missing)[:5]) + ("…" if len(missing) > 5 else ""),
+                style="yellow",
+            )
+
+    skipped_projects = 0
+    total_issues_raw = 0
+
+    for scan_file in scan_files:
         try:
             data = json.loads(scan_file.read_text(encoding="utf-8"))
         except Exception as exc:
             log.warning("scan_file_read_error", path=str(scan_file), error=str(exc))
+            skipped_projects += 1
             continue
 
         for file_entry in data:
             file_path = file_entry.get("file", "")
-            unresolved = [
-                i for i in file_entry.get("issues", [])
-                if not i.get("resolved", False)
-            ]
+            all_issues = file_entry.get("issues", [])
+            unresolved = [i for i in all_issues if not i.get("resolved", False)]
+            total_issues_raw += len(all_issues)
             if not unresolved:
                 continue
 
-            # Read source from disk; fall back to "" if the path is inaccessible
             content = ""
             try:
                 content = Path(file_path).read_text(encoding="utf-8")
@@ -333,12 +617,22 @@ def load_corpus(
             f"Check that the path is correct and that the experiment has been run."
         )
 
+    n_violations = sum(len(e["issues"]) for e in entries)
+    _vstep("  ✓", "Projects scanned:", str(len(scan_files)))
+    _vstep("  ✓", "Files with violations:", str(len(entries)))
+    _vstep("  ✓", "Unresolved violations:", str(n_violations))
+    if skipped_projects:
+        _vstep("  ⚠", "Projects skipped (read error):", str(skipped_projects), style="yellow")
+
     if subset_size is not None and subset_size < len(entries):
+        _vstep("  ✂", f"Subsetting to {subset_size} files (stratified={stratify_subset}, seed={seed})")
         if stratify_subset:
             entries = _stratified_sample(entries, subset_size, seed)
         else:
             rng = random.Random(seed)
             entries = rng.sample(entries, subset_size)
+        n_violations = sum(len(e["issues"]) for e in entries)
+        _vstep("  ✓", "After subset — violations:", str(n_violations))
 
     return entries
 
@@ -479,6 +773,29 @@ class AblationAttemptRunner:
                 record.failure_layer = 1
                 record.failure_type = "invalid_patch"
 
+        # ── Verbose attempt outcome ──────────────────────────────────────────
+        layers_info = (
+            f"L1={'✓' if record.layer1_syntax_pass else '✗'} "
+            f"L2={'✓' if record.layer2_functional_pass else '✗'} "
+            f"L3={'✓' if record.layer3_domain_pass else '✗'} "
+            f"L4={'✓' if record.layer4_quality_pass else '✗'}"
+        )
+        if record.attempt_success:
+            outcome_icon, outcome_style = "✓", "green"
+            outcome_label = "FIXED"
+        else:
+            outcome_icon, outcome_style = "✗", "red"
+            outcome_label = f"FAIL @ layer {record.failure_layer} ({record.failure_type or '?'})"
+
+        short_vid = (violation_id[-55:] if len(violation_id) > 55 else violation_id)
+        _vprint(
+            f"      [{outcome_style}]{outcome_icon}[/{outcome_style}] "
+            f"[dim]att {attempt_number}[/dim]  "
+            f"[{outcome_style}]{outcome_label}[/{outcome_style}]  "
+            f"[dim]{layers_info}  {record.time_total_s:.1f}s[/dim]  "
+            f"[dim italic]…{short_vid}[/dim italic]"
+        )
+
         return record
 
     async def _call_agent(
@@ -489,9 +806,6 @@ class AblationAttemptRunner:
         record: AttemptRecord,
     ) -> None:
         """Delegate to the pipeline's agent and populate validation fields."""
-        # Use the pipeline's internal DirectLLMAgent with the ablation prompt.
-        # The pipeline normally builds the prompt internally; here we bypass
-        # PromptBuilder by passing the pre-built prompt via task.context.
         task_with_prompt = task.model_copy(
             update={"context": {**task.context, "_ablation_prompt": prompt}}
         )
@@ -528,8 +842,8 @@ class AblationAttemptRunner:
         record.time_layer1_s = time.perf_counter() - t1
         record.layer1_syntax_pass = l1.passed
         record.layer1_error_msg = l1.error or ""
-
         if not l1.passed:
+            _vprint(f"        [dim red]L1 syntax error: {record.layer1_error_msg[:120]}[/dim red]")
             return
 
         # Layer 2 — functional
@@ -538,8 +852,8 @@ class AblationAttemptRunner:
         record.time_layer2_s = time.perf_counter() - t2
         record.layer2_functional_pass = l2.passed
         record.layer2_error_msg = l2.error or ""
-
         if not l2.passed:
+            _vprint(f"        [dim red]L2 functional error: {record.layer2_error_msg[:120]}[/dim red]")
             return
 
         # Layer 3 — domain (Pa11y re-scan)
@@ -550,8 +864,11 @@ class AblationAttemptRunner:
         record.layer3_domain_pass = l3.passed
         record.layer3_error_msg = l3.error or ""
         record.layer3_new_violations_introduced = l3.new_violations or 0
-
         if not l3.passed:
+            _vprint(
+                f"        [dim red]L3 domain error: {record.layer3_error_msg[:120]}"
+                f"  new_violations={record.layer3_new_violations_introduced}[/dim red]"
+            )
             return
 
         # Layer 4 — quality (ESLint + complexity, soft)
@@ -561,6 +878,11 @@ class AblationAttemptRunner:
         record.layer4_quality_pass = l4.passed
         record.layer4_eslint_errors = l4.eslint_errors or 0
         record.layer4_complexity_violations = l4.complexity_violations or 0
+        if not l4.passed:
+            _vprint(
+                f"        [dim yellow]L4 quality (soft): eslint={record.layer4_eslint_errors} "
+                f"complexity={record.layer4_complexity_violations}[/dim yellow]"
+            )
 
 
 # ── Single-run orchestrator ────────────────────────────────────────────────────
@@ -609,6 +931,22 @@ class SingleRunOrchestrator:
         self.subset_size    = corpus_cfg.get("subset_size", None)
         self.stratify       = corpus_cfg.get("stratify_subset", True)
 
+        # Load canonical project selection (chosen_experiment.yaml)
+        selection_rel = corpus_cfg.get("project_selection_file")
+        self.selected_projects: frozenset[str] = frozenset()
+        if selection_rel:
+            exp_dir = results_dir.parent  # results/ → ablation_study/
+            # walk up to a11y_experiment/ (ablation_study/../)
+            sel_path = (exp_dir.parent / selection_rel.lstrip("../")).resolve()
+            # fallback: resolve relative to repo root
+            sel_path_alt = (_REPO_ROOT / Path(selection_rel.lstrip("../"))).resolve()
+            for candidate in (sel_path, sel_path_alt):
+                if candidate.exists():
+                    self.selected_projects = _load_selected_projects(candidate)
+                    break
+            else:
+                _vstep("⚠", "Could not locate project_selection_file:", selection_rel, style="yellow")
+
         out_cfg = config.get("output", {})
         self.write_prompt_log    = out_cfg.get("write_prompt_log", True)
         self.prompt_log_max_chars = out_cfg.get("prompt_log_max_chars", 8000)
@@ -621,14 +959,17 @@ class SingleRunOrchestrator:
             subset_size=self.subset_size,
             stratify_subset=self.stratify,
             seed=self.seed,
+            selected_projects=self.selected_projects or None,
         )
 
-        # Shuffle file order deterministically per seed
         rng = random.Random(self.seed)
         rng.shuffle(entries)
 
-        # Count total violations for status reporting
+        n_files = len(entries)
         n_violations_total = sum(len(e.get("issues", [])) for e in entries if e.get("issues"))
+
+        _vprint(f"  [dim]Files to process: [bold]{n_files}[/bold]  |  Violations: [bold]{n_violations_total}[/bold][/dim]")
+        _vprint()
 
         if self.status_writer:
             self.status_writer.cell_start(
@@ -672,7 +1013,7 @@ class SingleRunOrchestrator:
         violations_done = 0
         violations_resolved = 0
 
-        for entry in entries:
+        for file_idx, entry in enumerate(entries, 1):
             file_path   = entry["file_path"]
             issues_raw  = entry.get("issues", [])
             file_content = entry.get("file_content", "")
@@ -686,11 +1027,18 @@ class SingleRunOrchestrator:
             if not issues:
                 continue
 
+            short_path = Path(file_path).name
+            _vprint(
+                f"  [bold white]▶ File {file_idx}/{n_files}[/bold white]  "
+                f"[cyan]{short_path}[/cyan]  "
+                f"[dim]({len(issues)} violation{'s' if len(issues) != 1 else ''})[/dim]"
+            )
+
             file_attempts:   list[AttemptRecord] = []
             file_violations = []
+            file_resolved = 0
 
             for issue, raw_issue in zip(issues, issues_raw):
-                # Read per-issue metadata directly from the scan_results fields
                 raw_dict    = raw_issue if isinstance(raw_issue, dict) else {}
                 confidence  = _issue_confidence(raw_dict)
                 n_tools     = raw_dict.get("tool_consensus", 1)
@@ -698,6 +1046,13 @@ class SingleRunOrchestrator:
                 wcag_cat    = _normalise_category(raw_dict.get("issue_type", "aria"))
 
                 violation_id = f"{file_path}:{issue.selector}:{issue.wcag_criteria}"
+
+                _vprint(
+                    f"    [dim]⬡ [{wcag_cat}] WCAG {issue.wcag_criteria or '?'}  "
+                    f"confidence={confidence}  tools={n_tools}  "
+                    f"selector=[italic]{(issue.selector or '')[:60]}[/italic][/dim]"
+                )
+
                 violation_attempts: list[AttemptRecord] = []
 
                 task = AgentTask(
@@ -714,6 +1069,7 @@ class SingleRunOrchestrator:
                             violations_done=violations_done,
                             violations_resolved=violations_resolved,
                             attempts=all_attempts,
+                            current_file=file_path,
                         )
 
                     rec = await attempt_runner.run_attempt(
@@ -734,8 +1090,10 @@ class SingleRunOrchestrator:
                         break
 
                 violations_done += 1
-                if any(a.attempt_success for a in violation_attempts):
+                resolved_this = any(a.attempt_success for a in violation_attempts)
+                if resolved_this:
                     violations_resolved += 1
+                    file_resolved += 1
 
                 vr = aggregate_violation_record(
                     violation_attempts,
@@ -748,6 +1106,13 @@ class SingleRunOrchestrator:
                 file_violations.append(vr)
                 all_violations.append(vr)
                 file_attempts.extend(violation_attempts)
+
+            file_ifr = file_resolved / len(issues) if issues else 0.0
+            _vprint(
+                f"    [dim]└ File IFR: "
+                f"[bold {'green' if file_ifr >= 0.5 else 'yellow'}]{file_resolved}/{len(issues)} "
+                f"({file_ifr*100:.0f}%)[/bold {'green' if file_ifr >= 0.5 else 'yellow'}][/dim]"
+            )
 
             fr = aggregate_file_record(
                 file_violations,
@@ -782,7 +1147,20 @@ class SingleRunOrchestrator:
         collector.write_summary(summary)
 
         if self.status_writer:
-            self.status_writer.cell_done()
+            self.status_writer.cell_done(
+                ifr=summary.ifr,
+                n_resolved=summary.n_violations_resolved,
+                n_total=summary.n_violations_total,
+                wall_s=wall_clock_s,
+            )
+
+        _vprint()
+        _vprint(
+            f"  [bold green]■ Cell done[/bold green]  "
+            f"IFR=[bold magenta]{summary.ifr*100:.2f}%[/bold magenta]  "
+            f"resolved=[bold]{summary.n_violations_resolved}/{summary.n_violations_total}[/bold]  "
+            f"wall={wall_clock_s:.1f}s"
+        )
 
         log.info(
             "run_done",
@@ -797,6 +1175,7 @@ class SingleRunOrchestrator:
 
     def _build_pipeline(self) -> Pipeline:
         model_cfg = _model_config_from_yaml(self.model_name, self.temperature)
+        _vstep("  🔧", "Loading model:", f"{self.model_name}  [{model_cfg.backend.value}]")
         settings = Settings()
         return Pipeline(settings=settings, model_config=model_cfg, agent_preference=AgentType.AUTO)
 
@@ -810,23 +1189,27 @@ class AblationStudyOrchestrator:
 
     Skips already-completed runs (summary.json exists) to allow restart
     after partial failures without re-running completed cells.
+    Pass reset=True to wipe results_dir before starting.
     """
 
     def __init__(
         self,
         config_path: Path,
         dry_run: bool = False,
+        reset: bool = False,
+        skip_ollama_check: bool = False,
         corpus_dir_override: Path | None = None,
     ) -> None:
         self.config_path = config_path
         self.dry_run = dry_run
+        self.reset = reset
+        self.skip_ollama_check = skip_ollama_check
 
         exp_dir = config_path.parent.parent
         self.config = load_config(config_path)
 
         results_rel = self.config.get("output", {}).get("results_dir", "results")
         self.results_dir = (exp_dir / results_rel).resolve()
-        self.results_dir.mkdir(parents=True, exist_ok=True)
 
         corpus_cfg = self.config.get("corpus", {})
         if corpus_dir_override is not None:
@@ -858,6 +1241,12 @@ class AblationStudyOrchestrator:
         model_filter: list[str] | None = None,
         rep_filter: list[int] | None = None,
     ) -> None:
+        # ── Reset if requested ───────────────────────────────────────────────
+        if self.reset:
+            _reset_results(self.results_dir)
+        else:
+            self.results_dir.mkdir(parents=True, exist_ok=True)
+
         conditions = list(CONDITIONS.values())
         if condition_filter:
             conditions = [c for c in conditions if c.id in condition_filter]
@@ -872,6 +1261,28 @@ class AblationStudyOrchestrator:
 
         total = len(conditions) * len(models) * len(reps)
         done  = 0
+
+        # ── Banner ───────────────────────────────────────────────────────────
+        _vprint()
+        _vsection("ABLATION STUDY — START")
+        _vstep("📋", "Experiment:", self.config.get("experiment", {}).get("name", "?"))
+        _vstep("📁", "Results dir:", str(self.results_dir))
+        _vstep("📦", "Corpus dir:", str(self.corpus_results_dir))
+        _vstep("🔢", "Conditions:", str(len(conditions)))
+        _vstep("🤖", "Models:", "  ".join(models))
+        _vstep("🔁", "Repetitions:", str(len(reps)))
+        _vstep("📊", "Total cells:", str(total))
+        if self.dry_run:
+            _vstep("🏃", "Mode:", "DRY RUN — no LLM calls will be made", style="yellow")
+        _vprint()
+
+        # ── Ollama pre-flight ────────────────────────────────────────────────
+        if not self.skip_ollama_check and not self.dry_run:
+            _check_ollama(
+                model_names=models,
+                models_yaml_path=_REPO_ROOT / "models.yaml",
+                abort_on_error=True,
+            )
 
         study_start = _now_iso()
         status_writer = StatusWriter(
@@ -889,7 +1300,17 @@ class AblationStudyOrchestrator:
                         self.results_dir
                         / condition.id / model / f"rep{rep}" / "summary.json"
                     )
+
+                    # ── Cell header ──────────────────────────────────────────
+                    _vsection(
+                        f"Cell {done + 1}/{total}  │  {condition.id}  ×  {model}  ×  rep{rep}"
+                    )
+                    _vstep("🔑", "Condition:", condition.label)
+                    _vstep("🤖", "Model:", model)
+                    _vstep("🔁", "Rep / Seed:", f"{rep} / {seed}")
+
                     if summary_path.exists():
+                        _vstep("⏭", "Status:", "SKIPPED — summary.json already exists", style="dim")
                         log.info("skip_existing", condition=condition.id, model=model, rep=rep)
                         done += 1
                         continue
@@ -904,7 +1325,7 @@ class AblationStudyOrchestrator:
                     )
 
                     if self.dry_run:
-                        log.info("dry_run_skip")
+                        _vstep("🏃", "Status:", "DRY RUN — skipping execution", style="yellow")
                         done += 1
                         continue
 
@@ -921,6 +1342,12 @@ class AblationStudyOrchestrator:
                     )
                     await runner.run()
                     done += 1
+
+        _vprint()
+        _vsection("STUDY COMPLETE")
+        _vstep("✓", "Total cells run:", str(done))
+        _vstep("📁", "Results saved to:", str(self.results_dir))
+        _vprint()
 
         log.info("study_complete", total_runs=total)
 
@@ -962,6 +1389,16 @@ def _parse_args() -> argparse.Namespace:
         help="List planned runs without executing them",
     )
     p.add_argument(
+        "--reset",
+        action="store_true",
+        help="Delete the entire results directory before starting (forces all cells to re-run)",
+    )
+    p.add_argument(
+        "--skip-ollama-check",
+        action="store_true",
+        help="Skip Ollama pre-flight validation (not recommended)",
+    )
+    p.add_argument(
         "--list-conditions",
         action="store_true",
         help="Print all conditions and exit",
@@ -988,6 +1425,8 @@ async def _main() -> None:
     orchestrator = AblationStudyOrchestrator(
         config_path=args.config,
         dry_run=args.dry_run,
+        reset=args.reset,
+        skip_ollama_check=args.skip_ollama_check,
         corpus_dir_override=args.corpus_dir,
     )
     await orchestrator.run_all(

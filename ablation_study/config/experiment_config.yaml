@@ -17,12 +17,18 @@ experiment:
 # ── Corpus ──────────────────────────────────────────────────────────────────
 corpus:
   corpus_results_dir: "../dataset/results"
+  # Path to the canonical experiment manifest (chosen_experiment.yaml).
+  # When set, only the 36 projects listed under its `files:` key are processed.
+  # Paths in the manifest use dataset/snapshots/<name>; the runner maps them
+  # to dataset/results/<name>/scan_results.json automatically.
+  # Set to null to run on the full corpus (196 projects, 44k+ violations).
+  project_selection_file: "../experiments/chosen_experiment.yaml"
   # Only process files that have at least one detected violation.
   # Regression-guard files (no violations) are excluded from ablation
   # because they contribute trivially to SR and add compute cost
   # without informative signal for prompt-component analysis.
   include_regression_guards: false
-  # Subset size for exploratory runs (null = full corpus of 338 violations)
+  # Subset size for exploratory runs (null = use all selected projects)
   subset_size: null
   # Stratify subset by WCAG category to maintain distribution
   stratify_subset: true
