@@ -86,25 +86,95 @@ def _ollama_base_url(models_yaml_path: Path, model_name: str) -> str:
     return "http://localhost:11434"
 
 
+def _ollama_pull(model_id: str, base_url: str) -> bool:
+    """
+    Pull a model via `ollama pull`, streaming progress lines to the console.
+    Falls back to the Ollama HTTP pull API if the CLI is not on PATH.
+    Returns True on success.
+    """
+    _vprint(f"  [bold yellow]⬇  Pulling {model_id} …[/bold yellow]")
+
+    # ── Try CLI first (gives a nice progress bar) ─────────────────────────
+    try:
+        proc = subprocess.Popen(
+            ["ollama", "pull", model_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _vprint(f"     [dim]{line}[/dim]")
+        proc.wait()
+        if proc.returncode == 0:
+            _vstep("  ✓", f"{model_id} pulled successfully.", style="green")
+            return True
+        _vstep("  ✗", f"ollama pull exited with code {proc.returncode}", style="red")
+        return False
+    except FileNotFoundError:
+        pass  # ollama CLI not on PATH — try HTTP API
+
+    # ── HTTP API fallback: POST /api/pull (streaming NDJSON) ──────────────
+    _vstep("  ℹ", "ollama CLI not found — using HTTP pull API", style="dim")
+    try:
+        payload = json.dumps({"name": model_id, "stream": True}).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/pull",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=600) as r:
+            for raw_line in r:
+                try:
+                    obj = json.loads(raw_line)
+                    status = obj.get("status", "")
+                    total  = obj.get("total", 0)
+                    compl  = obj.get("completed", 0)
+                    if total:
+                        pct = compl / total * 100
+                        _vprint(f"     [dim]{status}  {pct:.1f}%[/dim]", end="\r")
+                    else:
+                        _vprint(f"     [dim]{status}[/dim]")
+                except Exception:
+                    pass
+        _vprint()
+        _vstep("  ✓", f"{model_id} pulled via HTTP API.", style="green")
+        return True
+    except Exception as exc:
+        _vstep("  ✗", f"HTTP pull failed: {str(exc)[:120]}", style="red")
+        return False
+
+
+def _ollama_tags(base_url: str) -> tuple[bool, dict]:
+    """Fetch /api/tags. Returns (server_ok, tags_data)."""
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=5) as r:
+            return True, json.loads(r.read())
+    except Exception:
+        return False, {}
+
+
 def _check_ollama(
     model_names: list[str],
     models_yaml_path: Path,
     abort_on_error: bool = True,
+    auto_pull: bool = True,
 ) -> bool:
     """
     Validate that Ollama is reachable and every required model is available.
+    Missing models are pulled automatically (disable with auto_pull=False).
 
     Checks performed:
-      1. Ollama server responds to GET /api/tags (is it running?)
-      2. Each model_id appears in the tag list (is the model pulled?)
-      3. Each model responds to a minimal /api/generate call (does inference work?)
-
-    Prints a formatted summary table and returns True if all checks pass.
-    If abort_on_error=True, raises SystemExit on failure.
+      1. Ollama server responds to GET /api/tags
+      2. Each model_id is present — auto-pulled if missing
+      3. Each model responds to a 1-token inference call
     """
     _vsection("OLLAMA PRE-FLIGHT CHECK")
 
-    # Resolve model_ids from models.yaml
+    # Resolve specs from models.yaml
     try:
         all_specs = yaml.safe_load(models_yaml_path.read_text(encoding="utf-8")).get("models", {})
     except Exception as exc:
@@ -129,49 +199,67 @@ def _check_ollama(
         return True
 
     all_ok = True
-    results: list[tuple[str, str, str, str]] = []  # (name, model_id, status_icon, message)
+    results: list[tuple[str, str, str, str]] = []  # (name, model_id, icon, message)
 
-    # Check each unique base_url
-    checked_servers: dict[str, bool] = {}
+    # Cache server reachability and tags per base_url
+    server_ok:  dict[str, bool] = {}
+    tags_cache: dict[str, dict] = {}
 
     for name, model_id, base_url in ollama_models:
+
         # ── 1. Server reachability ────────────────────────────────────────
-        if base_url not in checked_servers:
-            try:
-                with urllib.request.urlopen(f"{base_url}/api/tags", timeout=4) as r:
-                    tags_data = json.loads(r.read())
-                checked_servers[base_url] = True
-            except Exception as exc:
-                checked_servers[base_url] = False
-                msg = str(exc)
-                if "Connection refused" in msg or "refused" in msg.lower():
-                    hint = "Ollama not running — start it with: ollama serve"
-                elif "timed out" in msg.lower():
-                    hint = "Connection timed out — is Ollama listening?"
+        if base_url not in server_ok:
+            ok, tags_data = _ollama_tags(base_url)
+            server_ok[base_url]  = ok
+            tags_cache[base_url] = tags_data
+
+            if not ok:
+                msg = str(base_url)
+                hint = (
+                    "Ollama is not running. Start it with:  ollama serve"
+                    if "localhost" in base_url
+                    else f"Cannot reach {base_url}"
+                )
+                _vprint()
+                _vprint(f"  [bold red]✗  SERVER UNREACHABLE: {hint}[/bold red]")
+                _vprint("  [dim]Start Ollama, wait a few seconds, then re-run.[/dim]")
+                _vprint()
+
+        if not server_ok[base_url]:
+            results.append((name, model_id, "✗", "server unreachable"))
+            all_ok = False
+            continue
+
+        tags_data = tags_cache[base_url]
+
+        # ── 2. Model availability — auto-pull if missing ──────────────────
+        def _is_available(tags: dict) -> bool:
+            available = [m.get("name", "") for m in tags.get("models", [])]
+            prefix = model_id.split(":")[0]
+            return any(t == model_id or t.startswith(prefix) for t in available)
+
+        if not _is_available(tags_data):
+            if auto_pull:
+                _vprint()
+                pulled = _ollama_pull(model_id, base_url)
+                if pulled:
+                    # Refresh tags after pull
+                    _, fresh_tags = _ollama_tags(base_url)
+                    tags_cache[base_url] = fresh_tags
+                    if not _is_available(fresh_tags):
+                        results.append((name, model_id, "✗", "pull reported success but model still not listed"))
+                        all_ok = False
+                        continue
                 else:
-                    hint = msg[:80]
-                results.append((name, model_id, "✗", f"SERVER UNREACHABLE: {hint}"))
+                    results.append((name, model_id, "✗", f"auto-pull failed — run manually: ollama pull {model_id}"))
+                    all_ok = False
+                    continue
+            else:
+                results.append((name, model_id, "✗", f"not pulled — run: ollama pull {model_id}"))
                 all_ok = False
                 continue
 
-        if not checked_servers[base_url]:
-            results.append((name, model_id, "✗", "SERVER UNREACHABLE (see above)"))
-            all_ok = False
-            continue
-
-        # ── 2. Model availability ─────────────────────────────────────────
-        available_tags = [m.get("name", "") for m in tags_data.get("models", [])]
-        # Ollama tags may include ":latest" suffix; match on prefix
-        model_tag_prefix = model_id.split(":")[0]
-        matched = any(t == model_id or t.startswith(model_tag_prefix) for t in available_tags)
-
-        if not matched:
-            pull_cmd = f"ollama pull {model_id}"
-            results.append((name, model_id, "✗", f"NOT PULLED — run: {pull_cmd}"))
-            all_ok = False
-            continue
-
-        # ── 3. Test inference (tiny prompt, 1 token) ──────────────────────
+        # ── 3. Test inference (1 token) ───────────────────────────────────
         try:
             payload = json.dumps({
                 "model": model_id,
@@ -185,40 +273,35 @@ def _check_ollama(
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=60) as r:
                 resp = json.loads(r.read())
             if resp.get("done") is False and "response" not in resp:
                 raise ValueError(f"Unexpected response: {str(resp)[:80]}")
-            results.append((name, model_id, "✓", "OK — inference working"))
+            results.append((name, model_id, "✓", "inference OK"))
         except Exception as exc:
             msg = str(exc)
-            if "model" in msg.lower() and "not found" in msg.lower():
-                results.append((name, model_id, "✗", f"MODEL NOT LOADED: {msg[:80]}"))
-            elif "timed out" in msg.lower():
-                results.append((name, model_id, "⚠", f"INFERENCE TIMEOUT (30s) — model may be loading"))
-                all_ok = False  # treat timeout as warning; don't hard-abort
+            if "timed out" in msg.lower():
+                # Model may be loading into VRAM — not a hard failure
+                results.append((name, model_id, "⚠", "inference timeout (60s) — model may still be loading into VRAM"))
             else:
-                results.append((name, model_id, "⚠", f"INFERENCE ERROR: {msg[:80]}"))
+                results.append((name, model_id, "✗", f"inference error: {msg[:100]}"))
                 all_ok = False
 
-    # ── Print results table ───────────────────────────────────────────────
+    # ── Summary table ─────────────────────────────────────────────────────
+    _vprint()
     t = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 2))
-    t.add_column("Model name",  style="cyan",  min_width=22)
-    t.add_column("Model ID",    style="dim",   min_width=26)
-    t.add_column("Status",      justify="center", min_width=4)
-    t.add_column("Details",     min_width=40)
+    t.add_column("Model name",  style="cyan", min_width=22)
+    t.add_column("Model ID",    style="dim",  min_width=26)
+    t.add_column("Status", justify="center",  min_width=4)
+    t.add_column("Details", min_width=44)
 
-    for name, model_id, icon, msg in results:
+    for r_name, r_id, icon, msg in results:
         if icon == "✓":
-            icon_text = Text("✓", style="bold green")
-            msg_text  = Text(msg, style="dim green")
+            t.add_row(r_name, r_id, Text("✓", style="bold green"),  Text(msg, style="dim green"))
         elif icon == "⚠":
-            icon_text = Text("⚠", style="bold yellow")
-            msg_text  = Text(msg, style="yellow")
+            t.add_row(r_name, r_id, Text("⚠", style="bold yellow"), Text(msg, style="yellow"))
         else:
-            icon_text = Text("✗", style="bold red")
-            msg_text  = Text(msg, style="red")
-        t.add_row(name, model_id, icon_text, msg_text)
+            t.add_row(r_name, r_id, Text("✗", style="bold red"),    Text(msg, style="red"))
 
     _console.print(t)
     _vprint()
@@ -228,7 +311,6 @@ def _check_ollama(
     else:
         _vprint("  [bold red]✗  One or more Ollama checks failed.[/bold red]")
         _vprint("  [dim]Fix the issues above, then re-run the experiment.[/dim]")
-        _vprint("  [dim]Pass --skip-ollama-check to bypass this check (not recommended).[/dim]")
         if abort_on_error:
             _vprint()
             raise SystemExit(1)
@@ -1198,12 +1280,14 @@ class AblationStudyOrchestrator:
         dry_run: bool = False,
         reset: bool = False,
         skip_ollama_check: bool = False,
+        auto_pull: bool = True,
         corpus_dir_override: Path | None = None,
     ) -> None:
         self.config_path = config_path
         self.dry_run = dry_run
         self.reset = reset
         self.skip_ollama_check = skip_ollama_check
+        self.auto_pull = auto_pull
 
         exp_dir = config_path.parent.parent
         self.config = load_config(config_path)
@@ -1282,6 +1366,7 @@ class AblationStudyOrchestrator:
                 model_names=models,
                 models_yaml_path=_REPO_ROOT / "models.yaml",
                 abort_on_error=True,
+                auto_pull=self.auto_pull,
             )
 
         study_start = _now_iso()
@@ -1399,6 +1484,11 @@ def _parse_args() -> argparse.Namespace:
         help="Skip Ollama pre-flight validation (not recommended)",
     )
     p.add_argument(
+        "--no-auto-pull",
+        action="store_true",
+        help="Do not auto-pull missing Ollama models — just report and abort",
+    )
+    p.add_argument(
         "--list-conditions",
         action="store_true",
         help="Print all conditions and exit",
@@ -1427,6 +1517,7 @@ async def _main() -> None:
         dry_run=args.dry_run,
         reset=args.reset,
         skip_ollama_check=args.skip_ollama_check,
+        auto_pull=not args.no_auto_pull,
         corpus_dir_override=args.corpus_dir,
     )
     await orchestrator.run_all(
