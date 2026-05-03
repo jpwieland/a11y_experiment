@@ -175,7 +175,49 @@ def _configure_gpu_env(gpu: dict[str, Any]) -> None:
     os.environ.setdefault("OLLAMA_NUM_PARALLEL",   "1")    # 1 request at a time (ablation)
 
 
-def _validate_gpu_section(gpu: dict[str, Any]) -> None:
+def _ollama_loaded_models(base_url: str) -> list[dict]:
+    """Return the list of models currently loaded in Ollama (/api/ps)."""
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/ps", timeout=4) as r:
+            return json.loads(r.read()).get("models", [])
+    except Exception:
+        return []
+
+
+def _ollama_unload_all(base_url: str) -> int:
+    """
+    Unload every model currently loaded in Ollama by sending keep_alive=0.
+    Returns the number of models unloaded.
+    """
+    unloaded = 0
+    for m in _ollama_loaded_models(base_url):
+        model_name = m.get("name", "")
+        if not model_name:
+            continue
+        try:
+            payload = json.dumps({
+                "model": model_name,
+                "keep_alive": 0,
+                "prompt": "",
+                "stream": False,
+            }).encode()
+            req = urllib.request.Request(
+                f"{base_url}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                r.read()
+            unloaded += 1
+        except Exception:
+            pass
+    if unloaded:
+        time.sleep(1)  # give Ollama a moment to release VRAM
+    return unloaded
+
+
+def _validate_gpu_section(gpu: dict[str, Any], base_url: str = "http://localhost:11434") -> None:
     """Print the GPU section of the pre-flight report and configure env vars."""
     _vsection("NVIDIA / CUDA GPU CHECK")
 
@@ -186,13 +228,13 @@ def _validate_gpu_section(gpu: dict[str, Any]) -> None:
         return
 
     total_gb = (gpu["vram_total_mb"] or 0) / 1024
-    free_gb  = (gpu["vram_free_mb"]  or 0) / 1024
     used_gb  = (gpu["vram_used_mb"]  or 0) / 1024
+    vram_pct = (gpu["vram_used_mb"] or 0) / max(gpu["vram_total_mb"] or 1, 1)
 
     bar_w  = 24
-    used_f = int(bar_w * (gpu["vram_used_mb"] or 0) / max(gpu["vram_total_mb"] or 1, 1))
+    used_f = int(bar_w * vram_pct)
     vbar   = "█" * used_f + "░" * (bar_w - used_f)
-    v_color = "red" if used_f / bar_w > 0.85 else "yellow" if used_f / bar_w > 0.6 else "cyan"
+    v_color = "red" if vram_pct > 0.85 else "yellow" if vram_pct > 0.6 else "cyan"
 
     _vstep("✓", "NVIDIA GPU detected:", gpu["name"] or "?", style="green")
     _vstep("  ", "Driver version:", gpu["driver_version"] or "?")
@@ -203,10 +245,28 @@ def _validate_gpu_section(gpu: dict[str, Any]) -> None:
         f"[bold]{used_gb:.1f} / {total_gb:.1f} GB[/bold]"
     )
 
-    # Apply GPU env vars
+    # ── Free stale VRAM if > 60 % occupied ──────────────────────────────
+    if vram_pct > 0.60:
+        loaded = _ollama_loaded_models(base_url)
+        if loaded:
+            names = ", ".join(m.get("name", "?") for m in loaded)
+            _vprint()
+            _vstep("⚠", "VRAM is heavily used. Ollama has models loaded:", names, style="yellow")
+            _vstep("  →", "Unloading them to free VRAM for the experiment…")
+            n = _ollama_unload_all(base_url)
+            if n:
+                # Re-read VRAM after unload
+                fresh = _detect_nvidia_gpu()
+                new_used_gb = (fresh.get("vram_used_mb") or 0) / 1024
+                _vstep("  ✓", f"Unloaded {n} model(s).", f"VRAM now: {new_used_gb:.1f} / {total_gb:.1f} GB", style="green")
+                # Update reference for the rest of the check
+                gpu.update(fresh)
+            else:
+                _vstep("  ⚠", "Could not unload — unload manually if inference is slow.", style="yellow")
+
+    # ── Apply GPU env vars ───────────────────────────────────────────────
     _configure_gpu_env(gpu)
 
-    # Show which env vars were set
     env_vars = {
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "—"),
         "OLLAMA_NUM_GPU":        os.environ.get("OLLAMA_NUM_GPU",       "—"),
@@ -214,44 +274,59 @@ def _validate_gpu_section(gpu: dict[str, Any]) -> None:
         "OLLAMA_KEEP_ALIVE":     os.environ.get("OLLAMA_KEEP_ALIVE",    "—"),
     }
     _vprint()
-    _vstep("⚙", "GPU environment configured for this process:")
+    _vstep("⚙", "GPU environment configured:")
     for var, val in env_vars.items():
         _vprint(f"    [dim]{var}[/dim] = [cyan]{val}[/cyan]")
     _vprint()
     _vprint(
-        "  [dim italic]Note: OLLAMA_NUM_GPU and OLLAMA_KEEP_ALIVE take effect only "
-        "when Ollama starts. If Ollama is already running without GPU, "
-        "restart it with these env vars set.[/dim italic]"
+        "  [dim italic]OLLAMA_NUM_GPU / OLLAMA_KEEP_ALIVE take effect at Ollama startup. "
+        "If Ollama is already running without GPU, restart it with these env vars set.[/dim italic]"
     )
     _vprint()
 
 
-def _check_ollama_gpu_usage(model_id: str, base_url: str) -> tuple[bool, float]:
+def _check_ollama_gpu_usage(model_id: str, base_url: str) -> tuple[bool, str]:
     """
-    Confirm Ollama is routing inference through the GPU by measuring VRAM delta
-    during a tiny generation call.
+    Confirm the model is loaded on the NVIDIA GPU.
 
-    Returns (gpu_used: bool, vram_delta_mb: float).
-    gpu_used is True if VRAM increased by at least 50 MB during inference
-    (indicating the model is loaded on GPU, not CPU-only).
+    Strategy (in priority order):
+      1. /api/ps — if size_vram > 0 for this model, GPU is confirmed directly.
+      2. VRAM delta — trigger a generate call, measure VRAM increase via nvidia-smi.
+         A delta ≥ 100 MB means the model was just mapped onto GPU.
+      3. If VRAM was already high before the call and delta ≈ 0, the model was
+         already resident in VRAM — also counts as GPU-confirmed.
+
+    Returns (gpu_confirmed: bool, detail_message: str).
     """
+    # Strategy 1: /api/ps direct confirmation
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/ps", timeout=4) as r:
+            ps_data = json.loads(r.read())
+        for m in ps_data.get("models", []):
+            name = m.get("name", "")
+            if model_id.split(":")[0] in name or name.startswith(model_id.split(":")[0]):
+                size_vram = m.get("size_vram", 0) or 0
+                size_total = m.get("size", 1) or 1
+                if size_vram > 0:
+                    vram_mb = size_vram / (1024 * 1024)
+                    pct = size_vram / size_total * 100
+                    return True, f"GPU confirmed via /api/ps  ({vram_mb:.0f} MB VRAM, {pct:.0f}% on GPU)"
+    except Exception:
+        pass
+
+    # Strategy 2 & 3: VRAM delta
     vram_before = _vram_used_mb()
     if vram_before is None:
-        return False, 0.0  # nvidia-smi unavailable
+        return False, "nvidia-smi unavailable — cannot verify GPU"
 
-    # Trigger model load via a minimal generate call
     try:
         payload = json.dumps({
-            "model": model_id,
-            "prompt": "Hi",
-            "stream": False,
-            "options": {"num_predict": 1},
+            "model": model_id, "prompt": "Hi",
+            "stream": False, "options": {"num_predict": 1},
         }).encode()
         req = urllib.request.Request(
-            f"{base_url}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            f"{base_url}/api/generate", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
         )
         with urllib.request.urlopen(req, timeout=60) as r:
             r.read()
@@ -260,10 +335,22 @@ def _check_ollama_gpu_usage(model_id: str, base_url: str) -> tuple[bool, float]:
 
     vram_after = _vram_used_mb()
     if vram_after is None:
-        return False, 0.0
+        return False, "nvidia-smi read failed after inference"
 
     delta = vram_after - vram_before
-    return delta >= 50, delta
+
+    if delta >= 100:
+        return True, f"GPU confirmed via VRAM delta (+{delta:.0f} MB)"
+
+    # Strategy 3: already resident — VRAM was high before call and didn't drop
+    total = _detect_nvidia_gpu().get("vram_total_mb") or 1
+    if vram_before / total > 0.35 and abs(delta) < 100:
+        return True, f"GPU confirmed — model already resident in VRAM ({vram_after:.0f}/{total:.0f} MB used)"
+
+    return False, (
+        f"GPU not confirmed (VRAM Δ={delta:+.0f} MB). "
+        f"Restart Ollama with OLLAMA_NUM_GPU=99 CUDA_VISIBLE_DEVICES=0"
+    )
 
 
 def _ollama_pull(model_id: str, base_url: str) -> bool:
@@ -354,7 +441,9 @@ def _check_ollama(
     """
     # ── GPU check first (sets env vars before any Ollama interaction) ────────
     gpu = _detect_nvidia_gpu()
-    _validate_gpu_section(gpu)
+    # Determine the primary base_url for GPU-related Ollama calls
+    _primary_base_url = "http://localhost:11434"
+    _validate_gpu_section(gpu, base_url=_primary_base_url)
 
     _vsection("OLLAMA PRE-FLIGHT CHECK")
 
@@ -462,18 +551,16 @@ def _check_ollama(
             if resp.get("done") is False and "response" not in resp:
                 raise ValueError(f"Unexpected response: {str(resp)[:80]}")
 
-            # ── GPU usage validation via VRAM delta ───────────────────────
+            # ── GPU usage validation ──────────────────────────────────────
             if gpu["available"]:
-                gpu_used, delta_mb = _check_ollama_gpu_usage(model_id, base_url)
-                if gpu_used:
-                    results.append((name, model_id, "✓", f"inference OK  •  GPU confirmed (+{delta_mb:.0f} MB VRAM)"))
+                gpu_confirmed, gpu_detail = _check_ollama_gpu_usage(model_id, base_url)
+                if gpu_confirmed:
+                    results.append((name, model_id, "✓", f"inference OK  •  {gpu_detail}"))
                 else:
-                    results.append((name, model_id, "⚠",
-                        f"inference OK but GPU not detected (VRAM Δ={delta_mb:.0f} MB) "
-                        f"— restart Ollama with OLLAMA_NUM_GPU=99 CUDA_VISIBLE_DEVICES=0"))
-                    all_ok = False
+                    # GPU warning is non-fatal: experiment can still run, just slower
+                    results.append((name, model_id, "⚠", f"inference OK  •  {gpu_detail}"))
             else:
-                results.append((name, model_id, "✓", "inference OK  •  GPU check skipped (nvidia-smi unavailable)"))
+                results.append((name, model_id, "✓", "inference OK  •  GPU check skipped (no nvidia-smi)"))
 
         except Exception as exc:
             msg = str(exc)
@@ -484,30 +571,38 @@ def _check_ollama(
                 results.append((name, model_id, "✗", f"inference error: {msg[:100]}"))
                 all_ok = False
 
-    # ── Summary table ─────────────────────────────────────────────────────
+    # ── Summary: one block per model (avoids truncation on narrow terminals) ─
     _vprint()
-    t = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 2))
-    t.add_column("Model name",  style="cyan", min_width=22)
-    t.add_column("Model ID",    style="dim",  min_width=26)
-    t.add_column("Status", justify="center",  min_width=4)
-    t.add_column("Details", min_width=44)
-
     for r_name, r_id, icon, msg in results:
         if icon == "✓":
-            t.add_row(r_name, r_id, Text("✓", style="bold green"),  Text(msg, style="dim green"))
+            icon_txt  = f"[bold green]✓[/bold green]"
+            msg_style = "dim green"
         elif icon == "⚠":
-            t.add_row(r_name, r_id, Text("⚠", style="bold yellow"), Text(msg, style="yellow"))
+            icon_txt  = f"[bold yellow]⚠[/bold yellow]"
+            msg_style = "yellow"
         else:
-            t.add_row(r_name, r_id, Text("✗", style="bold red"),    Text(msg, style="red"))
+            icon_txt  = f"[bold red]✗[/bold red]"
+            msg_style = "red"
+        _vprint(f"  {icon_txt}  [cyan]{r_name}[/cyan]  [dim]{r_id}[/dim]")
+        _vprint(f"     [{msg_style}]{msg}[/{msg_style}]")
+        _vprint()
 
-    _console.print(t)
-    _vprint()
+    has_hard_failure = any(icon == "✗" for _, _, icon, _ in results)
+    has_warning      = any(icon == "⚠" for _, _, icon, _ in results)
 
-    if all_ok:
-        _vstep("✓", "All Ollama models healthy — experiment can proceed.", style="green")
+    if not has_hard_failure:
+        if has_warning:
+            _vstep("⚠", "Models ready but GPU could not be fully confirmed — check warnings above.", style="yellow")
+            _vstep("  →", "The experiment will proceed. For full GPU usage restart Ollama with:")
+            _vprint("       [cyan]set OLLAMA_NUM_GPU=99[/cyan]")
+            _vprint("       [cyan]set CUDA_VISIBLE_DEVICES=0[/cyan]")
+            _vprint("       [cyan]ollama serve[/cyan]")
+        else:
+            _vstep("✓", "All Ollama models healthy — experiment can proceed.", style="green")
     else:
         _vprint("  [bold red]✗  One or more Ollama checks failed.[/bold red]")
         _vprint("  [dim]Fix the issues above, then re-run the experiment.[/dim]")
+        all_ok = False
         if abort_on_error:
             _vprint()
             raise SystemExit(1)
