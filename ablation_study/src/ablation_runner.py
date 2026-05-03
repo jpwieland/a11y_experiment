@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -673,6 +674,49 @@ def _try_parse_json(text: str) -> bool:
     return False
 
 
+_CODE_FENCE_RE = re.compile(
+    r'```(?:tsx|jsx|typescript|javascript|ts|js|)\n(.*?)```',
+    re.DOTALL,
+)
+
+def _extract_patched_content(response: str, output_format_active: bool) -> str:
+    """
+    Extract the actual patched source code from an LLM response.
+
+    When output_format is active the model should return JSON with a
+    ``fixed_code`` key.  When it is off (or as a fallback) the model
+    should wrap the code in a TSX/JSX/generic code fence.  Passing the
+    raw response to ValidationPipeline would fail export-signature checks
+    because the surrounding JSON or fence markers are not part of the file.
+    """
+    # Strategy 1: JSON envelope {"fixed_code": "..."} ─────────────────────
+    if output_format_active:
+        # Try clean JSON first
+        try:
+            obj = json.loads(response)
+            if isinstance(obj, dict) and isinstance(obj.get("fixed_code"), str):
+                return obj["fixed_code"].strip()
+        except Exception:
+            pass
+        # Try to fish out a JSON object from surrounding text
+        m = re.search(r'\{.*\}', response, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group())
+                if isinstance(obj, dict) and isinstance(obj.get("fixed_code"), str):
+                    return obj["fixed_code"].strip()
+            except Exception:
+                pass
+
+    # Strategy 2: code fence ─────────────────────────────────────────────
+    m = _CODE_FENCE_RE.search(response)
+    if m:
+        return m.group(1).strip()
+
+    # Strategy 3: bare code (no fences, no JSON) — return as-is
+    return response.strip()
+
+
 def _reset_results(results_dir: Path) -> None:
     """Delete results_dir entirely and recreate it empty."""
     if results_dir.exists():
@@ -1206,8 +1250,16 @@ class AblationAttemptRunner:
         record.response_truncated = _is_truncated(response_text)
         record.json_parse_success = _try_parse_json(response_text)
 
+        # Extract actual source code from the raw response (strip JSON envelope /
+        # markdown fences) before passing to the validation pipeline — exactly
+        # as the original DirectLLMAgent does via extract_code_block().
+        patched_content = _extract_patched_content(
+            response_text,
+            output_format_active=self.condition.flags.output_format,
+        )
+
         t_val = time.perf_counter()
-        await self._run_validation(task, response_text, record)
+        await self._run_validation(task, patched_content, record)
         record.time_validation_s = time.perf_counter() - t_val
 
     async def _run_validation(
