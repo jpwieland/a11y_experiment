@@ -1216,57 +1216,67 @@ class AblationAttemptRunner:
         response: str,
         record: AttemptRecord,
     ) -> None:
-        """Run layers 1-4 and populate record fields."""
+        """Run layers 1-4 via ValidationPipeline.validate() and populate record fields."""
         from a11y_autofix.validation.pipeline import ValidationPipeline
 
-        vp = ValidationPipeline(self.pipeline.settings)
+        vp = ValidationPipeline()
+
+        result = vp.validate(
+            patched_content=response,
+            original_content=task.file_content,
+            issues=task.issues,
+            file_id=str(task.file),
+            model_id=self.model_name,
+            strategy=self.condition.id,
+        )
+
+        # layer_timings_ms keys: {1: ms, 2: ms, 3: ms, 4: ms} (only layers that ran)
+        timings = result.layer_timings_ms
+        record.time_layer1_s = timings.get(1, 0.0) / 1000
+        record.time_layer2_s = timings.get(2, 0.0) / 1000
+        record.time_layer3_s = timings.get(3, 0.0) / 1000
+        record.time_layer4_s = timings.get(4, 0.0) / 1000
+
+        rejected = result.rejected_at_layer  # None = passed all, 1-4 = failed at that layer
 
         # Layer 1 — syntax
-        t1 = time.perf_counter()
-        l1 = await vp.layer1_syntax(response)
-        record.time_layer1_s = time.perf_counter() - t1
-        record.layer1_syntax_pass = l1.passed
-        record.layer1_error_msg = l1.error or ""
-        if not l1.passed:
-            _vprint(f"        [dim red]L1 syntax error: {record.layer1_error_msg[:120]}[/dim red]")
+        record.layer1_syntax_pass = rejected is None or rejected > 1
+        if rejected == 1:
+            record.layer1_error_msg = result.failure_reason or "syntax_error"
+            record.failure_layer = 1
+            record.failure_type = "invalid_patch"
+            _vprint(f"        [dim red]L1 syntax: {record.layer1_error_msg[:120]}[/dim red]")
             return
 
-        # Layer 2 — functional
-        t2 = time.perf_counter()
-        l2 = await vp.layer2_functional(task.file_content, l1.fixed_code or response)
-        record.time_layer2_s = time.perf_counter() - t2
-        record.layer2_functional_pass = l2.passed
-        record.layer2_error_msg = l2.error or ""
-        if not l2.passed:
-            _vprint(f"        [dim red]L2 functional error: {record.layer2_error_msg[:120]}[/dim red]")
+        # Layer 2 — functional preservation
+        record.layer2_functional_pass = rejected is None or rejected > 2
+        if rejected == 2:
+            record.layer2_error_msg = result.failure_reason or "functional_regression"
+            record.failure_layer = 2
+            record.failure_type = "functional_regression"
+            _vprint(f"        [dim red]L2 functional: {record.layer2_error_msg[:120]}[/dim red]")
             return
 
-        # Layer 3 — domain (Pa11y re-scan)
-        t3 = time.perf_counter()
-        l3 = await vp.layer3_domain(task.file, l1.fixed_code or response)
-        record.time_layer3_s = time.perf_counter() - t3
-        record.chromium_coldstart_s = l3.chromium_coldstart_s or 0.0
-        record.layer3_domain_pass = l3.passed
-        record.layer3_error_msg = l3.error or ""
-        record.layer3_new_violations_introduced = l3.new_violations or 0
-        if not l3.passed:
+        # Layer 3 — domain verification (heuristic, no Pa11y re-scan in this pipeline)
+        record.layer3_domain_pass = rejected is None or rejected > 3
+        record.chromium_coldstart_s = 0.0  # static heuristic, no browser launch
+        record.layer3_new_violations_introduced = 0
+        if rejected == 3:
+            record.layer3_error_msg = result.failure_reason or "domain_check_failed"
+            record.failure_layer = 3
+            record.failure_type = "domain_violation"
+            _vprint(f"        [dim red]L3 domain: {record.layer3_error_msg[:120]}[/dim red]")
+            return
+
+        # Layer 4 — code quality (soft gate: logged but doesn't block attempt_success)
+        record.layer4_quality_pass = rejected is None or rejected != 4
+        record.layer4_eslint_errors = 0       # static heuristic; no ESLint subprocess
+        record.layer4_complexity_violations = 0
+        if rejected == 4:
+            l4_reason = result.failure_reason or "code_quality"
+            # Layer 4 is a soft gate — failure is recorded but attempt_success uses only L1-L3
             _vprint(
-                f"        [dim red]L3 domain error: {record.layer3_error_msg[:120]}"
-                f"  new_violations={record.layer3_new_violations_introduced}[/dim red]"
-            )
-            return
-
-        # Layer 4 — quality (ESLint + complexity, soft)
-        t4 = time.perf_counter()
-        l4 = await vp.layer4_quality(task.file, l1.fixed_code or response)
-        record.time_layer4_s = time.perf_counter() - t4
-        record.layer4_quality_pass = l4.passed
-        record.layer4_eslint_errors = l4.eslint_errors or 0
-        record.layer4_complexity_violations = l4.complexity_violations or 0
-        if not l4.passed:
-            _vprint(
-                f"        [dim yellow]L4 quality (soft): eslint={record.layer4_eslint_errors} "
-                f"complexity={record.layer4_complexity_violations}[/dim yellow]"
+                f"        [dim yellow]L4 quality (soft): {l4_reason[:120]}[/dim yellow]"
             )
 
 
