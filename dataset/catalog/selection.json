@@ -1,0 +1,306 @@
+{
+  "generated_at": "2026-06-12T12:50:31.712460+00:00",
+  "seed": 42,
+  "per_domain": 5,
+  "min_issues": 1,
+  "eligible_count": 125,
+  "selected": [
+    {
+      "id": "Ralve-org__RabbitScout",
+      "domain": "dashboard",
+      "size": "small",
+      "issues": 1,
+      "files_with_issues": 1,
+      "files_scanned": 30,
+      "pinned_commit": "8b2eade2b0105a9f864f0f6b245b7192b27667ad"
+    },
+    {
+      "id": "SolidZORO__leaa",
+      "domain": "dashboard",
+      "size": "medium",
+      "issues": 18,
+      "files_with_issues": 3,
+      "files_scanned": 408,
+      "pinned_commit": "78432d6082b50354d189b2a2f20dcb2af1ebc1d5"
+    },
+    {
+      "id": "airbnb__visx",
+      "domain": "dashboard",
+      "size": "large",
+      "issues": 7,
+      "files_with_issues": 3,
+      "files_scanned": 756,
+      "pinned_commit": "00d41afc6c3904e644ecb2570399daf877f8a5fe"
+    },
+    {
+      "id": "ant-design__ant-design-pro",
+      "domain": "dashboard",
+      "size": "small",
+      "issues": 5,
+      "files_with_issues": 2,
+      "files_scanned": 90,
+      "pinned_commit": "607e63f4fdb49d78306a618f2b2c29291ce85500"
+    },
+    {
+      "id": "ajnart__homarr",
+      "domain": "dashboard",
+      "size": "medium",
+      "issues": 5,
+      "files_with_issues": 4,
+      "files_scanned": 343,
+      "pinned_commit": "c5873c6e481144cd18a70139ef23ac04ca8ab158"
+    },
+    {
+      "id": "Superflows-AI__superflows",
+      "domain": "developer_tools",
+      "size": "small",
+      "issues": 15,
+      "files_with_issues": 9,
+      "files_scanned": 38,
+      "pinned_commit": "4c8c40c05fa7ba812f1a0c78d00be61ca932b93c"
+    },
+    {
+      "id": "FeatureProbe__FeatureProbe",
+      "domain": "developer_tools",
+      "size": "medium",
+      "issues": 145,
+      "files_with_issues": 51,
+      "files_scanned": 214,
+      "pinned_commit": "e05a40d537e6875d6afd11e883e58eb7fd3a8d10"
+    },
+    {
+      "id": "chakra-ui__ark",
+      "domain": "developer_tools",
+      "size": "large",
+      "issues": 19,
+      "files_with_issues": 14,
+      "files_scanned": 3818,
+      "pinned_commit": "56f281b7a792cde0477fc91b72349f018da909b8"
+    },
+    {
+      "id": "Fanzzzd__repo-wizard",
+      "domain": "developer_tools",
+      "size": "small",
+      "issues": 2,
+      "files_with_issues": 1,
+      "files_scanned": 85,
+      "pinned_commit": "b8b7b2adaee5c542b84a9b098d09771eebffa678"
+    },
+    {
+      "id": "BradGroux__veritas-kanban",
+      "domain": "developer_tools",
+      "size": "medium",
+      "issues": 32,
+      "files_with_issues": 20,
+      "files_scanned": 224,
+      "pinned_commit": "a72200f1141691a855619d1358009363e2738770"
+    },
+    {
+      "id": "ayusshrathore__ai-saas",
+      "domain": "ecommerce",
+      "size": "small",
+      "issues": 28,
+      "files_with_issues": 26,
+      "files_scanned": 26,
+      "pinned_commit": "623dba771e012fb2923c0ef6ded4127bed09181e"
+    },
+    {
+      "id": "CatchTheTornado__open-agents-builder",
+      "domain": "ecommerce",
+      "size": "medium",
+      "issues": 31,
+      "files_with_issues": 15,
+      "files_scanned": 381,
+      "pinned_commit": "a26afcee12475ad31f2136db4088e5f200bb4644"
+    },
+    {
+      "id": "CromwellCMS__Cromwell",
+      "domain": "ecommerce",
+      "size": "large",
+      "issues": 81,
+      "files_with_issues": 50,
+      "files_scanned": 849,
+      "pinned_commit": "ab00131c8a589e4e3e06b77b4360830fcfe8c75d"
+    },
+    {
+      "id": "PremPrakashCodes__payment-gateways",
+      "domain": "ecommerce",
+      "size": "small",
+      "issues": 4,
+      "files_with_issues": 4,
+      "files_scanned": 9,
+      "pinned_commit": "05f85dcaee0dec44766efd3b337f8598b09737b2"
+    },
+    {
+      "id": "Blazity__enterprise-commerce",
+      "domain": "ecommerce",
+      "size": "medium",
+      "issues": 12,
+      "files_with_issues": 8,
+      "files_scanned": 266,
+      "pinned_commit": "69e24a9e4b134f5099229d5382cc7215df7527ae"
+    },
+    {
+      "id": "alisaitteke__seatmap-canvas",
+      "domain": "education",
+      "size": "small",
+      "issues": 12,
+      "files_with_issues": 4,
+      "files_scanned": 131,
+      "pinned_commit": "823af00c3c4b2aef4fda5aa8ab89928ba433c657"
+    },
+    {
+      "id": "OpenCircuits__OpenCircuits",
+      "domain": "education",
+      "size": "medium",
+      "issues": 21,
+      "files_with_issues": 13,
+      "files_scanned": 321,
+      "pinned_commit": "8938f7469c411db1496c5b19278bbaa5cea1e01c"
+    },
+    {
+      "id": "WebAV-Tech__WebAV",
+      "domain": "education",
+      "size": "small",
+      "issues": 4,
+      "files_with_issues": 4,
+      "files_scanned": 88,
+      "pinned_commit": "42dd6fd65ccbda39c729265c14aab56ac4d28235"
+    },
+    {
+      "id": "angellikgh__react-design-editor",
+      "domain": "education",
+      "size": "medium",
+      "issues": 35,
+      "files_with_issues": 22,
+      "files_scanned": 214,
+      "pinned_commit": "4c9566c5e387f406e6268b4566ba33beb621cb6b"
+    },
+    {
+      "id": "antvis__G2",
+      "domain": "education",
+      "size": "small",
+      "issues": 2,
+      "files_with_issues": 2,
+      "files_scanned": 1336,
+      "pinned_commit": "45ce44965c95ddbfb2a03c1a2496e531b87f25f3"
+    },
+    {
+      "id": "codyogden__killedbygoogle",
+      "domain": "government",
+      "size": "small",
+      "issues": 1,
+      "files_with_issues": 1,
+      "files_scanned": 19,
+      "pinned_commit": "5adf9eec5452c05508cf88c81fd83284b6c68bba"
+    },
+    {
+      "id": "JustFixNYC__who-owns-what",
+      "domain": "government",
+      "size": "medium",
+      "issues": 18,
+      "files_with_issues": 14,
+      "files_scanned": 107,
+      "pinned_commit": "37e29bf239a751296e37a47132f33af8f69d4917"
+    },
+    {
+      "id": "codeforpdx__recordexpungPDX",
+      "domain": "government",
+      "size": "medium",
+      "issues": 66,
+      "files_with_issues": 13,
+      "files_scanned": 126,
+      "pinned_commit": "192d4cf316d70463a0a1e3cf478e5849ddf32460"
+    },
+    {
+      "id": "Open-scribe__OpenScribe",
+      "domain": "healthcare",
+      "size": "small",
+      "issues": 1,
+      "files_with_issues": 1,
+      "files_scanned": 77,
+      "pinned_commit": "1a6c4964c84dc13fe82b3d0f0a3fd4b50bebdfaa"
+    },
+    {
+      "id": "aehrc__smart-forms",
+      "domain": "healthcare",
+      "size": "medium",
+      "issues": 2,
+      "files_with_issues": 2,
+      "files_scanned": 318,
+      "pinned_commit": "1a0d7275447399624aecd4717baf89234ae4abf3"
+    },
+    {
+      "id": "OHIF__Viewers",
+      "domain": "healthcare",
+      "size": "large",
+      "issues": 87,
+      "files_with_issues": 69,
+      "files_scanned": 1520,
+      "pinned_commit": "4c2bd8d5ed86d454be470014cd5f04dac53a61fe"
+    },
+    {
+      "id": "bonfhir__bonfhir",
+      "domain": "healthcare",
+      "size": "small",
+      "issues": 6,
+      "files_with_issues": 2,
+      "files_scanned": 36,
+      "pinned_commit": "c9c262eba260194c17d39cc3209074bc28ef639f"
+    },
+    {
+      "id": "beda-software__fhir-emr",
+      "domain": "healthcare",
+      "size": "medium",
+      "issues": 14,
+      "files_with_issues": 3,
+      "files_scanned": 499,
+      "pinned_commit": "741680dc1ba753b141599e714d39ac72e316c929"
+    },
+    {
+      "id": "Detaysoft__react-chat-elements",
+      "domain": "social",
+      "size": "small",
+      "issues": 43,
+      "files_with_issues": 16,
+      "files_scanned": 49,
+      "pinned_commit": "f487e7e83320bee8b74ac758d17f1ad418343173"
+    },
+    {
+      "id": "StreetLamb__tribe",
+      "domain": "social",
+      "size": "medium",
+      "issues": 1,
+      "files_with_issues": 1,
+      "files_scanned": 172,
+      "pinned_commit": "e1c2020a7dd7377d1ec14292f113c53ddf50d917"
+    },
+    {
+      "id": "Linen-dev__linen.dev",
+      "domain": "social",
+      "size": "large",
+      "issues": 99,
+      "files_with_issues": 51,
+      "files_scanned": 614,
+      "pinned_commit": "df6977a256897983d997d6259c8a31e14dc7f204"
+    },
+    {
+      "id": "cloudflare__partykit",
+      "domain": "social",
+      "size": "small",
+      "issues": 1,
+      "files_with_issues": 1,
+      "files_scanned": 117,
+      "pinned_commit": "a1f8370a8a56bedb4c0a857a8499d02152affa0a"
+    },
+    {
+      "id": "agnaistic__agnai",
+      "domain": "social",
+      "size": "medium",
+      "issues": 193,
+      "files_with_issues": 77,
+      "files_scanned": 328,
+      "pinned_commit": "6c3de258cb33999c3f292c71aa031d2352681186"
+    }
+  ]
+}
