@@ -659,7 +659,7 @@ check_final "git" \
   sh -c 'command -v git'
 
 check_final "disco ≥ 15 GB livres" \
-  sh -c '[ "$(df -k . | awk \"NR==2{print \$4}\")" -gt 15728640 ]'
+  test "$FREE_KB" -gt 15728640
 
 # Modelos
 for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b; do
