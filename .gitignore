@@ -5,22 +5,24 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.benchmarks/
+
+# Segredos e ambiente local
+.env
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Experiment outputs — large generated data, not source
+# Saídas de experimento — dados gerados, não-fonte
 ablation_study/results/
 experiment-results/
+a11y-report/
 
-# Scan corpus data (stays on the machine where scans were run; too large for git)
+# Corpus de scan (fica na máquina onde os scans rodaram; grande demais p/ git)
 dataset/results/
 dataset/snapshots/
-
-# Logs
-*.log
-setup.log
 
 # Logs
 *.log
