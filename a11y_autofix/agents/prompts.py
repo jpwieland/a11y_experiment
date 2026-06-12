@@ -516,17 +516,42 @@ WCAG Level: {task.wcag_level}
 Fix ALL issues listed above. Return the complete corrected file in a ```tsx code block."""
 
 
-def build_swe_prompt(task: AgentTask) -> str:
+def build_swe_prompt(
+    task: AgentTask,
+    strategy: PromptingStrategy = PromptingStrategy.FEW_SHOT,
+) -> str:
     """
     Constrói prompt do usuário para SWE-agent.
 
+    A estratégia de prompting (IV2) controla a inclusão do Componente 5
+    (exemplos few-shot, selecionados pelos tipos de issue presentes) e da
+    instrução CoT. O formato de saída cirúrgico (FIND/REPLACE) é mantido
+    em todas as estratégias — é a identidade do scaffolding SWE.
+
     Args:
         task: Tarefa com arquivo e issues a corrigir.
+        strategy: Estratégia de prompting (zero-shot/few-shot/CoT).
 
     Returns:
         String do prompt formatado.
     """
     issues_text = format_issues(task.issues, verbose=False)
+
+    examples_section = ""
+    if strategy in (PromptingStrategy.FEW_SHOT, PromptingStrategy.CHAIN_OF_THOUGHT):
+        examples_section = (
+            "\n\nReference correction patterns (Before/After):\n\n"
+            + _select_few_shot_examples(task.issues)
+        )
+
+    cot_section = ""
+    if strategy == PromptingStrategy.CHAIN_OF_THOUGHT:
+        cot_section = (
+            "\n\nBefore writing patches, reason step-by-step about each issue "
+            "(root cause → minimal change → side-effect check) inside a "
+            "<!-- CoT --> comment block. Then output the PATCH blocks."
+        )
+
     return f"""Fix accessibility issues in: {task.file.name}
 WCAG: {task.wcag_level}
 
@@ -535,7 +560,7 @@ WCAG: {task.wcag_level}
 ```
 
 Issues to fix:
-{issues_text}
+{issues_text}{examples_section}{cot_section}
 
 Provide PATCH blocks (FIND/REPLACE) or complete file if restructuring needed."""
 

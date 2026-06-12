@@ -132,9 +132,13 @@ class Router:
             score += 3
             reasons.append(f"{unique_types} distinct issue types")
 
-        # -3: todos simples (apenas aria/label/alt-text) E poucos
+        # -3: todos simples (apenas aria/label/alt-text) E poucos E nenhum
+        # com complexidade COMPLEX. Sem a última condição, um issue ARIA
+        # de correção complexa pontuava +3 (complex fixes) e -3 (all simple)
+        # simultaneamente — a matriz se contradizia e roteava para o agente
+        # cirúrgico exatamente os casos que exigem contexto amplo.
         all_simple = all(i.issue_type in _FORCE_SWE for i in issues)
-        if all_simple and len(issues) < threshold:
+        if all_simple and len(issues) < threshold and n_complex == 0:
             score -= 3
             reasons.append("all localized attribute fixes")
 

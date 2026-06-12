@@ -19,11 +19,15 @@ log = structlog.get_logger(__name__)
 
 class SWEAgent(BaseAgent):
     """
-    Agente SWE para correções cirúrgicas (aria-label, alt text, etc.).
+    Agente "cirúrgico": prompting de patches mínimos FIND/REPLACE.
 
-    Estratégia chain:
-    1. SWE-agent CLI subprocess → LLM local (se instalado)
-    2. LLM direto com prompting cirúrgico (FIND/REPLACE blocks)
+    NOTA DE VALIDADE (06/2026): o caminho via SWE-agent CLI usa flags
+    (--task/--file) que não existem no CLI real do projeto SWE-agent;
+    na prática a execução SEMPRE cai no fallback `_via_llm_direct`.
+    Portanto, nos experimentos, esta condição é operacionalizada como
+    "LLM com prompt cirúrgico (FIND/REPLACE)" — uma diferença de
+    PROMPTING, não de scaffolding externo. Reporte-a assim na
+    metodologia para evitar ameaça de validade de construto.
 
     Ideal para: issues simples e localizados (ARIA, labels, alt-text).
     """
@@ -134,7 +138,7 @@ class SWEAgent(BaseAgent):
         Returns:
             PatchResult da execução.
         """
-        prompt = build_swe_prompt(task)
+        prompt = build_swe_prompt(task, strategy=self.strategy)
 
         try:
             response, metrics = await self.llm.complete_with_metrics(

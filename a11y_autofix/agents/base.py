@@ -20,12 +20,24 @@ class BaseAgent(ABC):
     diferente de geração e aplicação de correções.
     """
 
-    def __init__(self, llm_client: "BaseLLMClient") -> None:
+    def __init__(
+        self,
+        llm_client: "BaseLLMClient",
+        strategy: "str | None" = None,
+    ) -> None:
         """
         Args:
             llm_client: Cliente LLM a usar para geração de código.
+            strategy: Estratégia de prompting (IV2 da metodologia, Section
+                      3.6.2): 'zero-shot', 'few-shot' ou 'chain-of-thought'.
+                      Controla a presença do Componente 5 (exemplos few-shot)
+                      e da instrução CoT no Componente 6 do prompt.
+                      Default: 'few-shot'.
         """
+        from a11y_autofix.agents.prompts import PromptingStrategy
+
         self.llm = llm_client
+        self.strategy = PromptingStrategy(strategy) if strategy else PromptingStrategy.FEW_SHOT
 
     @abstractmethod
     async def run(self, task: AgentTask) -> PatchResult:

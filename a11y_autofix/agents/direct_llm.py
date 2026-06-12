@@ -5,7 +5,7 @@ from __future__ import annotations
 import structlog
 
 from a11y_autofix.agents.base import BaseAgent
-from a11y_autofix.agents.prompts import build_direct_llm_prompt, system_prompt_direct
+from a11y_autofix.agents.prompts import PromptBuilder
 from a11y_autofix.config import AgentTask, PatchResult
 from a11y_autofix.utils.git import get_unified_diff
 
@@ -45,11 +45,20 @@ class DirectLLMAgent(BaseAgent):
             model=self.llm.config.model_id,
         )
 
-        prompt = build_direct_llm_prompt(task)
+        # Template canônico de 6 componentes (methodology Section 3.6.2).
+        # A estratégia (IV2) controla Componente 5 (few-shot) e instrução CoT.
+        builder = PromptBuilder()
+        prompt = builder.build(
+            issues=task.issues,
+            file=task.file,
+            file_content=task.file_content,
+            strategy=self.strategy,
+            wcag_level=task.wcag_level,
+        )
 
         try:
             response, metrics = await self.llm.complete_with_metrics(
-                system=system_prompt_direct(),
+                system=builder.build_system_prompt(self.strategy),
                 user=prompt,
             )
         except Exception as e:

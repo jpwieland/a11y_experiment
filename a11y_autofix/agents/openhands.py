@@ -10,7 +10,7 @@ from pathlib import Path
 import structlog
 
 from a11y_autofix.agents.base import BaseAgent
-from a11y_autofix.agents.prompts import build_openhands_prompt, system_prompt_openhands
+from a11y_autofix.agents.prompts import system_prompt_openhands
 from a11y_autofix.config import AgentTask, PatchResult
 from a11y_autofix.utils.git import get_unified_diff
 
@@ -19,11 +19,15 @@ log = structlog.get_logger(__name__)
 
 class OpenHandsAgent(BaseAgent):
     """
-    Agente OpenHands para correções complexas (contraste, semântica).
+    Agente de "contexto amplo": prompting de arquivo completo.
 
-    Estratégia chain:
-    1. OpenHands CLI subprocess (se instalado) → config LLM local
-    2. LLM direto via LocalLLMClient (fallback sempre disponível)
+    NOTA DE VALIDADE (06/2026): o CLI do OpenHands raramente está
+    instalado no ambiente experimental; na prática a execução cai no
+    fallback `_via_llm_direct` (template de 6 componentes + system
+    prompt de contexto amplo). Nos experimentos, esta condição é
+    operacionalizada como "LLM com prompt de contexto amplo" — uma
+    diferença de PROMPTING, não de scaffolding agêntico real.
+    Reporte-a assim na metodologia.
 
     Ideal para: issues complexos que requerem contexto amplo do arquivo inteiro.
     OpenHands aceita OPENAI_BASE_URL para apontar para Ollama/vLLM/etc.
@@ -139,7 +143,18 @@ class OpenHandsAgent(BaseAgent):
         Returns:
             PatchResult da execução.
         """
-        prompt = build_openhands_prompt(task)
+        # Template canônico de 6 componentes; a estratégia (IV2) controla
+        # Componente 5 (few-shot) e instrução CoT. O system prompt mantém a
+        # identidade de contexto amplo do scaffolding OpenHands.
+        from a11y_autofix.agents.prompts import PromptBuilder
+
+        prompt = PromptBuilder().build(
+            issues=task.issues,
+            file=task.file,
+            file_content=task.file_content,
+            strategy=self.strategy,
+            wcag_level=task.wcag_level,
+        )
 
         try:
             response, metrics = await self.llm.complete_with_metrics(
