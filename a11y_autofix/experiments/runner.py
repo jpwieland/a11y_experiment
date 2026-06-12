@@ -807,6 +807,25 @@ class ExperimentRunner:
         reporter = ComparisonReporter()
         reporter.generate(last_experiment_result, rep_metrics, output_dir)
 
+        # ── Deep report: análise profunda de fim de experimento ────────────
+        # Consolida TODAS as métricas (validação 4 camadas, ρ, decomposições
+        # por WCAG/tipo/complexidade, taxonomia de falhas, drill-down por
+        # arquivo, variância entre repetições) em deep_report.{json,md,html}.
+        try:
+            from a11y_autofix.reporter.deep_report import DeepReportGenerator
+            DeepReportGenerator().generate(
+                all_rep_results=all_rep_results,
+                output_dir=output_dir,
+                experiment_name=config.name,
+                experiment_id=exp_id,
+                config_snapshot=last_experiment_result.config_snapshot,
+                tool_versions=last_experiment_result.tool_versions,
+                files_count=len(files),
+            )
+        except Exception as e:
+            # O deep report nunca pode derrubar um experimento concluído
+            log.error("deep_report_failed", error=str(e)[:300])
+
         # Escrever experiment_result.json raiz com o resultado da última repetição
         (output_dir / "experiment_result.json").write_text(
             last_experiment_result.model_dump_json(indent=2), encoding="utf-8"
@@ -1104,7 +1123,13 @@ class ExperimentRunner:
                     valid=[e.value for e in AgentType],
                 )
 
-        pipeline = self.pipeline_factory(model_config, agent_preference=agent_preference)
+        # strategy (IV2) é propagada ao Pipeline → agentes → PromptBuilder.
+        # Antes de 06/2026 ela era usada apenas no nome do checkpoint (no-op).
+        pipeline = self.pipeline_factory(
+            model_config,
+            agent_preference=agent_preference,
+            strategy=strategy,
+        )
 
         # Usar concorrência dinâmica fornecida ou cair no default das settings
         effective_concurrency = llm_concurrency or self.settings.max_concurrent_agents
@@ -1500,8 +1525,12 @@ class ExperimentRunner:
             "token_total": total_tokens_all,
             "token_input_available": total_input_tokens > 0,  # flag para diagnóstico
 
-            # Validação
-            "validation_layer_rejected": None,  # populated by ValidationPipeline if used
+            # Validação (4 camadas) — camada da última rejeição, se houve
+            "validation_layer_rejected": next(
+                (a.validation_rejected_layer for a in reversed(fix_result.attempts)
+                 if a.validation_rejected_layer is not None),
+                None,
+            ),
             # failure_mode: error from the last attempt (not just the first successful one)
             # This ensures 404 errors and LLM failures are captured even when all attempts fail.
             "failure_mode": (

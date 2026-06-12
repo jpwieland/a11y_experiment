@@ -1,0 +1,61 @@
+models:
+- qwen2.5-coder-3b
+files:
+- dataset/snapshots/AHMAD-JX__Hozn-RealEstate-Fullstack
+- dataset/snapshots/arpanghosh8453__open-dronelog
+- dataset/snapshots/builderz-labs__mission-control
+- dataset/snapshots/Kanaries__graphic-walker
+- dataset/snapshots/briefercloud__briefer
+- dataset/snapshots/alibaba-fusion__next
+- dataset/snapshots/FeatureProbe__FeatureProbe
+- dataset/snapshots/arco-design__arco-design
+- dataset/snapshots/cloudscape-design__components
+- dataset/snapshots/BradGroux__veritas-kanban
+- dataset/snapshots/aelassas__bookcars
+- dataset/snapshots/BuilderIO__mitosis
+- dataset/snapshots/aelassas__movinin
+- dataset/snapshots/CromwellCMS__Cromwell
+- dataset/snapshots/BuilderIO__builder
+- dataset/snapshots/LHRUN__paint-board
+- dataset/snapshots/angellikgh__react-design-editor
+- dataset/snapshots/KartikLabhshetwar__screenshot-studio
+- dataset/snapshots/F-star__suika
+- dataset/snapshots/WindRunnerMax__CanvasEditor
+- dataset/snapshots/codeforpdx__recordexpungPDX
+- dataset/snapshots/JustFixNYC__who-owns-what
+- dataset/snapshots/codyogden__killedbygoogle
+- dataset/snapshots/cds-snc__gcds-components
+- dataset/snapshots/OHIF__Viewers
+- dataset/snapshots/Snouzy__workout-cool
+- dataset/snapshots/beda-software__fhir-emr
+- dataset/snapshots/DouglasNeuroInformatics__OpenDataCapture
+- dataset/snapshots/aphp__Cohort360-FrontEnd
+- dataset/snapshots/OvidijusParsiunas__deep-chat
+- dataset/snapshots/agnaistic__agnai
+- dataset/snapshots/Privoce__vocechat-web
+- dataset/snapshots/Linen-dev__linen.dev
+- dataset/snapshots/79E__ChatGpt-Web
+- dataset/snapshots/dafengzhen__youdeyiwu
+- dataset/snapshots/3xpyth0n__ideon
+wcag_level: AA
+metrics:
+- sr
+- ifr
+- mttr
+- te
+- success_rate
+- avg_time
+- issues_fixed
+repetitions: 3
+output_format:
+- json
+- html
+- csv
+seed: 42
+max_files_per_project: 10
+stratified_sampling: true
+auto_clone_missing_snapshots: true
+name: Ablation A2 — Zero-shot (router auto)
+description: Remove o Componente 5 (exemplos few-shot). Mede a contribuição dos exemplos.
+strategy: zero-shot
+output_dir: experiment-results/ablation/cell_A2_zeroshot_auto
