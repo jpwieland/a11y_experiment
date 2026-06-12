@@ -49,6 +49,38 @@ die()    {
 
 elapsed() { local s=$(( $(date +%s) - $1 )); printf "%dm%02ds" $((s/60)) $((s%60)); }
 
+# Abre uma aba/janela de terminal para monitoramento (gnome-terminal → x-terminal-emulator → xterm).
+# Em sessões sem ambiente gráfico (SSH/headless), apenas imprime o comando para rodar manualmente.
+# Desativável com NO_TABS=1.
+open_term() {
+  local term_title="$1"; shift
+  local cmd="$*"
+  if [[ "${NO_TABS:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    info "Sem ambiente gráfico — para acompanhar '$term_title', rode em outro terminal:"
+    info "  $cmd"
+    return 0
+  fi
+  if command -v gnome-terminal &>/dev/null; then
+    gnome-terminal --tab --title="$term_title" -- bash -c "$cmd; exec bash" &>/dev/null \
+      && { info "Aba aberta: $term_title"; return 0; }
+  fi
+  if command -v x-terminal-emulator &>/dev/null; then
+    x-terminal-emulator -T "$term_title" -e bash -c "$cmd; exec bash" &>/dev/null & disown
+    info "Terminal aberto: $term_title"
+    return 0
+  fi
+  if command -v xterm &>/dev/null; then
+    xterm -T "$term_title" -e bash -c "$cmd; exec bash" &>/dev/null & disown
+    info "Terminal aberto: $term_title"
+    return 0
+  fi
+  info "Nenhum emulador de terminal encontrado — para acompanhar '$term_title', rode:"
+  info "  $cmd"
+}
+
 # ── Flags ──────────────────────────────────────────────────────────────────────
 ONLY_SETUP=0; ONLY_CHECK=0; QUICK=0
 while [[ $# -gt 0 ]]; do
@@ -73,6 +105,9 @@ echo "${B}${C}║   Ubuntu 20.04 / 22.04 / 24.04 (x86-64)                       
 echo "${B}${C}╚══════════════════════════════════════════════════════════════════╝${N}"
 echo "  Log: ${B}$SETUP_LOG${N}"
 echo ""
+
+# Aba de monitoramento do log de setup (acompanha todas as fases)
+open_term "a11y — Log do Setup" "tail -f '$SETUP_LOG'"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # FASE 0 — validar sistema operacional
@@ -429,6 +464,8 @@ if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv
   if [[ $GPU_VRAM_GB -lt 4 ]]; then
     warn "VRAM < 4 GB — modelos 7B podem não caber inteiramente na GPU"
   fi
+  # Aba de monitoramento da GPU em tempo real
+  open_term "a11y — GPU Monitor" "watch -n 2 nvidia-smi"
 else
   warn "GPU NVIDIA não detectada — Ollama usará CPU (experimento ~7× mais lento para modelos 7B)"
 fi
@@ -477,21 +514,32 @@ $(for m in "${MODELS_NEEDED[@]}"; do echo "    ollama pull $m"; done)"
   done
 fi
 
-# Confirmar que Ollama usa GPU na inferência (carrega modelo pequeno brevemente)
+# Confirmar que Ollama usa GPU na inferência (carrega o modelo menor e consulta ollama ps)
 if [[ $GPU_DETECTED -eq 1 ]]; then
   step "Confirmando inferência na GPU (qwen2.5-coder:3b)..."
-  ollama run qwen2.5-coder:3b "." &>/dev/null &
-  INFER_PID=$!
-  sleep 4
-  OLLAMA_VRAM=$(nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader 2>/dev/null \
-    | grep -v "^[[:space:]]*$" \
-    | awk -F',' '{gsub(/ MiB/,"",$2); gsub(/ /,"",$2); sum+=$2} END{print sum+0}')
-  wait "$INFER_PID" 2>/dev/null || true
-  if [[ ${OLLAMA_VRAM:-0} -gt 100 ]]; then
-    ok "Inferência na GPU confirmada: ${OLLAMA_VRAM} MiB de VRAM alocados"
+  # Chamada bloqueante: garante que o modelo terminou de carregar antes de checar
+  curl -s --max-time 180 http://localhost:11434/api/generate \
+    -d '{"model":"qwen2.5-coder:3b","prompt":"ok","stream":false,"options":{"num_predict":1}}' \
+    &>/dev/null || warn "Chamada de teste ao modelo falhou/expirou — verificando estado mesmo assim"
+
+  PS_LINE=$(ollama ps 2>/dev/null | grep -i "qwen2.5-coder:3b" || true)
+  PROC_INFO=$(echo "$PS_LINE" | grep -oE '[0-9]+%(/[0-9]+%)? *(CPU/GPU|GPU/CPU|GPU|CPU)' | head -1)
+
+  if echo "$PS_LINE" | grep -q "100% GPU"; then
+    ok "Inferência 100% na GPU confirmada (ollama ps: ${PROC_INFO})"
+  elif echo "$PS_LINE" | grep -q "GPU"; then
+    warn "Modelo parcialmente na GPU (ollama ps: ${PROC_INFO}) — VRAM insuficiente para offload total"
+    warn "Modelos 7B ficarão mais lentos; o experimento ainda funciona."
+  elif echo "$PS_LINE" | grep -q "CPU"; then
+    die "GPU detectada, mas o Ollama está rodando o modelo em CPU (ollama ps: ${PROC_INFO}).
+  Possíveis causas e correções:
+    1. Driver NVIDIA sem suporte CUDA ativo  → nvidia-smi deve listar processos
+    2. Ollama iniciado antes do driver       → sudo systemctl restart ollama
+    3. Ollama sem suporte CUDA               → curl -fsSL https://ollama.com/install.sh | sh
+  Diagnóstico: journalctl -u ollama --no-pager | grep -iE 'cuda|gpu' | tail -20"
   else
-    warn "VRAM não aumentou durante inferência — Ollama pode estar rodando em CPU"
-    warn "Verifique: OLLAMA_DEBUG=1 ollama run qwen2.5-coder:3b 'teste' 2>&1 | grep -i gpu"
+    warn "Não foi possível confirmar via 'ollama ps' (modelo já descarregado?)"
+    warn "Verifique manualmente: ollama run qwen2.5-coder:3b 'teste' & ollama ps"
   fi
 fi
 
@@ -765,6 +813,14 @@ RUN_ARGS=(--skip-discover)
 echo ""
 info "Chamando run_full_experiment.sh ${RUN_ARGS[*]}..."
 echo ""
+
+# Abas de monitoramento do experimento:
+# 1. Dashboard ao vivo (progresso por modelo/repetição, ETA, taxas)
+open_term "a11y — Dashboard Experimento" \
+  "cd '$ROOT' && sleep 10 && '$VENV/bin/python' watch_experiment.py"
+# 2. Log bruto do run (criado pelo run_full_experiment.sh ao iniciar)
+open_term "a11y — Log Experimento" \
+  "cd '$ROOT' && sleep 10 && tail -F \"\$(ls -t logs/full_run_*.log 2>/dev/null | head -1)\""
 
 bash "$ROOT/run_full_experiment.sh" "${RUN_ARGS[@]}"
 RC=$?
