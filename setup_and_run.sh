@@ -178,6 +178,7 @@ if [[ $ONLY_CHECK -eq 0 ]]; then
   check_apt curl
   check_apt wget
   check_apt build-essential
+  check_apt pciutils
   check_apt python3-pip
   check_apt python3-venv
   # Libs do Playwright/Chromium
@@ -388,9 +389,111 @@ if [[ $NPM_FAILED -eq 1 && $ONLY_CHECK -eq 1 ]]; then
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════
-# FASE 5 — Ollama
+# FASE 5 — GPU NVIDIA (drivers) + Ollama
 # ════════════════════════════════════════════════════════════════════════════════
-title "Fase 5 — Ollama (servidor de LLMs)"
+title "Fase 5 — GPU NVIDIA + Ollama (servidor de LLMs)"
+
+# ── 5a. Detectar GPU física e garantir driver funcionando ─────────────────────
+step "Verificando GPU NVIDIA..."
+
+nvidia_smi_ok() { nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null; }
+
+GPU_PRESENT=0
+GPU_DETECTED=0
+GPU_VRAM_GB=0
+DRIVER_FIXED_NOW=0
+
+# lspci enxerga o hardware mesmo sem driver instalado
+if lspci 2>/dev/null | grep -qi nvidia; then
+  GPU_PRESENT=1
+  GPU_PCI=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -i nvidia | head -1 | sed 's/^[^:]*[^:]: //')
+  info "GPU NVIDIA no barramento PCI: ${GPU_PCI:-detectada}"
+fi
+
+if [[ $GPU_PRESENT -eq 1 ]] && ! nvidia_smi_ok; then
+  if ! command -v nvidia-smi &>/dev/null; then
+    # ── Driver ausente: instalar o recomendado pela Canonical ──
+    warn "GPU presente, mas driver NVIDIA não instalado"
+    if [[ $ONLY_CHECK -eq 1 ]]; then
+      die "Instale o driver NVIDIA:
+    sudo apt-get install -y ubuntu-drivers-common
+    sudo ubuntu-drivers install
+    sudo reboot"
+    fi
+
+    step "Instalando driver NVIDIA recomendado (ubuntu-drivers)..."
+    sudo apt-get install -y ubuntu-drivers-common \
+      || die "Falha ao instalar ubuntu-drivers-common."
+    info "Driver recomendado: $(ubuntu-drivers devices 2>/dev/null | awk '/recommended/{print $3}' | head -1)"
+    sudo ubuntu-drivers install \
+      || sudo ubuntu-drivers autoinstall \
+      || die "Falha ao instalar o driver NVIDIA.
+  Instale manualmente:
+    ubuntu-drivers devices                    # listar drivers disponíveis
+    sudo apt-get install -y nvidia-driver-XXX # versão 'recommended'
+    sudo reboot"
+    ok "Driver NVIDIA instalado"
+
+    # Tentar carregar o módulo sem reboot
+    sudo modprobe nvidia 2>/dev/null || true
+    sleep 2
+    if nvidia_smi_ok; then
+      ok "Driver carregado sem necessidade de reboot"
+      DRIVER_FIXED_NOW=1
+    else
+      echo ""
+      warn "O driver foi instalado, mas o kernel precisa ser reiniciado para carregá-lo."
+      read -r -t 60 -p "  Reinicializar agora? Após o boot, rode este script novamente. [s/N] " resp || resp="n"
+      if [[ "${resp,,}" == "s" ]]; then
+        info "Reinicializando..."
+        sudo reboot
+        exit 0
+      fi
+      die "Reinicie a máquina e execute este script novamente:
+    sudo reboot
+    bash setup_and_run.sh"
+    fi
+
+  else
+    # ── Driver instalado, mas nvidia-smi não comunica com ele ──
+    warn "nvidia-smi presente, mas falha ao comunicar com o driver"
+    if [[ $ONLY_CHECK -eq 1 ]]; then
+      die "Problema de comunicação com o driver NVIDIA. Tente:
+    sudo modprobe nvidia     # carregar o módulo
+    sudo reboot              # se persistir (resolve mismatch pós-upgrade)"
+    fi
+
+    step "Tentando carregar o módulo do kernel (modprobe nvidia)..."
+    sudo modprobe nvidia 2>/dev/null || true
+    sleep 2
+
+    if nvidia_smi_ok; then
+      ok "Módulo nvidia carregado — comunicação com o driver restabelecida"
+      DRIVER_FIXED_NOW=1
+    else
+      # Diagnóstico para as causas mais comuns
+      DIAG=""
+      # 1. Mismatch kernel module × biblioteca (típico após apt upgrade sem reboot)
+      if dmesg 2>/dev/null | grep -qi "nvidia.*mismatch" \
+         || nvidia-smi 2>&1 | grep -qi "mismatch"; then
+        DIAG="Versão do módulo do kernel difere da biblioteca instalada (atualização sem reboot)."
+      fi
+      # 2. Secure Boot bloqueando módulo não assinado
+      if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
+        DIAG="${DIAG}
+    Secure Boot está ATIVO — pode estar bloqueando o módulo NVIDIA não assinado.
+    Desative o Secure Boot na BIOS ou registre a chave MOK (mokutil --import)."
+      fi
+      die "Não foi possível restabelecer comunicação com o driver NVIDIA.
+  ${DIAG:-Causa não identificada automaticamente.}
+  Correção mais provável (resolve mismatch e módulo não carregado):
+    sudo reboot
+  Se persistir após reboot, reinstale o driver:
+    sudo ubuntu-drivers install && sudo reboot
+  Diagnóstico: dmesg | grep -i nvidia | tail -20"
+    fi
+  fi
+fi
 
 OLLAMA_OK=0
 if command -v ollama &>/dev/null; then
@@ -409,6 +512,19 @@ if [[ $OLLAMA_OK -eq 0 ]]; then
     || die "Falha ao instalar Ollama. Tente manualmente:
     curl -fsSL https://ollama.com/install.sh | sh"
   ok "Ollama instalado"
+fi
+
+# Se o driver foi recuperado nesta sessão, o Ollama pode ter iniciado sem ver a GPU
+if [[ $DRIVER_FIXED_NOW -eq 1 ]] && curl -s --max-time 3 http://localhost:11434/api/tags &>/dev/null; then
+  step "Reiniciando Ollama para detectar a GPU recém-ativada..."
+  if systemctl is-active ollama &>/dev/null 2>&1; then
+    sudo systemctl restart ollama
+  else
+    pkill -f "ollama serve" 2>/dev/null || true
+    sleep 2
+    nohup ollama serve >> "$LOG_DIR/ollama.log" 2>&1 &
+  fi
+  sleep 5
 fi
 
 # Verificar se servidor está rodando
@@ -452,9 +568,7 @@ fi
 
 # Verificar GPU disponível para inferência
 step "Verificando GPU para inferência..."
-GPU_DETECTED=0
-GPU_VRAM_GB=0
-if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null 2>&1; then
+if nvidia_smi_ok; then
   GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)
   VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{printf "%.0f", $1}')
   GPU_VRAM_GB=$(( VRAM_MB / 1024 ))
