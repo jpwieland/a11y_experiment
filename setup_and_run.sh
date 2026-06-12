@@ -415,6 +415,24 @@ else
   fi
 fi
 
+# Verificar GPU disponível para inferência
+step "Verificando GPU para inferência..."
+GPU_DETECTED=0
+GPU_VRAM_GB=0
+if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null 2>&1; then
+  GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)
+  VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk '{printf "%.0f", $1}')
+  GPU_VRAM_GB=$(( VRAM_MB / 1024 ))
+  CUDA_VER=$(nvidia-smi 2>/dev/null | awk '/CUDA Version/{print $NF}' | head -1)
+  ok "GPU: ${GPU_INFO}  |  VRAM: ${GPU_VRAM_GB} GB  |  CUDA: ${CUDA_VER}"
+  GPU_DETECTED=1
+  if [[ $GPU_VRAM_GB -lt 4 ]]; then
+    warn "VRAM < 4 GB — modelos 7B podem não caber inteiramente na GPU"
+  fi
+else
+  warn "GPU NVIDIA não detectada — Ollama usará CPU (experimento ~7× mais lento para modelos 7B)"
+fi
+
 # Verificar/baixar modelos
 step "Verificando modelos necessários..."
 MODELS_NEEDED=()
@@ -457,6 +475,24 @@ $(for m in "${MODELS_NEEDED[@]}"; do echo "    ollama pull $m"; done)"
     ollama pull $MODEL"
     ok "$MODEL baixado em $(elapsed $T_MODEL)"
   done
+fi
+
+# Confirmar que Ollama usa GPU na inferência (carrega modelo pequeno brevemente)
+if [[ $GPU_DETECTED -eq 1 ]]; then
+  step "Confirmando inferência na GPU (qwen2.5-coder:3b)..."
+  ollama run qwen2.5-coder:3b "." &>/dev/null &
+  INFER_PID=$!
+  sleep 4
+  OLLAMA_VRAM=$(nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader 2>/dev/null \
+    | grep -v "^[[:space:]]*$" \
+    | awk -F',' '{gsub(/ MiB/,"",$2); gsub(/ /,"",$2); sum+=$2} END{print sum+0}')
+  wait "$INFER_PID" 2>/dev/null || true
+  if [[ ${OLLAMA_VRAM:-0} -gt 100 ]]; then
+    ok "Inferência na GPU confirmada: ${OLLAMA_VRAM} MiB de VRAM alocados"
+  else
+    warn "VRAM não aumentou durante inferência — Ollama pode estar rodando em CPU"
+    warn "Verifique: OLLAMA_DEBUG=1 ollama run qwen2.5-coder:3b 'teste' 2>&1 | grep -i gpu"
+  fi
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -660,6 +696,12 @@ check_final "git" \
 
 check_final "disco ≥ 15 GB livres" \
   test "$FREE_KB" -gt 15728640
+
+if command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null 2>&1; then
+  ok "GPU NVIDIA detectada: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+else
+  warn "GPU NVIDIA não detectada — inferência em CPU (~7× mais lento para modelos 7B)"
+fi
 
 # Modelos
 for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b; do
