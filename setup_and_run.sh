@@ -299,7 +299,7 @@ install_npm_if_missing() {
   fi
 
   step "Instalando $label..."
-  sudo npm install -g "$pkg" \
+  sudo env PATH="$PATH" npm install -g "$pkg" \
     || { fail "Falha ao instalar $label"; return 1; }
   ok "$label instalado"
 }
@@ -520,13 +520,13 @@ fi
 step "Verificando dependências Python..."
 DEPS_FAILED=0
 check_py() {
-  local pkg="$1" label="${2:-$1}"
+  local pkg="$1" label="${2:-$1}" pip_pkg="${3:-$1}"
   if "$PYBIN" -c "import $pkg" &>/dev/null 2>&1; then
     ok "  $label"
   else
     fail "  $label — ausente"
     if [[ $ONLY_CHECK -eq 0 ]]; then
-      "$PYBIN" -m pip install "$pkg" -q && ok "  $label instalado" || { fail "  falha ao instalar $label"; DEPS_FAILED=1; }
+      "$PYBIN" -m pip install "$pip_pkg" -q && ok "  $label instalado" || { fail "  falha ao instalar $label"; DEPS_FAILED=1; }
     else
       DEPS_FAILED=1
     fi
@@ -535,7 +535,7 @@ check_py() {
 
 check_py pydantic        "pydantic"
 check_py structlog       "structlog"
-check_py yaml            "pyyaml"
+check_py yaml            "pyyaml"          "pyyaml"
 check_py playwright      "playwright"
 check_py openai          "openai"
 check_py jinja2          "jinja2"
