@@ -350,6 +350,15 @@ _CONFIDENCE_PRIORITY: dict[str, int] = {
     "low": 1,
 }
 
+# Seletores acima deste tamanho são considerados corrompidos (pa11y gera
+# caminhos de >1000 chars em bundles minificados) e são truncados para os
+# últimos segmentos — suficiente para localizar o elemento no DOM.
+_MAX_SELECTOR_LEN = 240
+_SANITIZED_SELECTOR_SEGMENTS = 3
+
+# Tamanho do fingerprint de contexto HTML usado no merge cross-tool
+_CONTEXT_FP_LEN = 160
+
 
 class DetectionProtocol:
     """
@@ -395,8 +404,14 @@ class DetectionProtocol:
 
         file_hash = "sha256:" + hashlib.sha256(file_content.encode()).hexdigest()
 
-        # 1. Agrupa findings por chave de deduplicação
+        # 1. Agrupa findings por chave de deduplicação exata
         grouped = self._group_findings(file, findings_by_tool)
+
+        # 1b. Merge cross-tool: ferramentas diferentes geram seletores
+        # sintaticamente diferentes para o MESMO elemento (axe: 'img';
+        # pa11y: '#root > div > img'). Sem este passo, o consenso
+        # multi-ferramenta nunca acontece e o mesmo problema conta 2-3×.
+        grouped = self._merge_equivalent_groups(grouped)
 
         # 2. Converte grupos em A11yIssue
         issues: list[A11yIssue] = []
@@ -457,14 +472,159 @@ class DetectionProtocol:
         Gera chave de deduplicação para um finding.
 
         Dois findings com mesma chave representam o mesmo problema.
+        O critério WCAG é resolvido ANTES da comparação (incluindo o
+        fallback por rule_id), para que um finding do axe com apenas
+        rule_id case com um finding do pa11y que traz o critério.
         """
-        selector = finding.selector.strip().lower()
-        wcag = (finding.wcag_criteria or "").strip()
-        rule = finding.rule_id.strip().lower()
+        selector = self._sanitize_selector(finding.selector).strip().lower()
+        return f"{selector}|{self._resolved_criteria(finding)}"
 
-        # Priorizar WCAG quando disponível; fallback para rule_id
-        criteria = wcag if wcag else rule
-        return f"{selector}|{criteria}"
+    @staticmethod
+    def _resolved_criteria(finding: ToolFinding) -> str:
+        """Critério canônico: wcag da ferramenta > mapeamento por rule_id > rule_id."""
+        wcag = (finding.wcag_criteria or "").strip()
+        if not wcag:
+            wcag = RULE_TO_WCAG_CRITERION.get(finding.rule_id.strip().lower(), "")
+        return wcag if wcag else finding.rule_id.strip().lower()
+
+    @staticmethod
+    def _sanitize_selector(selector: str) -> str:
+        """
+        Trunca seletores corrompidos para os últimos segmentos.
+
+        O pa11y (HTML CodeSniffer) gera caminhos de >1000 chars em arquivos
+        com conteúdo serializado (bundles, XML embutido). Esses caminhos não
+        são seletores CSS válidos, poluem relatórios e impedem deduplicação.
+        Os últimos segmentos bastam para localizar o elemento.
+        """
+        if len(selector) <= _MAX_SELECTOR_LEN:
+            return selector
+        segments = [s.strip() for s in selector.split(">") if s.strip()]
+        return " > ".join(segments[-_SANITIZED_SELECTOR_SEGMENTS:])
+
+    @staticmethod
+    def _selector_segments(selector: str) -> tuple[str, ...]:
+        """Seletor normalizado como tupla de segmentos simples."""
+        return tuple(
+            " ".join(s.split()).strip().lower()
+            for s in selector.split(">")
+            if s.strip()
+        )
+
+    @staticmethod
+    def _context_fingerprint(findings: list[ToolFinding]) -> str:
+        """
+        Fingerprint do snippet HTML do elemento (whitespace colapsado,
+        minúsculas, primeiros _CONTEXT_FP_LEN chars). Vazio se nenhum
+        finding do grupo tem contexto.
+        """
+        for f in findings:
+            ctx = " ".join(f.context.split()).strip().lower()
+            if ctx:
+                return ctx[:_CONTEXT_FP_LEN]
+        return ""
+
+    def _merge_equivalent_groups(
+        self,
+        groups: dict[str, tuple[list[ToolFinding], list[ScanTool]]],
+    ) -> dict[str, tuple[list[ToolFinding], list[ScanTool]]]:
+        """
+        Funde grupos que apontam para o MESMO elemento com seletores
+        sintaticamente diferentes (variação cross-tool).
+
+        Regras de equivalência (mesmo critério WCAG obrigatório):
+        1. SUFIXO: os segmentos de um seletor são sufixo dos segmentos do
+           outro — axe gera 'img' quando único; pa11y gera o caminho
+           completo '#root > div > img'. O merge só ocorre quando o
+           candidato é ÚNICO (ambiguidade = elementos distintos, não funde).
+        2. CONTEXTO: mesmo tag final + mesmo snippet HTML não-vazio —
+           resolve casos onde as profundidades dos seletores divergem
+           sem relação de sufixo.
+
+        Seletores de fonte (eslint, 'Arquivo.tsx:LL:CC') nunca fundem com
+        seletores DOM — limitação documentada: coordenadas de código-fonte
+        e de DOM renderizado não têm correspondência confiável.
+        """
+        if len(groups) < 2:
+            return groups
+
+        # Representação de trabalho, ordem determinística (rasos primeiro)
+        entries: list[dict] = []
+        for key, (findings, tools) in groups.items():
+            selector_part, _, criteria = key.rpartition("|")
+            segments = self._selector_segments(selector_part)
+            entries.append({
+                "key": key,
+                "criteria": criteria,
+                "segments": segments,
+                "tag": segments[-1].split(":")[0].split("[")[0].split(".")[0].split("#")[0].strip() if segments else "",
+                "ctx": self._context_fingerprint(findings),
+                "is_source_coord": any(
+                    ext in selector_part
+                    for ext in (".tsx:", ".jsx:", ".ts:", ".js:", ".vue:")
+                ),
+            })
+        entries.sort(key=lambda e: (e["criteria"], len(e["segments"]), e["key"]))
+
+        merged_into: dict[str, str] = {}  # key origem → key destino
+
+        def target_of(key: str) -> str:
+            while key in merged_into:
+                key = merged_into[key]
+            return key
+
+        for a in entries:
+            if a["key"] in merged_into or a["is_source_coord"] or not a["segments"]:
+                continue
+            # Candidatos: mesmo critério, mais profundos, com 'a' como sufixo
+            suffix_candidates = []
+            ctx_candidates = []
+            for b in entries:
+                if b is a or b["is_source_coord"]:
+                    continue
+                if b["criteria"] != a["criteria"]:
+                    continue
+                if target_of(b["key"]) == a["key"]:
+                    continue
+                if len(b["segments"]) > len(a["segments"]) and \
+                        b["segments"][-len(a["segments"]):] == a["segments"]:
+                    suffix_candidates.append(b)
+                elif a["ctx"] and a["ctx"] == b["ctx"] and a["tag"] == b["tag"]:
+                    ctx_candidates.append(b)
+
+            chosen = None
+            if len(suffix_candidates) == 1:
+                chosen = suffix_candidates[0]
+            elif len(suffix_candidates) > 1 and a["ctx"]:
+                # Desambiguar por contexto
+                ctx_match = [b for b in suffix_candidates if b["ctx"] == a["ctx"]]
+                if len(ctx_match) == 1:
+                    chosen = ctx_match[0]
+            elif not suffix_candidates and len(ctx_candidates) == 1:
+                chosen = ctx_candidates[0]
+
+            if chosen is not None:
+                merged_into[a["key"]] = target_of(chosen["key"])
+                log.debug(
+                    "detection_cross_tool_merge",
+                    from_key=a["key"][:80],
+                    into_key=chosen["key"][:80],
+                )
+
+        if not merged_into:
+            return groups
+
+        # Materializar fusões
+        result: dict[str, tuple[list[ToolFinding], list[ScanTool]]] = {}
+        for key, (findings, tools) in groups.items():
+            dst = target_of(key)
+            if dst not in result:
+                result[dst] = ([], [])
+            result[dst][0].extend(findings)
+            for t in tools:
+                if t not in result[dst][1]:
+                    result[dst][1].append(t)
+        return result
 
     def _build_issue(
         self,
@@ -491,10 +651,21 @@ class DetectionProtocol:
         if not wcag_criteria and primary.rule_id:
             wcag_criteria = RULE_TO_WCAG_CRITERION.get(primary.rule_id.lower())
 
+        # Captura visual: preferir o finding primário; senão, qualquer
+        # finding do grupo que tenha screenshot (só Playwright captura)
+        screenshot_path = primary.screenshot_path
+        bounding_rect = primary.bounding_rect
+        if screenshot_path is None:
+            for f in findings:
+                if f.screenshot_path:
+                    screenshot_path = f.screenshot_path
+                    bounding_rect = f.bounding_rect
+                    break
+
         # Construir issue
         issue = A11yIssue(
             file=str(file),
-            selector=primary.selector,
+            selector=self._sanitize_selector(primary.selector),
             issue_type=issue_type,
             complexity=complexity,
             wcag_criteria=wcag_criteria,
@@ -505,6 +676,8 @@ class DetectionProtocol:
             findings=findings,
             message=primary.message,
             context=primary.context,
+            screenshot_path=screenshot_path,
+            bounding_rect=bounding_rect,
         )
         issue.compute_id()
         return issue
@@ -513,15 +686,17 @@ class DetectionProtocol:
         """
         Escolhe o finding mais informativo como representante do grupo.
 
-        Prioriza: wcag_criteria presente > impact alto > mais contexto.
+        Prioriza: wcag_criteria presente > impact alto > mais contexto >
+        seletor mais curto (após merge cross-tool, o seletor curto do axe
+        é mais legível e estável que o caminho completo do pa11y).
         """
         impact_order = ["critical", "serious", "moderate", "minor"]
 
-        def rank(f: ToolFinding) -> tuple[int, int, int]:
+        def rank(f: ToolFinding) -> tuple[int, int, int, int]:
             has_wcag = 1 if f.wcag_criteria else 0
             impact_score = 4 - impact_order.index(f.impact) if f.impact in impact_order else 0
             context_len = len(f.context)
-            return (has_wcag, impact_score, context_len)
+            return (has_wcag, impact_score, context_len, -len(f.selector))
 
         return max(findings, key=rank)
 

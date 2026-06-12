@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -13,6 +14,52 @@ from a11y_autofix.config import ScanTool, ToolFinding
 from a11y_autofix.scanner.base import BaseRunner
 
 log = structlog.get_logger(__name__)
+
+
+def _save_lighthouse_screenshot(audits: dict, dest: Path) -> bool:
+    """
+    Extrai e salva o screenshot do Lighthouse em *dest*.
+
+    Tenta primeiro o ``final-screenshot`` (snapshot após carregamento completo),
+    depois o último frame do filmstrip ``screenshot-thumbnails``.
+
+    O Lighthouse gera imagens JPEG independentemente da categoria auditada.
+    Pillow/ReportLab identificam o formato pelos magic bytes, não pela extensão,
+    portanto salvamos com o caminho exato que foi passado.
+
+    Returns:
+        True se o screenshot foi salvo com sucesso.
+    """
+    data_url: str = ""
+
+    # Tentativa 1: final-screenshot
+    final = audits.get("final-screenshot", {})
+    if isinstance(final, dict):
+        details = final.get("details") or {}
+        if isinstance(details, dict):
+            data_url = details.get("data", "")
+
+    # Tentativa 2: último frame do filmstrip
+    if not data_url:
+        film = audits.get("screenshot-thumbnails", {})
+        if isinstance(film, dict):
+            items = (film.get("details") or {}).get("items", [])
+            if items and isinstance(items[-1], dict):
+                data_url = items[-1].get("data", "")
+
+    if not data_url or "," not in data_url:
+        return False
+
+    try:
+        _, b64 = data_url.split(",", 1)
+        raw = base64.b64decode(b64)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw)
+        log.debug("lighthouse_screenshot_saved", path=str(dest), size_kb=len(raw) // 1024)
+        return True
+    except Exception as e:
+        log.warning("lighthouse_screenshot_failed", error=str(e)[:200])
+        return False
 
 # Mapeamento de audits Lighthouse → critérios WCAG
 _AUDIT_TO_WCAG: dict[str, str] = {
@@ -102,11 +149,27 @@ class LighthouseRunner(BaseRunner):
             pass
         return "unknown"
 
+    async def safe_run(  # type: ignore[override]
+        self,
+        harness_path: Path,
+        wcag: str,
+        harness_url: str | None = None,
+        screenshot_path: "Path | None" = None,
+    ) -> list[ToolFinding]:
+        """Wraps run() com tratamento de erros."""
+        try:
+            return await self.run(harness_path, wcag, harness_url,
+                                  screenshot_path=screenshot_path)
+        except Exception as e:
+            log.warning("runner_safe_run_failed", tool=self.tool.value, error=str(e)[:300])
+            return []
+
     async def run(
         self,
         harness_path: Path,
         wcag: str,
         harness_url: str | None = None,
+        screenshot_path: "Path | None" = None,
     ) -> list[ToolFinding]:
         """
         Executa Lighthouse na categoria accessibility.
@@ -115,6 +178,9 @@ class LighthouseRunner(BaseRunner):
             harness_path: Caminho do arquivo HTML harness.
             wcag: Nível WCAG (usado para filtrar resultados).
             harness_url: URL HTTP para acessar o harness (preferido).
+            screenshot_path: Se fornecido, salva o ``final-screenshot`` do
+                Lighthouse nesse caminho. Produz imagem de melhor qualidade
+                que o Playwright porque usa rendering completo com JS.
 
         Returns:
             Lista de ToolFinding.
@@ -137,6 +203,9 @@ class LighthouseRunner(BaseRunner):
             "--allow-file-access-from-files"
         )
 
+        # Sempre incluir "performance" para garantir captura de final-screenshot
+        # mesmo ao auditar só acessibilidade. O output do LH inclui o screenshot
+        # no campo audits["final-screenshot"] independentemente da categoria.
         proc = await asyncio.create_subprocess_exec(
             "lighthouse",
             url,
@@ -172,6 +241,15 @@ class LighthouseRunner(BaseRunner):
 
         findings: list[ToolFinding] = []
         all_audits: dict[str, object] = data.get("audits", {})  # type: ignore[assignment]
+
+        # ── Extrair screenshot do Lighthouse ────────────────────────────────
+        # O Lighthouse captura o componente com rendering completo (JS+CSS),
+        # produzindo uma imagem de melhor qualidade do que o Playwright.
+        if screenshot_path is not None:
+            saved = _save_lighthouse_screenshot(all_audits, screenshot_path)  # type: ignore[arg-type]
+            if not saved:
+                log.debug("lighthouse_screenshot_not_in_output", hint="final-screenshot ausente no JSON")
+
         audit_refs = (
             data.get("categories", {})
             .get("accessibility", {})
