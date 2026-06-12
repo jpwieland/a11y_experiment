@@ -10,6 +10,7 @@
 #    bash setup_and_run.sh --only-setup  # só instalar, sem rodar o experimento
 #    bash setup_and_run.sh --only-check  # só checar o ambiente, sem instalar
 #    bash setup_and_run.sh --quick       # smoke test (1 modelo, 5 arq/projeto)
+#    bash setup_and_run.sh --verbose     # mostra cada comando e sua saída completa
 #    bash setup_and_run.sh --help
 #
 #  Compatível com: Ubuntu 20.04 / 22.04 / 24.04 (x86-64)
@@ -82,19 +83,35 @@ open_term() {
 }
 
 # ── Flags ──────────────────────────────────────────────────────────────────────
-ONLY_SETUP=0; ONLY_CHECK=0; QUICK=0
+ONLY_SETUP=0; ONLY_CHECK=0; QUICK=0; VERBOSE="${VERBOSE:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --only-setup) ONLY_SETUP=1 ;;
     --only-check) ONLY_CHECK=1 ;;
     --quick)      QUICK=1 ;;
+    --verbose|-v) VERBOSE=1 ;;
     --help|-h)
-      grep '^#' "$0" | head -15 | sed 's/^# \?//'
+      grep '^#' "$0" | head -16 | sed 's/^# \?//'
       exit 0 ;;
     *) echo "Flag desconhecida: $1"; exit 2 ;;
   esac
   shift
 done
+
+# Modo verboso: flags de silêncio viram vazias e cada comando é ecoado antes de rodar
+if [[ $VERBOSE -eq 1 ]]; then
+  APT_Q=""; PIP_Q=""
+else
+  APT_Q="-qq"; PIP_Q="-q"
+fi
+
+# vexec: executa um comando ecoando-o antes (apenas em modo verboso)
+vexec() {
+  if [[ $VERBOSE -eq 1 ]]; then
+    echo "  ${M}\$ $*${N}"
+  fi
+  "$@"
+}
 
 T0_GLOBAL=$(date +%s)
 
@@ -104,6 +121,7 @@ echo "${B}${C}║   a11y-autofix — setup + execução experimental            
 echo "${B}${C}║   Ubuntu 20.04 / 22.04 / 24.04 (x86-64)                        ║${N}"
 echo "${B}${C}╚══════════════════════════════════════════════════════════════════╝${N}"
 echo "  Log: ${B}$SETUP_LOG${N}"
+[[ $VERBOSE -eq 1 ]] && echo "  Modo: ${B}verboso${N} (comandos e saídas completas)"
 echo ""
 
 # Aba de monitoramento do log de setup (acompanha todas as fases)
@@ -166,8 +184,9 @@ fi
 title "Fase 1 — Dependências de sistema (apt)"
 
 if [[ $ONLY_CHECK -eq 0 ]]; then
-  step "Atualizando lista de pacotes..."
-  sudo apt-get update -qq || warn "apt update retornou erro — continuando."
+  step "Atualizando lista de pacotes (pode levar alguns minutos)..."
+  [[ $VERBOSE -eq 0 ]] && info "Dica: use --verbose para ver a saída completa dos comandos"
+  vexec sudo apt-get update $APT_Q || warn "apt update retornou erro — continuando."
 
   PKGS_NEEDED=()
   check_apt() {
@@ -213,7 +232,7 @@ if [[ $ONLY_CHECK -eq 0 ]]; then
 
   if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
     info "Instalando: ${PKGS_NEEDED[*]}"
-    sudo apt-get install -y "${PKGS_NEEDED[@]}" || die "Falha ao instalar pacotes apt: ${PKGS_NEEDED[*]}"
+    vexec sudo apt-get install -y "${PKGS_NEEDED[@]}" || die "Falha ao instalar pacotes apt: ${PKGS_NEEDED[*]}"
     ok "Pacotes instalados: ${#PKGS_NEEDED[@]}"
   else
     ok "Todos os pacotes apt já presentes"
@@ -251,10 +270,10 @@ if [[ -z "$PYTHON" ]]; then
   fi
 
   step "Python 3.11 não encontrado — instalando via deadsnakes PPA..."
-  sudo apt-get install -y software-properties-common
-  sudo add-apt-repository -y ppa:deadsnakes/ppa
-  sudo apt-get update -qq
-  sudo apt-get install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
+  vexec sudo apt-get install -y software-properties-common
+  vexec sudo add-apt-repository -y ppa:deadsnakes/ppa
+  vexec sudo apt-get update $APT_Q
+  vexec sudo apt-get install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
 
   if ! command -v python3.11 &>/dev/null; then
     die "Falha ao instalar Python 3.11. Tente manualmente:
@@ -291,9 +310,10 @@ if [[ $NODE_OK -eq 0 ]]; then
   fi
 
   step "Instalando Node.js 20 via NodeSource..."
+  [[ $VERBOSE -eq 1 ]] && echo "  ${M}\$ curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -${N}"
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - \
     || die "Falha ao adicionar repositório NodeSource."
-  sudo apt-get install -y nodejs \
+  vexec sudo apt-get install -y nodejs \
     || die "Falha ao instalar nodejs."
   ok "Node.js instalado: $(node --version)"
 fi
@@ -335,7 +355,7 @@ install_npm_if_missing() {
   fi
 
   step "Instalando $label..."
-  sudo env PATH="$PATH" npm install -g "$pkg" \
+  vexec sudo env PATH="$PATH" npm install -g "$pkg" \
     || { fail "Falha ao instalar $label"; return 1; }
   ok "$label instalado"
 }
@@ -422,11 +442,11 @@ if [[ $GPU_PRESENT -eq 1 ]] && ! nvidia_smi_ok; then
     fi
 
     step "Instalando driver NVIDIA recomendado (ubuntu-drivers)..."
-    sudo apt-get install -y ubuntu-drivers-common \
+    vexec sudo apt-get install -y ubuntu-drivers-common \
       || die "Falha ao instalar ubuntu-drivers-common."
     info "Driver recomendado: $(ubuntu-drivers devices 2>/dev/null | awk '/recommended/{print $3}' | head -1)"
-    sudo ubuntu-drivers install \
-      || sudo ubuntu-drivers autoinstall \
+    vexec sudo ubuntu-drivers install \
+      || vexec sudo ubuntu-drivers autoinstall \
       || die "Falha ao instalar o driver NVIDIA.
   Instale manualmente:
     ubuntu-drivers devices                    # listar drivers disponíveis
@@ -686,7 +706,7 @@ PYBIN="$VENV/bin/python"
 # pip atualizado
 if [[ $ONLY_CHECK -eq 0 ]]; then
   step "Atualizando pip..."
-  "$PYBIN" -m pip install --upgrade pip -q \
+  vexec "$PYBIN" -m pip install --upgrade pip $PIP_Q \
     || warn "Falha ao atualizar pip — continuando."
 fi
 
@@ -706,7 +726,7 @@ if [[ $A11Y_OK -eq 0 ]]; then
   fi
 
   step "Instalando a11y_autofix e dependências..."
-  "$PYBIN" -m pip install -e "$ROOT" \
+  vexec "$PYBIN" -m pip install -e "$ROOT" \
     || die "Falha ao instalar o pacote.
   Verifique o pyproject.toml e tente:
     source $VENV/bin/activate
@@ -724,7 +744,7 @@ check_py() {
   else
     fail "  $label — ausente"
     if [[ $ONLY_CHECK -eq 0 ]]; then
-      "$PYBIN" -m pip install "$pip_pkg" -q && ok "  $label instalado" || { fail "  falha ao instalar $label"; DEPS_FAILED=1; }
+      vexec "$PYBIN" -m pip install "$pip_pkg" $PIP_Q && ok "  $label instalado" || { fail "  falha ao instalar $label"; DEPS_FAILED=1; }
     else
       DEPS_FAILED=1
     fi
@@ -777,14 +797,14 @@ if [[ $PLAYWRIGHT_OK -eq 0 ]]; then
   fi
 
   step "Instalando browser Chromium para Playwright..."
-  "$VENV/bin/playwright" install chromium \
+  vexec "$VENV/bin/playwright" install chromium \
     || die "Falha ao instalar Chromium.
   Tente manualmente:
     source $VENV/bin/activate
     playwright install chromium"
 
   step "Instalando dependências de sistema do Playwright..."
-  "$VENV/bin/playwright" install-deps chromium \
+  vexec "$VENV/bin/playwright" install-deps chromium \
     || warn "playwright install-deps falhou — pode funcionar mesmo assim."
 
   # Verificar novamente
