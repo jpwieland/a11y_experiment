@@ -25,11 +25,14 @@ from a11y_autofix.config import (
     FixAttempt,
     FixResult,
     ModelConfig,
+    ScanMode,
+    ScanResult,
     Settings,
 )
 from a11y_autofix.llm.client import LocalLLMClient
 from a11y_autofix.router.engine import Router
 from a11y_autofix.scanner.orchestrator import MultiToolScanner
+from a11y_autofix.utils.angular_template import find_angular_components
 from a11y_autofix.utils.files import find_react_files
 
 if TYPE_CHECKING:
@@ -56,6 +59,8 @@ class Pipeline:
         model_config: ModelConfig,
         agent_preference: AgentType = AgentType.AUTO,
         dry_run: bool = False,
+        framework: str = "auto",
+        strategy: str = "few-shot",
     ) -> None:
         """
         Args:
@@ -63,15 +68,26 @@ class Pipeline:
             model_config: Configuração do modelo LLM.
             agent_preference: Preferência de agente (AUTO = router decide).
             dry_run: Se True, não aplica correções.
+            framework: Framework alvo — 'react', 'angular' ou 'auto' (detecta ambos).
+            strategy: Estratégia de prompting (IV2): 'zero-shot', 'few-shot'
+                      ou 'chain-of-thought'. Propagada a todos os agentes.
         """
         self.settings = settings
         self.model_config = model_config
         self.agent_preference = agent_preference
         self.dry_run = dry_run
+        self.framework = framework
+        self.strategy = strategy
 
         self.scanner = MultiToolScanner(settings)
         self.router = Router(settings)
         self.llm_client = LocalLLMClient(model_config)
+
+        # Pipeline de validação em 4 camadas (methodology Section 3.7.2).
+        # Antes de 06/2026 este módulo existia mas NUNCA era executado:
+        # patches eram aceitos e creditados sem qualquer verificação.
+        from a11y_autofix.validation import ValidationPipeline
+        self.validator = ValidationPipeline()
 
     async def run(
         self,
@@ -80,6 +96,7 @@ class Pipeline:
         output_dir: Path | None = None,
         on_file_done: Callable | None = None,
         scan_cache: "dict[str, object] | None" = None,
+        generate_pdf: bool = False,
     ) -> list[FixResult]:
         """
         Pipeline em streaming: scan e fix acontecem CONCORRENTEMENTE.
@@ -103,12 +120,18 @@ class Pipeline:
                         seguintes. Persistência em disco é responsabilidade
                         do runner (ScanResultCache.save()).
         """
-        from a11y_autofix.config import ScanResult
-
         files = self._discover_files(targets)
         if not files:
             log.warning("no_files_found", targets=[str(t) for t in targets])
             return []
+
+        # Diretório de screenshots estilo Lighthouse (full-page com destaques
+        # + crop por elemento violador). Ativo por padrão quando há output_dir;
+        # desativável via settings.capture_screenshots=False.
+        screenshots_dir: Path | None = None
+        if output_dir and (generate_pdf or self.settings.capture_screenshots):
+            screenshots_dir = output_dir / "screenshots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Pre-flight: verificar endpoint de chat ANTES de processar arquivos ──
         # health_check() só testa /v1/models — não detecta 404 em /v1/chat/completions.
@@ -162,7 +185,9 @@ class Pipeline:
                 scan_result = cached_sr
             else:
                 async with scan_sem:
-                    scan_result = await self.scanner.scan_file(file, wcag_level)
+                    scan_result = await self.scanner.scan_file(
+                        file, wcag_level, screenshot_dir=screenshots_dir
+                    )
                 # Escrever no cache com ambas as chaves para lookup consistente
                 if scan_cache is not None:
                     scan_cache[str(file)] = scan_result
@@ -221,6 +246,31 @@ class Pipeline:
         file_order = {f: i for i, f in enumerate(files)}
         all_results.sort(key=lambda r: file_order.get(r.file, len(files)))
 
+        # ── Scans adicionais: mobile e alto contraste ─────────────────────────
+        mobile_scan_results: list[ScanResult] = []
+        high_contrast_scan_results: list[ScanResult] = []
+
+        if self.settings.scan_mobile or self.settings.scan_high_contrast:
+            extra_tasks = []
+            for r in all_results:
+                if self.settings.scan_mobile:
+                    extra_tasks.append(
+                        self.scanner.scan_file_mobile(r.file, wcag_level)
+                    )
+                if self.settings.scan_high_contrast:
+                    extra_tasks.append(
+                        self.scanner.scan_file_high_contrast(r.file, wcag_level)
+                    )
+
+            if extra_tasks:
+                extra_raw = await asyncio.gather(*extra_tasks, return_exceptions=True)
+                for item in extra_raw:
+                    if isinstance(item, ScanResult):
+                        if item.scan_mode == ScanMode.MOBILE:
+                            mobile_scan_results.append(item)
+                        elif item.scan_mode == ScanMode.HIGH_CONTRAST:
+                            high_contrast_scan_results.append(item)
+
         # Relatórios
         if output_dir:
             scan_results_typed = [
@@ -232,6 +282,9 @@ class Pipeline:
                 fix_results=all_results,
                 output_dir=output_dir,
                 wcag_level=wcag_level,
+                mobile_scan_results=mobile_scan_results,
+                high_contrast_scan_results=high_contrast_scan_results,
+                generate_pdf=generate_pdf,
             )
 
         total_fixed  = sum(r.issues_fixed for r in all_results)
@@ -256,7 +309,6 @@ class Pipeline:
         Returns:
             FixResult com todas as tentativas.
         """
-        from a11y_autofix.config import ScanResult
         if not isinstance(scan, ScanResult):
             raise TypeError("Expected ScanResult")
 
@@ -300,28 +352,121 @@ class Pipeline:
 
             patch = await agent.run(attempt_task)
 
+            # ── Validação em 4 camadas (Section 3.7.2) ────────────────────
+            # Um patch só é aceito se passar nas 4 camadas. Rejeição em
+            # qualquer camada descarta o patch (arquivo NÃO é modificado)
+            # e a tentativa é registrada como falha — o loop tenta de novo.
+            # Rejeição na Camada 2 = regressão funcional → métrica ρ (H5),
+            # contada via prefixo "functional_regression:" no error.
+            validation_passed: bool | None = None
+            validation_layer: int | None = None
+            patch_error = patch.error
+            patch_accepted = bool(patch.success and patch.new_content)
+
+            if patch_accepted:
+                validation = self.validator.validate(
+                    patched_content=patch.new_content,
+                    original_content=current_content,
+                    issues=pending_issues,
+                    file_id=scan.file.name,
+                    model_id=self.model_config.model_id,
+                    strategy=self.strategy,
+                )
+                validation_passed = validation.passed
+                validation_layer = validation.rejected_at_layer
+                if not validation.passed:
+                    patch_accepted = False
+                    patch_error = validation.failure_reason
+
             attempt = FixAttempt(
                 attempt_number=attempt_num,
                 agent=decision.agent,
                 model=self.model_config.model_id,
                 timestamp=datetime.now(tz=timezone.utc),
-                success=patch.success,
-                diff=patch.diff,
-                new_content=patch.new_content,
+                success=patch_accepted,
+                diff=patch.diff if patch_accepted else "",
+                new_content=patch.new_content if patch_accepted else "",
                 tokens_used=patch.tokens_used,
                 time_seconds=patch.time_seconds,
-                error=patch.error,
+                error=patch_error,
+                validation_passed=validation_passed,
+                validation_rejected_layer=validation_layer,
             )
             attempts.append(attempt)
 
-            if patch.success and patch.new_content:
+            if patch_accepted:
                 scan.file.write_text(patch.new_content, encoding="utf-8")
                 current_content = patch.new_content
-                # Marcar as issues desta tentativa como resolvidas.
-                # O agente recebeu apenas pending_issues, então todas as que
-                # ele tinha como alvo são consideradas corrigidas no patch.
-                for issue in pending_issues:
-                    resolved_issue_ids.add(issue.issue_id)
+
+                if self.settings.verify_fixes_by_rescan:
+                    # ── Camada 3 real: re-scan browser-based ──────────────
+                    # Credita como corrigidos APENAS os issues que de fato
+                    # desapareceram do re-scan. issue_id é content-addressed
+                    # (file:selector:wcag:type), estável entre scans.
+                    #
+                    # Guarda net-delta por critério WCAG: se o patch muda a
+                    # estrutura do DOM, o seletor muda e o id antigo "some"
+                    # mesmo que uma violação equivalente persista com novo
+                    # id. Por isso o crédito por critério é limitado ao
+                    # desaparecimento LÍQUIDO de issues daquele critério
+                    # (antes − depois), nunca apenas ao sumiço do id.
+                    try:
+                        rescan = await self.scanner.scan_file(scan.file, wcag_level)
+                        remaining_ids = {i.issue_id for i in rescan.issues}
+
+                        def _crit(issue) -> str:
+                            return issue.wcag_criteria or f"type:{issue.issue_type.value}"
+
+                        before_by_crit: dict[str, int] = {}
+                        for i in pending_issues:
+                            before_by_crit[_crit(i)] = before_by_crit.get(_crit(i), 0) + 1
+                        after_by_crit: dict[str, int] = {}
+                        for i in rescan.issues:
+                            after_by_crit[_crit(i)] = after_by_crit.get(_crit(i), 0) + 1
+
+                        # Orçamento de crédito por critério = redução líquida
+                        credit_budget = {
+                            c: max(0, n - after_by_crit.get(c, 0))
+                            for c, n in before_by_crit.items()
+                        }
+
+                        newly_resolved = []
+                        id_vanished_but_uncredited = 0
+                        for issue in pending_issues:
+                            if issue.issue_id in remaining_ids:
+                                continue  # ainda presente: não corrigido
+                            c = _crit(issue)
+                            if credit_budget.get(c, 0) > 0:
+                                credit_budget[c] -= 1
+                                newly_resolved.append(issue)
+                            else:
+                                # id sumiu mas o total do critério não caiu →
+                                # violação provavelmente migrou de seletor
+                                id_vanished_but_uncredited += 1
+
+                        for issue in newly_resolved:
+                            resolved_issue_ids.add(issue.issue_id)
+                        log.info(
+                            "rescan_verification",
+                            file=scan.file.name,
+                            targeted=len(pending_issues),
+                            verified_fixed=len(newly_resolved),
+                            still_present=len(pending_issues) - len(newly_resolved),
+                            selector_migrations=id_vanished_but_uncredited,
+                        )
+                    except Exception as e:
+                        # Re-scan falhou: NÃO creditar (conservador) —
+                        # o loop tentará os issues novamente
+                        log.warning(
+                            "rescan_verification_failed",
+                            file=scan.file.name,
+                            error=str(e)[:200],
+                        )
+                else:
+                    # Crédito otimista (comportamento pré-06/2026):
+                    # todos os issues alvo do patch validado
+                    for issue in pending_issues:
+                        resolved_issue_ids.add(issue.issue_id)
                 # Continuar o loop: pode haver issues remanescentes de tentativas
                 # anteriores que o agente não incluiu nesta rodada.
 
@@ -341,23 +486,31 @@ class Pipeline:
         )
 
     def _create_agent(self, agent_name: str) -> "BaseAgent":
-        """Instancia o agente pelo nome."""
+        """Instancia o agente pelo nome, propagando a estratégia de prompting."""
         if agent_name == "openhands":
-            return OpenHandsAgent(self.llm_client)
+            return OpenHandsAgent(self.llm_client, strategy=self.strategy)
         elif agent_name == "swe-agent":
-            return SWEAgent(self.llm_client)
+            return SWEAgent(self.llm_client, strategy=self.strategy)
         else:
-            return DirectLLMAgent(self.llm_client)
+            return DirectLLMAgent(self.llm_client, strategy=self.strategy)
 
     def _discover_files(self, targets: list[Path] | list[str]) -> list[Path]:
-        """Descobre arquivos React/TypeScript a partir de targets."""
+        """
+        Descobre arquivos a partir de targets, respeitando self.framework.
+
+        - 'react'   → find_react_files() para cada target
+        - 'angular' → find_angular_components() para cada target
+        - 'auto'    → ambos, deduplicados (útil para projetos híbridos)
+        """
         files: list[Path] = []
         for target in targets:
             path = Path(target) if isinstance(target, str) else target
-            found = find_react_files(path)
-            files.extend(found)
+            if self.framework in ("react", "auto"):
+                files.extend(find_react_files(path))
+            if self.framework in ("angular", "auto"):
+                files.extend(find_angular_components(path))
 
-        # Deduplicar mantendo ordem
+        # Deduplicar mantendo ordem de descoberta
         seen: set[Path] = set()
         unique: list[Path] = []
         for f in files:
@@ -373,15 +526,37 @@ class Pipeline:
         fix_results: list[FixResult],
         output_dir: Path,
         wcag_level: str,
+        mobile_scan_results: "list[ScanResult] | None" = None,
+        high_contrast_scan_results: "list[ScanResult] | None" = None,
+        generate_pdf: bool = False,
     ) -> None:
-        """Gera relatórios JSON e HTML."""
-        from a11y_autofix.config import ScanResult
+        """Gera relatórios JSON e HTML (desktop + mobile separado + alto contraste).
+
+        O PDF só é gerado quando generate_pdf=True (flag --pdf no CLI).
+        """
         from a11y_autofix.reporter.html_reporter import HTMLReporter
         from a11y_autofix.reporter.json_reporter import JSONReporter
+        import json
 
         typed_scans = [s for s in scan_results if isinstance(s, ScanResult)]
 
         json_reporter = JSONReporter(self.settings)
+        html_reporter = HTMLReporter()
+
+        def _maybe_pdf(
+            data: dict,
+            out_dir: Path,
+            filename: str = "accessibility_report.pdf",
+        ) -> None:
+            if not generate_pdf:
+                return
+            try:
+                from a11y_autofix.reporter.pdf_reporter import PDFReporter
+                PDFReporter().generate(report_data=data, output_dir=out_dir, filename=filename)
+            except Exception as exc:
+                log.warning("pdf_report_failed", filename=filename, error=str(exc)[:200])
+
+        # ── Relatório desktop principal ───────────────────────────────────────
         json_path = json_reporter.generate(
             scan_results=typed_scans,
             fix_results=fix_results,
@@ -389,9 +564,42 @@ class Pipeline:
             wcag_level=wcag_level,
             model_name=self.model_config.model_id,
         )
-
-        import json
         report_data = json.loads(json_path.read_text(encoding="utf-8"))
-
-        html_reporter = HTMLReporter()
         html_reporter.generate(report_data=report_data, output_dir=output_dir)
+        _maybe_pdf(report_data, output_dir)
+
+        # ── Relatório mobile separado (se houver issues) ──────────────────────
+        mobile_scans = [s for s in (mobile_scan_results or []) if s.has_issues]
+        if mobile_scans:
+            mobile_dir = output_dir / "mobile"
+            mobile_json_path = json_reporter.generate(
+                scan_results=mobile_scans,
+                fix_results=[],
+                output_dir=mobile_dir,
+                wcag_level=wcag_level,
+                model_name=self.model_config.model_id,
+                report_label="mobile",
+            )
+            mobile_data = json.loads(mobile_json_path.read_text(encoding="utf-8"))
+            html_reporter.generate(report_data=mobile_data, output_dir=mobile_dir)
+            _maybe_pdf(mobile_data, mobile_dir, "accessibility_report_mobile.pdf")
+            log.info("mobile_report_generated", files=len(mobile_scans), dir=str(mobile_dir))
+        else:
+            log.info("mobile_report_skipped", reason="no mobile-specific issues found")
+
+        # ── Relatório alto contraste (se houver issues) ───────────────────────
+        hc_scans = [s for s in (high_contrast_scan_results or []) if s.has_issues]
+        if hc_scans:
+            hc_dir = output_dir / "high_contrast"
+            hc_json_path = json_reporter.generate(
+                scan_results=hc_scans,
+                fix_results=[],
+                output_dir=hc_dir,
+                wcag_level=wcag_level,
+                model_name=self.model_config.model_id,
+                report_label="high_contrast",
+            )
+            hc_data = json.loads(hc_json_path.read_text(encoding="utf-8"))
+            html_reporter.generate(report_data=hc_data, output_dir=hc_dir)
+            _maybe_pdf(hc_data, hc_dir, "accessibility_report_high_contrast.pdf")
+            log.info("high_contrast_report_generated", files=len(hc_scans), dir=str(hc_dir))

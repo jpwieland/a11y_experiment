@@ -197,10 +197,13 @@ class ValidationPipeline:
         """
         Layer 1: Syntactic validation.
 
-        Checks that the patch is non-empty and does not contain obvious
-        syntax markers of a truncated or malformed LLM response. A full
-        AST parse requires a Node.js toolchain; this heuristic guards
-        against the most common failure modes.
+        Estágio 1 (heurístico): patch não-vazio, sem marcadores de recusa
+        do LLM, sem bloco de código truncado, com JSX presente.
+
+        Estágio 2 (parse real, 06/2026): AST parse via Node + @babel/parser
+        — o MESMO parser usado pelo harness de renderização. Se o toolchain
+        Node não estiver disponível, degrada graciosamente para apenas o
+        estágio heurístico (limitação registrada na metodologia).
         """
         if not content or not content.strip():
             return False, "empty_patch"
@@ -222,6 +225,13 @@ class ValidationPipeline:
         # Very basic JSX/TSX sanity: must contain at least one JSX-like tag
         if not re.search(r'<\w[\w.]*(?:\s[^>]*)?\s*/?>', content):
             return False, "no_jsx_found"
+
+        # Parse de AST real (Babel). None = parser indisponível → aceita
+        # com base apenas nas heurísticas acima.
+        from a11y_autofix.validation.syntax import parse_tsx
+        parsed_ok, parse_reason = parse_tsx(content)
+        if parsed_ok is False:
+            return False, parse_reason
 
         return True, None
 

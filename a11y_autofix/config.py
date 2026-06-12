@@ -65,6 +65,14 @@ class IssueType(str, Enum):
     OTHER = "other"
 
 
+class ScanMode(str, Enum):
+    """Contexto de renderização em que o scan foi executado."""
+
+    DESKTOP = "desktop"
+    MOBILE = "mobile"
+    HIGH_CONTRAST = "high_contrast"
+
+
 class Complexity(str, Enum):
     """Complexidade de correção do issue."""
 
@@ -138,13 +146,37 @@ class Settings(BaseSettings):
     use_playwright: bool = Field(default=True)
     use_eslint: bool = Field(default=True)
 
+    # ═══ Modos de Scan Adicionais ═══
+    scan_high_contrast: bool = Field(
+        default=True,
+        description="Executa scan em modo de alto contraste (forced-colors: active) "
+                    "quando o componente tem styling dependente de cor",
+    )
+    scan_mobile: bool = Field(
+        default=True,
+        description="Executa scan em viewport mobile quando o componente é responsivo",
+    )
+    mobile_viewport_width: int = Field(default=375, description="Largura viewport mobile (px)")
+    mobile_viewport_height: int = Field(default=667, description="Altura viewport mobile (px)")
+
     # ═══ Protocolo Científico ═══
     min_tool_consensus: int = Field(default=2, ge=1, description="Mínimo de ferramentas para HIGH confidence")
 
     # ═══ Performance ═══
-    max_concurrent_scans: int = Field(default=4, ge=1)
-    max_concurrent_agents: int = Field(default=2, ge=1)
-    max_concurrent_models: int = Field(default=3, ge=1)
+    # max_concurrent_scans: padrão = min(CPUs lógicas, 8) para aproveitar
+    # paralelismo sem saturar a memória com browsers headless simultâneos.
+    max_concurrent_scans: int = Field(
+        default_factory=lambda: min(__import__("os").cpu_count() or 4, 8),
+        ge=1,
+    )
+    max_concurrent_agents: int = Field(default=3, ge=1)
+    # max_concurrent_models=1: modelos rodam SEQUENCIALMENTE por padrão.
+    # Com >1, modelos compartilham os mesmos snapshots em disco enquanto o
+    # fix loop grava patches e o reset (git checkout) acontece ao fim de
+    # cada modelo — um modelo pode escanear arquivos modificados por outro
+    # (race condition; ameaça à validade interna documentada em 06/2026).
+    # Só aumente se cada modelo tiver cópia isolada do corpus.
+    max_concurrent_models: int = Field(default=1, ge=1)
     scan_timeout: int = Field(default=60, gt=0)
     agent_timeout: int = Field(default=180, gt=0)
 
@@ -162,9 +194,23 @@ class Settings(BaseSettings):
     swe_cli_path: str = Field(default="sweagent")
     max_retries_per_agent: int = Field(default=3, ge=1, le=10)
 
+    # ═══ Validação de correções ═══
+    verify_fixes_by_rescan: bool = Field(
+        default=True,
+        description="Após um patch passar nas 4 camadas de validação, re-escaneia "
+                    "o arquivo para creditar como corrigidos APENAS os issues que "
+                    "de fato desapareceram (Camada 3 real, browser-based). "
+                    "False = crédito otimista (todos os issues do patch validado).",
+    )
+
     # ═══ Output ═══
     output_dir: Path = Field(default=Path("./a11y-report"))
     log_level: str = Field(default="INFO")
+    capture_screenshots: bool = Field(
+        default=True,
+        description="Captura screenshots estilo Lighthouse (full-page com destaques "
+                    "+ crop por elemento violador) durante o scan",
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -184,6 +230,14 @@ class ToolFinding(BaseModel):
     context: str = Field(default="", description="Snippet HTML")
     impact: str = Field(default="moderate", description="critical, serious, moderate, minor")
     help_url: str = Field(default="")
+    # Captura visual estilo Lighthouse (crop do elemento violador)
+    screenshot_path: str | None = Field(
+        default=None, description="Caminho do crop PNG do elemento violador"
+    )
+    bounding_rect: dict[str, float] | None = Field(
+        default=None,
+        description="Bounding box do elemento na página: {x, y, width, height}",
+    )
 
 
 class A11yIssue(BaseModel):
@@ -210,6 +264,15 @@ class A11yIssue(BaseModel):
     context: str = Field(default="")
     resolved: bool = Field(default=False)
 
+    # Captura visual estilo Lighthouse (propagada do finding primário)
+    screenshot_path: str | None = Field(
+        default=None, description="Caminho do crop PNG do elemento violador"
+    )
+    bounding_rect: dict[str, float] | None = Field(
+        default=None,
+        description="Bounding box do elemento na página: {x, y, width, height}",
+    )
+
     def compute_id(self) -> "A11yIssue":
         """Gera ID estável baseado em conteúdo (content-addressed)."""
         key = f"{self.file}:{self.selector}:{self.wcag_criteria}:{self.issue_type}"
@@ -226,6 +289,16 @@ class ScanResult(BaseModel):
     scan_time: float = Field(default=0.0)
     tools_used: list[ScanTool] = Field(default_factory=list)
     tool_versions: dict[str, str] = Field(default_factory=dict)
+    scan_mode: ScanMode = Field(default=ScanMode.DESKTOP, description="Contexto de renderização do scan")
+    screenshot_path: Path | None = Field(default=None, description="Caminho do screenshot PNG do componente")
+    render_success: bool | None = Field(
+        default=None,
+        description="True se o componente renderizou no harness "
+                    "(window.__a11yHarnessReady); False se a página ficou "
+                    "vazia/placeholder; None se não foi possível determinar. "
+                    "Covariável de validade: issues detectados sem render "
+                    "refletem o harness, não o componente.",
+    )
     error: str | None = Field(default=None)
 
     @property
@@ -276,6 +349,16 @@ class FixAttempt(BaseModel):
     tokens_completion: int | None = Field(default=None, description="Tokens de output/completion")
     time_seconds: float = Field(default=0.0)
     error: str | None = Field(default=None)
+    # Resultado do ValidationPipeline (4 camadas, methodology Section 3.7.2)
+    validation_passed: bool | None = Field(
+        default=None,
+        description="True se passou nas 4 camadas; False se rejeitado; "
+                    "None se a validação não foi executada (patch sem sucesso)",
+    )
+    validation_rejected_layer: int | None = Field(
+        default=None,
+        description="Camada que rejeitou o patch (1-4), ou None",
+    )
 
 
 class FixResult(BaseModel):

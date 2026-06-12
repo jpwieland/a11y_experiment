@@ -90,6 +90,25 @@ def compute_ifr(results: list[FixResult]) -> tuple[float, int, int]:
     return ifr, total_fixed, total_issues
 
 
+def compute_sr_full(results: list[FixResult]) -> float:
+    """
+    SR-completo: fração de arquivos COM issues em que TODOS os issues
+    foram corrigidos (issues_pending == 0).
+
+    Construto mais forte que o SR clássico (final_success = ≥1 corrigido),
+    que conta igual um arquivo 1/10 e um 10/10. Adicionado 06/2026 após
+    a auditoria de validade de construto.
+    """
+    with_issues = [r for r in results if r.scan_result.issues]
+    if not with_issues:
+        return 0.0
+    full = sum(
+        1 for r in with_issues
+        if r.issues_fixed == len(r.scan_result.issues)
+    )
+    return full / len(with_issues)
+
+
 def compute_mttr(results: list[FixResult]) -> float | None:
     """
     Mean Time To Repair, computed only over successfully repaired files.
@@ -332,7 +351,7 @@ def compute_validation_layer_breakdown(
     """
     counts = {"layer_1": 0, "layer_2": 0, "layer_3": 0, "layer_4": 0, "passed": 0}
     layer_prefixes = {
-        "layer_1": ("empty_patch", "unclosed_code_block", "llm_refusal", "no_jsx_found"),
+        "layer_1": ("empty_patch", "unclosed_code_block", "llm_refusal", "no_jsx_found", "syntax_error:"),
         "layer_2": ("functional_regression:",),
         "layer_3": ("domain_check_failed:",),
         "layer_4": ("invalid_tabIndex:", "dangerouslySetInnerHTML_present"),
@@ -342,16 +361,19 @@ def compute_validation_layer_breakdown(
             if attempt.success:
                 counts["passed"] += 1
                 continue
+            # Caminho preferido: campo estruturado gravado pelo fix loop
+            # (integração ValidationPipeline de 06/2026). Fallback: parsing
+            # do prefixo do error (checkpoints antigos).
+            layer_num = getattr(attempt, "validation_rejected_layer", None)
+            if layer_num in (1, 2, 3, 4):
+                counts[f"layer_{layer_num}"] += 1
+                continue
             err = attempt.error or ""
-            matched = False
             for layer, prefixes in layer_prefixes.items():
                 if any(err.startswith(p) for p in prefixes):
                     counts[layer] += 1
-                    matched = True
                     break
-            if not matched and err:
-                # Timeout, LLM error, etc. — não são rejeições de validação
-                pass
+            # Sem match: timeout, LLM error etc. — não são rejeições de validação
     return counts
 
 
