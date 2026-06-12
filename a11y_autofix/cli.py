@@ -73,6 +73,8 @@ def fix(
     max_retries: int = typer.Option(3, "--max-retries", help="Tentativas por arquivo"),
     output: Path = typer.Option(Path("./a11y-report"), "--output", "-o"),
     create_pr: bool = typer.Option(False, "--create-pr", help="Cria PR via gh CLI"),
+    framework: str = typer.Option("auto", "--framework", help="Framework alvo: react | angular | auto"),
+    pdf: bool = typer.Option(False, "--pdf", help="Gera relatório PDF no estilo Lighthouse"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """
@@ -83,6 +85,7 @@ def fix(
       a11y-autofix fix ./src
       a11y-autofix fix ./src --model qwen2.5-coder-14b
       a11y-autofix fix ./Button.tsx --dry-run --wcag AAA
+      a11y-autofix fix ./src --dry-run --pdf
     """
     from a11y_autofix.config import AgentType, LLMBackend, Settings, WCAGLevel
     from a11y_autofix.llm.registry import ModelRegistry
@@ -135,29 +138,39 @@ def fix(
     except ValueError:
         console.print(f"[yellow]Warning: unknown agent '{agent}', using auto[/]")
 
+    mode_parts = ["dry-run" if dry_run else "fix"]
+    if pdf:
+        mode_parts.append("+ PDF report")
     console.print(Panel(
         Text.assemble(
             ("Target: ", "dim"), (str(target), "cyan"), "\n",
             ("Model:  ", "dim"), (model_config.model_id, "green"), "\n",
             ("WCAG:   ", "dim"), (wcag_level, "yellow"), "\n",
             ("Agent:  ", "dim"), (agent_type.value, "magenta"), "\n",
-            ("Mode:   ", "dim"), ("dry-run" if dry_run else "fix", "bold"),
+            ("Mode:   ", "dim"), (" ".join(mode_parts), "bold"),
         ),
         title="Pipeline Configuration",
         border_style="cyan",
     ))
+
+    valid_frameworks = {"react", "angular", "auto"}
+    if framework not in valid_frameworks:
+        console.print(f"[red]Invalid --framework:[/] '{framework}'. Use: react | angular | auto")
+        raise typer.Exit(1)
 
     pipeline = Pipeline(
         settings=settings,
         model_config=model_config,
         agent_preference=agent_type,
         dry_run=dry_run,
+        framework=framework,
     )
 
     results = asyncio.run(pipeline.run(
         targets=[target],
         wcag_level=wcag_level,
         output_dir=output,
+        generate_pdf=pdf,
     ))
 
     # Mostrar resumo
@@ -184,6 +197,8 @@ def fix(
     console.print(table)
     console.print(f"\n[bold]Total:[/] {total_fixed}/{total_issues} issues corrigidos")
     console.print(f"[dim]Relatórios em:[/] {output}/")
+    if pdf:
+        console.print(f"[dim]PDF:[/] {output}/accessibility_report.pdf")
 
     if create_pr and total_fixed > 0:
         from a11y_autofix.utils.git import create_pr_gh, create_branch, commit_changes
@@ -884,6 +899,63 @@ def setup(
     console.print("  1. [cyan]ollama pull qwen2.5-coder:7b[/]")
     console.print("  2. [cyan]a11y-autofix models list[/]")
     console.print("  3. [cyan]a11y-autofix fix ./seu-projeto/src[/]")
+
+
+# ════════════════════════════════════════════════════════════════
+# Comando: report
+# ════════════════════════════════════════════════════════════════
+
+
+@app.command()
+def report(
+    result: Path = typer.Argument(..., help="Diretório ou arquivo report.json"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Diretório de saída do PDF"),
+    filename: str = typer.Option("accessibility_report.pdf", "--filename", "-f"),
+) -> None:
+    """
+    Gera relatório PDF no estilo Google Lighthouse a partir de um resultado existente.
+
+    \b
+    [dim]Exemplos:[/]
+      a11y-autofix report ./a11y-report/
+      a11y-autofix report ./a11y-report/report.json --output ./pdfs/
+      a11y-autofix report ./a11y-report/ --filename meu_relatorio.pdf
+    """
+    import json
+    from a11y_autofix.reporter.pdf_reporter import PDFReporter
+
+    # Resolver caminho do JSON
+    if result.is_dir():
+        json_path = result / "report.json"
+    else:
+        json_path = result
+
+    if not json_path.exists():
+        console.print(f"[red]Arquivo não encontrado:[/] {json_path}")
+        raise typer.Exit(1)
+
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"[red]Erro ao ler JSON:[/] {e}")
+        raise typer.Exit(1)
+
+    out_dir = output or (result if result.is_dir() else result.parent)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[cyan]Gerando PDF:[/] {out_dir / filename}")
+
+    try:
+        reporter = PDFReporter()
+        pdf_path = reporter.generate(
+            report_data=data,
+            output_dir=out_dir,
+            filename=filename,
+        )
+        console.print(f"[green]✓ PDF gerado:[/] {pdf_path}")
+    except Exception as e:
+        console.print(f"[red]Erro ao gerar PDF:[/] {e}")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

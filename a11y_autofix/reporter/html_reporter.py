@@ -40,12 +40,21 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     .badge-warning { background: #fef9c3; color: var(--warning); }
     .badge-muted { background: #f3f4f6; color: var(--muted); }
     .issue-list { margin-top: 0.75rem; }
-    .issue { border-left: 3px solid var(--warning); padding: .5rem .75rem; margin-bottom: .5rem; background: #fafafa; }
+    .issue { border-left: 3px solid var(--warning); padding: .5rem .75rem; margin-bottom: .5rem; background: #fafafa; display: flex; gap: .75rem; align-items: flex-start; }
     .issue.high { border-color: var(--danger); }
     .issue.medium { border-color: var(--warning); }
     .issue.low { border-color: #86efac; }
+    .issue-body { flex: 1; min-width: 0; }
     .issue-header { font-size: 0.85rem; font-weight: 600; }
     .issue-meta { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+    /* Thumbnail do elemento violador (estilo Lighthouse) */
+    .issue-thumb { flex-shrink: 0; }
+    .issue-thumb img { max-width: 180px; max-height: 120px; border: 1px solid #e5e7eb; border-radius: 4px; background: white; display: block; cursor: zoom-in; }
+    .issue-thumb .thumb-label { font-size: 0.65rem; color: var(--muted); text-align: center; margin-top: 2px; }
+    /* Screenshot full-page do componente */
+    .component-screenshot { margin-top: 0.75rem; }
+    .component-screenshot summary { cursor: pointer; font-size: 0.85rem; color: var(--primary); }
+    .component-screenshot img { max-width: 100%; border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 0.5rem; }
     .diff-block { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8rem; padding: 1rem; border-radius: 6px; overflow-x: auto; white-space: pre; margin-top: 0.5rem; }
     .diff-add { color: #86efac; }
     .diff-remove { color: #fca5a5; }
@@ -89,21 +98,43 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="issue-list">
       {% for issue in file_entry.issues[:10] %}
       <div class="issue {{ issue.confidence }}">
-        <div class="issue-header">
-          [{{ issue.type|upper }}] WCAG {{ issue.wcag_criteria or 'N/A' }} — {{ issue.message[:100] }}
+        <div class="issue-body">
+          <div class="issue-header">
+            [{{ issue.type|upper }}] WCAG {{ issue.wcag_criteria or 'N/A' }} — {{ issue.message[:100] }}
+          </div>
+          <div class="issue-meta">
+            Selector: <code>{{ issue.selector }}</code> ·
+            Impact: {{ issue.impact }} ·
+            Confidence: {{ issue.confidence }} ·
+            Found by: {{ issue.found_by|join(', ') }}
+            {% if issue.bounding_rect %}
+            · Posição: {{ issue.bounding_rect.x|int }},{{ issue.bounding_rect.y|int }}
+            ({{ issue.bounding_rect.width|int }}×{{ issue.bounding_rect.height|int }}px)
+            {% endif %}
+          </div>
         </div>
-        <div class="issue-meta">
-          Selector: <code>{{ issue.selector }}</code> ·
-          Impact: {{ issue.impact }} ·
-          Confidence: {{ issue.confidence }} ·
-          Found by: {{ issue.found_by|join(', ') }}
+        {% if issue.screenshot_rel %}
+        <div class="issue-thumb">
+          <a href="{{ issue.screenshot_rel }}" target="_blank">
+            <img src="{{ issue.screenshot_rel }}" alt="Captura do elemento com violação: {{ issue.selector }}" loading="lazy">
+          </a>
+          <div class="thumb-label">elemento violador</div>
         </div>
+        {% endif %}
       </div>
       {% endfor %}
       {% if file_entry.issues|length > 10 %}
       <p style="font-size:0.8rem;color:var(--muted);">... e mais {{ file_entry.issues|length - 10 }} issues</p>
       {% endif %}
     </div>
+    {% endif %}
+    {% if file_entry.screenshot_rel %}
+    <details class="component-screenshot">
+      <summary>📷 Ver componente renderizado (violações destacadas)</summary>
+      <a href="{{ file_entry.screenshot_rel }}" target="_blank">
+        <img src="{{ file_entry.screenshot_rel }}" alt="Componente renderizado com violações destacadas" loading="lazy">
+      </a>
+    </details>
     {% endif %}
     {% if file_entry.fix and file_entry.fix.attempts %}
     <details style="margin-top:0.75rem">
@@ -155,16 +186,63 @@ class HTMLReporter:
         env = Environment(loader=BaseLoader(), autoescape=True)
         template = env.from_string(_HTML_TEMPLATE)
 
+        files = self._resolve_screenshot_paths(
+            report_data.get("files", []), output_dir  # type: ignore[arg-type]
+        )
+
         html = template.render(
             timestamp=report_data.get("timestamp", ""),
             wcag_level=report_data.get("wcag_level", "WCAG2AA"),
             model=report_data.get("environment", {}).get("llm_model", "unknown"),  # type: ignore[union-attr]
             execution_id=report_data.get("execution_id", ""),
             summary=report_data.get("summary", {}),
-            files=report_data.get("files", []),
+            files=files,
         )
 
         output_path = output_dir / "report.html"
         output_path.write_text(html, encoding="utf-8")
         log.info("html_report_generated", path=str(output_path))
         return output_path
+
+    @staticmethod
+    def _resolve_screenshot_paths(
+        files: list[dict],
+        output_dir: Path,
+    ) -> list[dict]:
+        """
+        Converte os caminhos absolutos de screenshot em caminhos relativos
+        ao report.html, para que as imagens carreguem ao abrir o relatório.
+
+        Adiciona os campos derivados:
+          file_entry["screenshot_rel"]      — screenshot full-page do componente
+          issue["screenshot_rel"]           — crop do elemento violador
+
+        Screenshots fora de output_dir (ou inexistentes) ficam sem campo
+        rel e o template simplesmente omite a imagem.
+        """
+        out_resolved = output_dir.resolve()
+
+        def rel_or_none(raw: object) -> str | None:
+            if not raw:
+                return None
+            p = Path(str(raw))
+            if not p.exists():
+                return None
+            try:
+                return p.resolve().relative_to(out_resolved).as_posix()
+            except ValueError:
+                # Fora de output_dir — usar URI absoluta como fallback
+                return p.resolve().as_uri()
+
+        resolved_files: list[dict] = []
+        for entry in files:
+            entry = dict(entry)
+            entry["screenshot_rel"] = rel_or_none(entry.get("screenshot_path"))
+            issues = []
+            for issue in entry.get("issues", []):
+                issue = dict(issue)
+                issue["screenshot_rel"] = rel_or_none(issue.get("screenshot_path"))
+                issues.append(issue)
+            entry["issues"] = issues
+            resolved_files.append(entry)
+        return resolved_files

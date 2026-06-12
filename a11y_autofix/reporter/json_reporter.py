@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import structlog
 
-from a11y_autofix.config import FixResult, ScanResult, Settings
+from a11y_autofix.config import FixResult, ScanMode, ScanResult, Settings
 
 log = structlog.get_logger(__name__)
 
@@ -55,6 +55,7 @@ class JSONReporter:
         output_dir: Path,
         wcag_level: str = "WCAG2AA",
         model_name: str = "unknown",
+        report_label: str = "desktop",
     ) -> Path:
         """
         Gera relatório JSON e salva em disco.
@@ -65,12 +66,15 @@ class JSONReporter:
             output_dir: Diretório de saída.
             wcag_level: Nível WCAG utilizado.
             model_name: Modelo LLM utilizado.
+            report_label: Rótulo do relatório — 'desktop', 'mobile' ou 'high_contrast'.
 
         Returns:
             Caminho do arquivo JSON gerado.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
-        report = self._build_report(scan_results, fix_results, wcag_level, model_name)
+        report = self._build_report(
+            scan_results, fix_results, wcag_level, model_name, report_label
+        )
 
         output_path = output_dir / "report.json"
         import json
@@ -79,7 +83,7 @@ class JSONReporter:
             encoding="utf-8",
         )
 
-        log.info("json_report_generated", path=str(output_path))
+        log.info("json_report_generated", path=str(output_path), label=report_label)
         return output_path
 
     def _build_report(
@@ -88,6 +92,7 @@ class JSONReporter:
         fix_results: list[FixResult],
         wcag_level: str,
         model_name: str,
+        report_label: str = "desktop",
     ) -> dict[str, Any]:
         """Constrói a estrutura completa do relatório."""
         fix_by_file = {str(r.file): r for r in fix_results}
@@ -110,12 +115,16 @@ class JSONReporter:
         )
         total_time = sum(r.total_time for r in fix_results)
 
+        scan_modes = list({s.scan_mode.value for s in scan_results})
+
         return {
             "schema_version": self.SCHEMA_VERSION,
             "protocol_version": self.PROTOCOL_VERSION,
             "execution_id": self._execution_id,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "wcag_level": wcag_level,
+            "report_label": report_label,
+            "scan_modes": scan_modes,
             "environment": {
                 "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
                 "os": f"{platform.system()} {platform.release()}",
@@ -154,6 +163,9 @@ class JSONReporter:
         entry: dict[str, Any] = {
             "file": str(scan.file),
             "file_hash": scan.file_hash,
+            "scan_mode": scan.scan_mode.value,
+            "render_success": scan.render_success,
+            "screenshot_path": str(scan.screenshot_path) if scan.screenshot_path else None,
             "scan_time_seconds": round(scan.scan_time, 3),
             "tools_used": [t.value for t in scan.tools_used],
             "tool_versions": scan.tool_versions,
@@ -203,6 +215,8 @@ class JSONReporter:
             "message": issue.message,
             "context": issue.context[:300] if issue.context else "",
             "resolved": issue.resolved,
+            "screenshot_path": issue.screenshot_path,
+            "bounding_rect": issue.bounding_rect,
             "findings": [
                 {
                     "tool": f.tool.value,
