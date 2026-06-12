@@ -157,9 +157,23 @@ if [[ $ONLY_CHECK -eq 0 ]]; then
   check_apt libxfixes3
   check_apt libxrandr2
   check_apt libgbm1
-  check_apt libasound2
   check_apt libpango-1.0-0
   check_apt libcairo2
+
+  # libasound2 foi renomeado para libasound2t64 no Ubuntu 24.04+
+  # /etc/os-release já foi carregado na Fase 0 (. /etc/os-release)
+  UBUNTU_VER="${VERSION_ID:-0}"
+  UBUNTU_MAJOR="${UBUNTU_VER%%.*}"
+  if [[ "$UBUNTU_MAJOR" -ge 24 ]]; then
+    # Ubuntu 24.04+: pacote t64 (transição para 64-bit)
+    if dpkg -s libasound2t64 &>/dev/null; then
+      ok "libasound2t64 já instalado"
+    else
+      PKGS_NEEDED+=(libasound2t64)
+    fi
+  else
+    check_apt libasound2
+  fi
 
   if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
     info "Instalando: ${PKGS_NEEDED[*]}"
