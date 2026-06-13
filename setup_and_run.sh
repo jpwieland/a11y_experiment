@@ -52,11 +52,16 @@ elapsed() { local s=$(( $(date +%s) - $1 )); printf "%dm%02ds" $((s/60)) $((s%60
 
 # Abre uma aba/janela de terminal para monitoramento (gnome-terminal → x-terminal-emulator → xterm).
 # Em sessões sem ambiente gráfico (SSH/headless), apenas imprime o comando para rodar manualmente.
+# Dedup: se um processo casando com o padrão $2 já roda, não abre aba duplicada.
 # Desativável com NO_TABS=1.
 open_term() {
-  local term_title="$1"; shift
+  local term_title="$1" dedup_pattern="$2"; shift 2
   local cmd="$*"
   if [[ "${NO_TABS:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -n "$dedup_pattern" ]] && pgrep -f "$dedup_pattern" &>/dev/null; then
+    info "Monitor '$term_title' já aberto — reutilizando aba existente"
     return 0
   fi
   if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
@@ -123,9 +128,6 @@ echo "${B}${C}╚═════════════════════
 echo "  Log: ${B}$SETUP_LOG${N}"
 [[ $VERBOSE -eq 1 ]] && echo "  Modo: ${B}verboso${N} (comandos e saídas completas)"
 echo ""
-
-# Aba de monitoramento do log de setup (acompanha todas as fases)
-open_term "a11y — Log do Setup" "tail -f '$SETUP_LOG'"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # FASE 0 — validar sistema operacional
@@ -598,8 +600,8 @@ if nvidia_smi_ok; then
   if [[ $GPU_VRAM_GB -lt 4 ]]; then
     warn "VRAM < 4 GB — modelos 7B podem não caber inteiramente na GPU"
   fi
-  # Aba de monitoramento da GPU em tempo real
-  open_term "a11y — GPU Monitor" "watch -n 2 nvidia-smi"
+  # Aba de monitoramento da GPU em tempo real (uma única, mesmo com re-runs)
+  open_term "a11y — GPU Monitor" "watch -n 2 nvidia-smi" "watch -n 2 nvidia-smi"
 else
   warn "GPU NVIDIA não detectada — Ollama usará CPU (experimento ~7× mais lento para modelos 7B)"
 fi
@@ -846,6 +848,12 @@ check_final "python 3.11+" \
 check_final "pacote a11y_autofix" \
   "$PYBIN" -c 'import a11y_autofix'
 
+check_final "pydantic (import + instalação)" \
+  "$PYBIN" -c 'import pydantic; pydantic.BaseModel'
+
+check_final "playwright (pacote python)" \
+  "$PYBIN" -c 'import playwright'
+
 check_final "pydantic + structlog + yaml" \
   "$PYBIN" -c 'import pydantic, structlog, yaml'
 
@@ -948,15 +956,20 @@ echo ""
 info "Chamando run_full_experiment.sh ${RUN_ARGS[*]}..."
 echo ""
 
-# Abas de monitoramento do experimento:
-# 1. Dashboard ao vivo (progresso por modelo/repetição, ETA, taxas)
-open_term "a11y — Dashboard Experimento" \
-  "cd '$ROOT' && sleep 10 && '$VENV/bin/python' watch_experiment.py"
-# 2. Log bruto do run (criado pelo run_full_experiment.sh ao iniciar)
-open_term "a11y — Log Experimento" \
-  "cd '$ROOT' && sleep 10 && tail -F \"\$(ls -t logs/full_run_*.log 2>/dev/null | head -1)\""
+# Aba única de monitoramento: dashboard ao vivo (progresso por modelo/repetição, ETA).
+# O loop reabre o dashboard se ele sair antes do experimento gerar dados.
+open_term "a11y — Dashboard Experimento" "watch_experiment.py" \
+  "cd '$ROOT' && sleep 15 && until '$VENV/bin/python' watch_experiment.py; do sleep 15; done"
 
-bash "$ROOT/run_full_experiment.sh" "${RUN_ARGS[@]}"
+# Inibir suspensão/idle do sistema durante o experimento (dias de execução em laptop):
+# sem isso, tampa fechada ou idle do GNOME suspendem a máquina e matam o run.
+INHIBIT=()
+if command -v systemd-inhibit &>/dev/null; then
+  INHIBIT=(systemd-inhibit --what=sleep:idle --who="a11y-autofix" --why="experimento em execução")
+  info "Suspensão automática do sistema inibida durante o experimento (systemd-inhibit)"
+fi
+
+"${INHIBIT[@]}" bash "$ROOT/run_full_experiment.sh" "${RUN_ARGS[@]}"
 RC=$?
 
 echo ""
