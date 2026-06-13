@@ -29,7 +29,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -646,21 +648,49 @@ def main() -> None:
         print(f"\n  Integrity: {passed}/{len(targets)} snapshots verified")
         return
 
-    # Build id→entry index for in-place update
+    # Build id→entry index — protegido por lock para escrita paralela
     entry_index = {e.id: e for e in entries}
+    _lock = threading.Lock()
     updated = 0
     errors = 0
+    done_count = 0
 
-    for target in targets:
-        updated_entry = snapshot_project(target, force=args.force)
-        entry_index[updated_entry.id] = updated_entry
-        if updated_entry.status == ProjectStatus.SNAPSHOTTED:
-            updated += 1
-        elif updated_entry.status in (ProjectStatus.EXCLUDED, ProjectStatus.ERROR):
-            errors += 1
-        # Save after every project so progress survives interruptions/crashes
-        save_catalog(list(entry_index.values()), args.catalog, metadata)
-        time.sleep(1.0)  # Avoid hammering GitHub
+    def _clone_one(target: ProjectEntry) -> ProjectEntry:
+        result = snapshot_project(target, force=args.force)
+        with _lock:
+            entry_index[result.id] = result
+            # Salva catálogo incrementalmente após cada projeto para que
+            # uma interrupção não perca o progresso já realizado.
+            save_catalog(list(entry_index.values()), args.catalog, metadata)
+        return result
+
+    n_workers = max(1, args.workers)
+    print(f"  Workers: {n_workers} clones em paralelo\n")
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_clone_one, t): t for t in targets}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                updated_entry = future.result()
+            except Exception as exc:
+                print(f"  [{target.id}] ❌ Exceção inesperada: {exc}", file=sys.stderr)
+                with _lock:
+                    errors += 1
+                    done_count += 1
+                continue
+
+            with _lock:
+                done_count += 1
+                if updated_entry.status == ProjectStatus.SNAPSHOTTED:
+                    updated += 1
+                elif updated_entry.status in (ProjectStatus.EXCLUDED, ProjectStatus.ERROR):
+                    errors += 1
+                pct = done_count * 100 // len(targets)
+                # Linha de progresso geral (não sobrescreve — cada projeto já
+                # imprimiu sua própria linha de resultado acima).
+                print(f"  [{done_count}/{len(targets)} {pct}%] "
+                      f"snapshotted={updated} excluded/err={errors}")
 
     print(f"\n{'═' * 50}")
     print(f"  Snapshotted: {updated}  |  Excluded/Error: {errors}")

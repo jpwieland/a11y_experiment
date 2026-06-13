@@ -35,7 +35,7 @@ TEMPLATE_YAML="experiments/chosen_experiment.yaml"
 
 # ── Flags ───────────────────────────────────────────────────────────────────
 SKIP_DISCOVER=0; QUICK=0; FROM_STAGE=""
-PER_DOMAIN=5; SEED=42; SCAN_WORKERS=2
+PER_DOMAIN=5; SEED=42; SCAN_WORKERS=4; SNAP_WORKERS=8
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-discover) SKIP_DISCOVER=1 ;;
@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --per-domain)    PER_DOMAIN="$2"; shift ;;
     --seed)          SEED="$2"; shift ;;
     --workers)       SCAN_WORKERS="$2"; shift ;;
+    --snap-workers)  SNAP_WORKERS="$2"; shift ;;
     -h|--help) grep '^#' "$0" | head -25; exit 0 ;;
     *) echo "flag desconhecida: $1"; exit 2 ;;
   esac
@@ -198,7 +199,7 @@ banner 3 "Snapshot — clone raso + pin de commit"
 T0=$(date +%s)
 # Roda em foreground com tee para que cada clone apareça ao vivo no terminal
 # e seja registrado no log simultaneamente.
-python3 -u dataset/scripts/snapshot.py --catalog "$CATALOG" --workers 4 \
+python3 -u dataset/scripts/snapshot.py --catalog "$CATALOG" --workers "$SNAP_WORKERS" \
   2>&1 | tee -a "$RUN_LOG"
 # tee sempre retorna 0; verificar o exit code do python via PIPESTATUS
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die "snapshot falhou. Log: $RUN_LOG"
