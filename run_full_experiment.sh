@@ -70,6 +70,15 @@ die() { echo "${R}${B}✗ ABORTADO:${N} $1" | tee -a "$RUN_LOG"; exit 1; }
 ok()   { echo "  ${G}✓${N} $1"; }
 warn() { echo "  ${Y}⚠${N} $1"; }
 
+# Grava etapa atual em logs/current_stage.txt (sobrescreve) e no log geral.
+# Permite ver em que etapa o processo está mesmo após reconectar:
+#   cat logs/current_stage.txt
+STAGE_FILE="$LOG_DIR/current_stage.txt"
+stage_status() {  # stage_status <mensagem>
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+    | tee "$STAGE_FILE" >> "$RUN_LOG"
+}
+
 run_logged() {  # run_logged <descrição> <cmd...>
   local desc="$1"; shift
   echo "${C}▶${N} $desc" | tee -a "$RUN_LOG"
@@ -128,6 +137,7 @@ echo "${B}Pipeline experimental a11y-autofix${N} — log: $RUN_LOG"
 # ═════════════════════════════════ 1. PREFLIGHT ═════════════════════════════
 if stage_enabled preflight; then
 banner 1 "Preflight — validação do ambiente"
+stage_status "[1/7] preflight — rodando"
 T0=$(date +%s); FAILED=0
 check() {  # check <descrição> <cmd...>
   if "${@:2}" >/dev/null 2>&1; then ok "$1"; else echo "  ${R}✗${N} $1"; FAILED=1; fi
@@ -171,11 +181,13 @@ fi
 
 [[ $FAILED -eq 1 ]] && die "preflight falhou — corrija os itens ✗ acima"
 ok "preflight completo em $(elapsed $T0)"
+stage_status "[1/7] preflight — OK ($(elapsed $T0))"
 fi
 
 # ═════════════════════════════ 2. DESCOBERTA ════════════════════════════════
 if stage_enabled discover; then
 banner 2 "Descoberta — GitHub Search estratificada"
+stage_status "[2/7] discover — rodando"
 T0=$(date +%s)
 if [[ $SKIP_DISCOVER -eq 1 || ( -f "$CATALOG" && $(python3 -c "
 import yaml; c=yaml.safe_load(open('$CATALOG'))
@@ -191,37 +203,41 @@ else
   python3 dataset/scripts/discover.py --stats
 fi
 ok "descoberta em $(elapsed $T0)"
+stage_status "[2/7] discover — OK ($(elapsed $T0))  |  retomar: --from snapshot"
 fi
 
 # ═════════════════════════════ 3. SNAPSHOT ══════════════════════════════════
 if stage_enabled snapshot; then
-banner 3 "Snapshot — clone raso + pin de commit"
+banner 3 "Snapshot — clone raso + pin de commit  (workers=$SNAP_WORKERS)"
+stage_status "[3/7] snapshot — rodando  (workers=$SNAP_WORKERS)"
 T0=$(date +%s)
-# Roda em foreground com tee para que cada clone apareça ao vivo no terminal
-# e seja registrado no log simultaneamente.
+# Roda em foreground com tee: cada clone aparece ao vivo no terminal e vai para o log.
+# python3 -u garante saída sem buffer mesmo dentro do pipe.
 python3 -u dataset/scripts/snapshot.py --catalog "$CATALOG" --workers "$SNAP_WORKERS" \
   2>&1 | tee -a "$RUN_LOG"
-# tee sempre retorna 0; verificar o exit code do python via PIPESTATUS
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die "snapshot falhou. Log: $RUN_LOG"
 ok "snapshot em $(elapsed $T0)"
+stage_status "[3/7] snapshot — OK ($(elapsed $T0))  |  retomar: --from scan"
 fi
 
 # ═════════════════════════════ 4. SCAN ══════════════════════════════════════
 if stage_enabled scan; then
-banner 4 "Scan — detecção multi-ferramenta (etapa longa)"
+banner 4 "Scan — detecção multi-ferramenta  (workers=$SCAN_WORKERS, etapa longa)"
+stage_status "[4/7] scan — rodando  (workers=$SCAN_WORKERS)"
 T0=$(date +%s)
 SCAN_ARGS=(--catalog "$CATALOG" --workers "$SCAN_WORKERS")
 [[ $QUICK -eq 1 ]] && SCAN_ARGS+=(--max-files 5)
-python3 dataset/scripts/scan.py "${SCAN_ARGS[@]}" >> "$RUN_LOG" 2>&1 &
-SCAN_PID=$!
-progress_poller $SCAN_PID "$(printf "$CATALOG_COUNT" '"scanned"' 'projetos escaneados')"
-wait $SCAN_PID || die "scan falhou. Log: $RUN_LOG"
+# Roda em foreground com tee: cada projeto aparece ao vivo (scan.py é async internamente).
+python3 -u dataset/scripts/scan.py "${SCAN_ARGS[@]}" 2>&1 | tee -a "$RUN_LOG"
+[[ ${PIPESTATUS[0]} -eq 0 ]] || die "scan falhou. Log: $RUN_LOG  |  retomar: --from scan"
 ok "scan em $(elapsed $T0)"
+stage_status "[4/7] scan — OK ($(elapsed $T0))  |  retomar: --from validate"
 fi
 
 # ═════════════════════════════ 5. VALIDAÇÃO ═════════════════════════════════
 if stage_enabled validate; then
 banner 5 "Validação — consistência do dataset"
+stage_status "[5/7] validate — rodando"
 T0=$(date +%s)
 # O modo --strict aplica gates de metodologia (QM1 anotação dupla, QM2 corpus ≥400,
 # QM3 balanceamento de estratos) que dependem de trabalho manual de anotação e não
@@ -239,11 +255,13 @@ if [[ $VAL_RC -ne 0 ]]; then
 fi
 run_logged "relatório de findings" python3 dataset/scripts/findings_report.py
 ok "validação em $(elapsed $T0)"
+stage_status "[5/7] validate — OK ($(elapsed $T0))  |  retomar: --from select"
 fi
 
 # ═════════════════════════════ 6. SELEÇÃO ═══════════════════════════════════
 if stage_enabled select; then
 banner 6 "Seleção — estratificada e seedada"
+stage_status "[6/7] select — rodando"
 T0=$(date +%s)
 SEL_PER_DOMAIN=$PER_DOMAIN
 [[ $QUICK -eq 1 ]] && SEL_PER_DOMAIN=1
@@ -252,11 +270,13 @@ run_logged "select.py (seed=$SEED, $SEL_PER_DOMAIN/domínio)" \
     --per-domain "$SEL_PER_DOMAIN" --seed "$SEED" \
     --template "$TEMPLATE_YAML" --output "$EXPERIMENT_YAML"
 ok "seleção em $(elapsed $T0) → $EXPERIMENT_YAML"
+stage_status "[6/7] select — OK ($(elapsed $T0))  |  retomar: --from experiment"
 fi
 
 # ═════════════════════════════ 7. EXPERIMENTO ═══════════════════════════════
 if stage_enabled experiment; then
 banner 7 "Experimento — modelos × repetições"
+stage_status "[7/7] experiment — rodando"
 T0=$(date +%s)
 
 # Modo quick: reduz para 1 modelo × 1 repetição
@@ -293,6 +313,7 @@ EXP_PID=$!
 progress_poller $EXP_PID "$EXP_PROGRESS_EXPR"
 wait $EXP_PID || die "experimento falhou. Log: $RUN_LOG (checkpoints preservados — re-execute com --from experiment)"
 ok "experimento em $(elapsed $T0)"
+stage_status "[7/7] experiment — OK ($(elapsed $T0))  |  PIPELINE COMPLETO"
 fi
 
 # ═════════════════════════════ RESULTADOS ═══════════════════════════════════
