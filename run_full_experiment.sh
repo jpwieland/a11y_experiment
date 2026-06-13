@@ -196,11 +196,12 @@ fi
 if stage_enabled snapshot; then
 banner 3 "Snapshot — clone raso + pin de commit"
 T0=$(date +%s)
-python3 dataset/scripts/snapshot.py --catalog "$CATALOG" --workers 4 \
-  >> "$RUN_LOG" 2>&1 &
-SNAP_PID=$!
-progress_poller $SNAP_PID "$(printf "$CATALOG_COUNT" '"snapshotted", "scanned"' 'projetos clonados')"
-wait $SNAP_PID || die "snapshot falhou. Log: $RUN_LOG"
+# Roda em foreground com tee para que cada clone apareça ao vivo no terminal
+# e seja registrado no log simultaneamente.
+python3 -u dataset/scripts/snapshot.py --catalog "$CATALOG" --workers 4 \
+  2>&1 | tee -a "$RUN_LOG"
+# tee sempre retorna 0; verificar o exit code do python via PIPESTATUS
+[[ ${PIPESTATUS[0]} -eq 0 ]] || die "snapshot falhou. Log: $RUN_LOG"
 ok "snapshot em $(elapsed $T0)"
 fi
 
