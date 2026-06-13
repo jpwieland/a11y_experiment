@@ -33,7 +33,7 @@ from a11y_autofix.llm.client import LocalLLMClient
 from a11y_autofix.router.engine import Router
 from a11y_autofix.scanner.orchestrator import MultiToolScanner
 from a11y_autofix.utils.angular_template import find_angular_components
-from a11y_autofix.utils.files import find_react_files
+from a11y_autofix.utils.files import find_react_files, label_for_path, project_of
 
 if TYPE_CHECKING:
     from a11y_autofix.agents.base import BaseAgent
@@ -153,9 +153,12 @@ class Pipeline:
                 scan_cache.get(str(f)) or scan_cache.get(str(f.resolve())), ScanResult
             )
         )
+        projects = sorted({project_of(f) for f in files})
         log.info(
             "pipeline_start",
             files=len(files),
+            projects=len(projects),
+            project_ids=projects[:20] + (["…"] if len(projects) > 20 else []),
             cache_hits=cached_count,
             to_scan=len(files) - cached_count,
             model=self.model_config.model_id,
@@ -195,6 +198,16 @@ class Pipeline:
 
             async with results_lock:
                 scanned_count += 1
+                # Log por arquivo deixa visível QUAL projeto/arquivo acabou de ser
+                # escaneado (vs. só um contador a cada 100). Essencial com dezenas
+                # de projetos cheios de index.tsx/Button.tsx homônimos.
+                log.info(
+                    "file_scanned",
+                    target=label_for_path(file),
+                    issues=len(scan_result.issues),
+                    scanned=scanned_count,
+                    total=len(files),
+                )
                 if scanned_count % 100 == 0 or scanned_count == len(files):
                     log.info(
                         "scan_progress",
@@ -251,15 +264,24 @@ class Pipeline:
         high_contrast_scan_results: list[ScanResult] = []
 
         if self.settings.scan_mobile or self.settings.scan_high_contrast:
+            # Cada scan extra sobe um browser headless + servidor HTTP. Sem
+            # limite, asyncio.gather sobre TODOS os arquivos de uma vez abriria
+            # centenas de browsers simultâneos — OOM/thrashing num laptop que já
+            # roda o LLM na GPU. Reusar scan_sem mantém o mesmo teto do scan
+            # principal (max_concurrent_scans).
+            async def _extra_scan(coro):
+                async with scan_sem:
+                    return await coro
+
             extra_tasks = []
             for r in all_results:
                 if self.settings.scan_mobile:
                     extra_tasks.append(
-                        self.scanner.scan_file_mobile(r.file, wcag_level)
+                        _extra_scan(self.scanner.scan_file_mobile(r.file, wcag_level))
                     )
                 if self.settings.scan_high_contrast:
                     extra_tasks.append(
-                        self.scanner.scan_file_high_contrast(r.file, wcag_level)
+                        _extra_scan(self.scanner.scan_file_high_contrast(r.file, wcag_level))
                     )
 
             if extra_tasks:
@@ -344,7 +366,7 @@ class Pipeline:
 
             log.info(
                 "fix_attempt",
-                file=scan.file.name,
+                target=label_for_path(scan.file),
                 attempt=attempt_num,
                 agent=decision.agent,
                 issues=len(attempt_task.issues),

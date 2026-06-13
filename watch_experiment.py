@@ -443,11 +443,18 @@ def render(output_dir: Path, interval: int = 4) -> list[str]:
             f"{DIM}{tok_str:>{col_tokens}}{R}"
         )
 
-        # Linha com arquivo atual (só se estiver rodando)
+        # Linha com arquivo atual (só se estiver rodando).
+        # current vem como "<projeto> › <arquivo>": destacar o projeto em
+        # negrito/ciano para deixar claro QUAL projeto está sendo analisado.
         if status == "running" and current:
-            short_file = current[:60] + "…" if len(current) > 60 else current
             model_elapsed = _fmt_elapsed(model_started) if model_started else "?"
-            add(f"  {DIM}  └─ {short_file}   (modelo rodando há {model_elapsed}){R}")
+            if " › " in current:
+                proj, _, fname = current.partition(" › ")
+                fname = fname[:48] + "…" if len(fname) > 48 else fname
+                cur_str = f"{BOLD}{CYAN}{proj}{R}{DIM} › {fname}"
+            else:
+                cur_str = current[:60] + "…" if len(current) > 60 else current
+            add(f"  {DIM}  └─ {cur_str}   {DIM}(modelo rodando há {model_elapsed}){R}")
 
     add()
 

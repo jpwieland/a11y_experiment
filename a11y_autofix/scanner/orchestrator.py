@@ -67,6 +67,7 @@ from a11y_autofix.utils.files import (
     extract_project_css_vars,
     find_angular_assets_dir,
     find_angular_project_root,
+    label_for_path,
     load_bootstrap_utilities,
     load_component_css,
 )
@@ -502,7 +503,7 @@ class MultiToolScanner:
 
             log.info(
                 "scan_complete",
-                file=file.name,
+                target=label_for_path(file),
                 issues=len(scan_result.issues),
                 high_conf=len(scan_result.high_confidence_issues()),
                 tools=len(all_tools),
@@ -815,7 +816,7 @@ class MultiToolScanner:
 
             log.info(
                 "extra_scan_complete",
-                file=file.name,
+                target=label_for_path(file),
                 mode=scan_mode.value,
                 issues=len(scan_result.issues),
                 time_s=f"{scan_result.scan_time:.2f}",

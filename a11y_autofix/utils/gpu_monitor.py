@@ -72,19 +72,12 @@ class GpuMonitor:
     Thread-safe: todas as leituras são via propriedades atômicas.
     """
 
-    # Limites de VRAM livre para ajuste de concorrência (em MB)
-    # RTX 4090 (24 GB):  modelo 14B Q4 ≈ 9-10 GB
-    #   >8 GB livres  → modelo ainda não carregado → poupar GPU, max scans
-    #   4-8 GB livres → modelo carregado, inferência normal → concorrência padrão
-    #   2-4 GB livres → VRAM apertada, reduzir pressão
-    #   <2 GB livres  → crítico, mínimo
-    TIERS: ClassVar[list[tuple[int, int]]] = [
-        # (vram_free_mb_threshold, recommended_llm_concurrent)
-        (8_000, 4),   # muito livre: 4 paralelo
-        (4_000, 3),   # normal: 3
-        (2_000, 2),   # apertado: 2
-        (0,     1),   # crítico: 1
-    ]
+    # Custo aproximado de VRAM (MB) por slot ADICIONAL de inferência paralela
+    # sobre o mesmo modelo já carregado — domina o KV-cache (~contexto × camadas).
+    # 700 MB é uma estimativa conservadora para modelos 3B-7B Q4 em ~8k tokens.
+    PER_SLOT_MB: ClassVar[int] = 700
+    # Margem de segurança reservada para fragmentação/picos antes de paralelizar.
+    SAFETY_MB: ClassVar[int] = 512
 
     def __init__(self, poll_interval: float = 5.0, gpu_index: int = 0) -> None:
         self._poll_interval = poll_interval
@@ -145,31 +138,38 @@ class GpuMonitor:
         base: int = 2,
     ) -> int:
         """
-        Retorna quantos arquivos podem ser processados em paralelo pelo LLM.
+        Retorna quantos arquivos podem ser processados em paralelo pelo LLM,
+        proporcional à VRAM LIVRE real — funciona em qualquer placa (6 GB ou
+        24 GB), sem limiares absolutos calibrados para uma GPU específica.
 
         Lógica:
-        - Se GPU não disponível: retorna `base`
-        - Calcula VRAM efetivamente livre descontando o modelo carregado
-        - Aplica os TIERS de concorrência
+        - Sem GPU disponível → retorna `base` (paralelismo decidido por CPU).
+        - Com o modelo já carregado, a VRAM livre é o que sobra para KV-cache de
+          inferências paralelas adicionais. 1 slot é sempre garantido (o modelo
+          carregado processa ≥1 requisição); cada slot extra custa ~PER_SLOT_MB.
+        - O resultado é limitado por `base` (max_concurrent_agents) — nunca pede
+          mais paralelismo do que o configurado.
+
+        Numa RTX 4050 (6 GB): modelo 7B Q4 (~5-6 GB) deixa ~0 livre → 1 slot
+        (correto: 7B não paraleliza em 6 GB). Modelo 3B (~3 GB) deixa ~3 GB →
+        2-3 slots. Numa RTX 4090 (24 GB) o mesmo cálculo libera bem mais slots.
 
         Args:
-            model_vram_gb: VRAM que o modelo ocupa quando carregado (estimativa).
-            base: Valor padrão sem GPU.
+            model_vram_gb: VRAM que o modelo ocupa quando carregado (estimativa);
+                usada como piso de sanidade quando a leitura de `free` ainda não
+                reflete o modelo carregado.
+            base: Teto de concorrência (e fallback sem GPU).
         """
         if not self.available:
             return base
 
         s = self._stats
-        # VRAM realmente disponível além da já usada pelo modelo
-        free_mb = s.vram_free_mb
-        # Descontar headroom para KV-cache de inferências paralelas (~500 MB por slot)
-        usable_mb = max(0, free_mb - 500)
+        usable_mb = s.vram_free_mb - self.SAFETY_MB
+        if usable_mb < 0:
+            return 1
 
-        for threshold_mb, concurrency in self.TIERS:
-            if usable_mb >= threshold_mb:
-                return concurrency
-
-        return 1  # fallback
+        extra_slots = int(usable_mb // self.PER_SLOT_MB)
+        return max(1, min(base, 1 + extra_slots))
 
     def format_stats(self) -> str:
         """Formata as stats para display no dashboard."""

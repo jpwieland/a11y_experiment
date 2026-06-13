@@ -1161,11 +1161,12 @@ class ExperimentRunner:
             )
             # Atualizar tracker para arquivos já concluídos (sem bloquear)
             if tracker:
+                from a11y_autofix.utils.files import label_for_path
                 for r in resumed_results:
                     tokens_out = sum(a.tokens_used or 0 for a in r.attempts)
                     await tracker.update(
                         model=model_name,
-                        file_name=r.file.name,
+                        file_name=label_for_path(r.file),
                         success=r.final_success,
                         issues_fixed=r.issues_fixed,
                         issues_total=len(r.scan_result.issues),
@@ -1193,12 +1194,15 @@ class ExperimentRunner:
             scan_dict = scan_cache.to_dict() if scan_cache else None
 
         # Callback chamado pelo pipeline após cada arquivo
+        from a11y_autofix.utils.files import label_for_path
         async def _on_file_done(fix_result: FixResult) -> None:
             if tracker:
                 tokens_out = sum(a.tokens_used or 0 for a in fix_result.attempts)
                 await tracker.update(
                     model=model_name,
-                    file_name=fix_result.file.name,
+                    # Rótulo "<projeto> › <arquivo>" deixa o dashboard mostrar
+                    # QUAL projeto está sendo processado, não só o nome do .tsx.
+                    file_name=label_for_path(fix_result.file),
                     success=fix_result.final_success,
                     issues_fixed=fix_result.issues_fixed,
                     issues_total=len(fix_result.scan_result.issues),

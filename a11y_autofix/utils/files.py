@@ -42,6 +42,39 @@ _EXCLUDE_PATTERNS = re.compile(
 )
 
 
+def project_of(path: "Path | str") -> str:
+    """
+    Extrai o ID do projeto (nome do diretório de snapshot) de um caminho de
+    arquivo. Os arquivos do corpus vivem em ``dataset/snapshots/<project>/...``,
+    então o segmento imediatamente após ``snapshots/`` é o projeto.
+
+    Fallback: nome do diretório-pai do arquivo, quando o caminho não passa por
+    ``snapshots/`` (ex.: testes ou execução ad-hoc fora do corpus).
+    """
+    norm = str(path).replace("\\", "/")
+    marker = "snapshots/"
+    idx = norm.find(marker)
+    if idx != -1:
+        rest = norm[idx + len(marker):]
+        seg = rest.split("/", 1)[0].strip()
+        if seg:
+            return seg
+    parent = Path(path).parent.name
+    return parent or "?"
+
+
+def label_for_path(path: "Path | str") -> str:
+    """
+    Rótulo legível ``<project> › <file.tsx>`` para logs e dashboard.
+
+    Resolve a ambiguidade de nomes repetidos (vários projetos têm
+    ``index.tsx``/``Button.tsx``) deixando claro QUAL projeto está sendo
+    analisado a cada arquivo.
+    """
+    name = str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return f"{project_of(path)} › {name}"
+
+
 def find_react_files(target: Path, recursive: bool = True) -> list[Path]:
     """
     Descobre arquivos React/TypeScript em um diretório.
