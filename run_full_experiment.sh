@@ -134,6 +134,7 @@ check() {  # check <descrição> <cmd...>
 check "python 3.11+"            python3 -c 'import sys; assert sys.version_info >= (3,11)'
 check "pacote a11y_autofix"     python3 -c 'import a11y_autofix'
 check "pydantic/structlog/yaml" python3 -c 'import pydantic, structlog, yaml'
+check "pydantic-settings"      python3 -c 'import pydantic_settings'
 check "playwright + chromium"   python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); b.close(); p.stop()'
 check "node 18+"                node -e 'process.exit(parseInt(process.versions.node)>=18?0:1)'
 check "pa11y"                   sh -c 'command -v pa11y'

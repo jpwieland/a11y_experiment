@@ -160,16 +160,13 @@ async def scan_project(
     result_dir.mkdir(parents=True, exist_ok=True)
 
     summary_path = result_dir / "summary.json"
-    # Considera já escaneado se:
-    #   a) catálogo diz SCANNED, ou
-    #   b) summary.json existe (projeto concluído antes de um Ctrl+C salvar o catálogo)
-    already_done = (
-        entry.status == ProjectStatus.SCANNED
-        or summary_path.exists()
-    )
+    # Fonte de verdade: summary.json no disco.
+    # status=SCANNED sem summary.json significa que o catálogo veio do git mas os
+    # resultados (gitignored) não existem nesta máquina — precisamos re-escanear.
+    already_done = summary_path.exists()
     if not force and already_done:
         # Garante que o status em memória está correto para o resumo final
-        if entry.status != ProjectStatus.SCANNED and summary_path.exists():
+        if entry.status != ProjectStatus.SCANNED:
             entry.status = ProjectStatus.SCANNED
         print(f"  [{entry.id}] Já escaneado (use --force para re-escanear).")
         return entry, []
@@ -386,6 +383,11 @@ async def main_async(args: argparse.Namespace) -> None:
         targets = [
             e for e in entries
             if e.status == ProjectStatus.SNAPSHOTTED
+            # Re-escaneia projetos marcados como scanned no catálogo mas sem
+            # summary.json no disco (dataset/results/ é gitignored — em máquina
+            # nova o arquivo não existe mesmo que o catálogo diga "scanned").
+            or (e.status == ProjectStatus.SCANNED
+                and not (RESULTS_DIR / e.id / "summary.json").exists())
             or (args.force and e.status == ProjectStatus.SCANNED)
         ]
 

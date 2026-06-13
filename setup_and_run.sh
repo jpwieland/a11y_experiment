@@ -753,8 +753,9 @@ check_py() {
   fi
 }
 
-check_py pydantic        "pydantic"
-check_py structlog       "structlog"
+check_py pydantic          "pydantic"
+check_py pydantic_settings "pydantic-settings" "pydantic-settings"
+check_py structlog         "structlog"
 check_py yaml            "pyyaml"          "pyyaml"
 check_py playwright      "playwright"
 check_py openai          "openai"

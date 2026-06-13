@@ -343,8 +343,38 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
         and entry.snapshot.pinned_commit
         and project_dir.exists()
     ):
-        print(f"  [{entry.id}] Already snapshotted. Skipping (use --force to re-clone).")
-        return entry
+        # Verifica que o HEAD atual bate com o commit pinado no catálogo.
+        # Se houver divergência (clone antigo, shallow incompleto, etc.) tenta
+        # restaurar o commit pinado sem re-clonar; só re-clona se isso falhar.
+        _, cur_sha, _ = run_git(["rev-parse", "HEAD"], cwd=project_dir)
+        if len(cur_sha) == 40 and cur_sha == entry.snapshot.pinned_commit:
+            print(f"  [{entry.id}] Already snapshotted @ {cur_sha[:8]}. Skipping (use --force to re-clone).")
+            return entry
+
+        pin = entry.snapshot.pinned_commit
+        if len(cur_sha) == 40:
+            print(f"  [{entry.id}] Commit mismatch ({cur_sha[:8]} ≠ {pin[:8]}) — restoring pinned commit...")
+        else:
+            print(f"  [{entry.id}] Could not read HEAD — restoring pinned commit...")
+
+        # Tenta buscar e fazer checkout do commit pinado sem re-clonar
+        f_code, _, f_err = run_git(["fetch", "--depth", "1", "origin", pin], cwd=project_dir)
+        if f_code == 0:
+            c_code, _, c_err = run_git(["checkout", "--detach", pin], cwd=project_dir)
+            if c_code == 0:
+                print(f"  [{entry.id}] ✓ Pinned commit restored: {pin[:8]}")
+                return entry
+            print(f"  [{entry.id}] checkout failed ({c_err[:80]}) — will re-clone.", file=sys.stderr)
+        else:
+            print(f"  [{entry.id}] fetch failed ({f_err[:80]}) — will re-clone.", file=sys.stderr)
+
+        # Fallback: remover clone corrompido e re-clonar do zero
+        if not _rmtree_safe(project_dir, entry_id=entry.id):
+            entry.status = ProjectStatus.ERROR
+            entry.screening.exclusion_criterion = "RMTREE_ERROR"
+            entry.screening.exclusion_reason = "Could not delete mismatched clone for re-clone"
+            return entry
+        # Prossegue com clone normal abaixo
 
     print(f"  [{entry.id}] Cloning {entry.github_url} ...")
 
@@ -597,6 +627,15 @@ def main() -> None:
             targets = [
                 e for e in entries
                 if e.status in (ProjectStatus.CANDIDATE, ProjectStatus.PENDING)
+                # Re-clona projetos que o catálogo diz estarem snapshotted/scanned
+                # mas que não têm o diretório de clone no disco desta máquina.
+                # Isso acontece quando o catálogo vem do git (gitignore exclui
+                # dataset/snapshots/) e é a primeira execução nesta máquina.
+                or (
+                    e.status in (ProjectStatus.SNAPSHOTTED, ProjectStatus.SCANNED,
+                                 ProjectStatus.ANNOTATED)
+                    and not (SNAPSHOTS_DIR / e.id).exists()
+                )
                 or (args.force and e.status == ProjectStatus.SNAPSHOTTED)
             ]
 
