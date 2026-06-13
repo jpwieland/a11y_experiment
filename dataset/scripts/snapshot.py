@@ -334,11 +334,14 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
     """
     project_dir = SNAPSHOTS_DIR / entry.id
 
-    # Skip if already snapshotted and not forcing
+    # Skip if already snapshotted and not forcing.
+    # project_dir.exists() é obrigatório: o catálogo pode vir de outra máquina
+    # (via git) com status snapshotted, mas sem os clones no disco local.
     if (
         not force
         and entry.status in (ProjectStatus.SNAPSHOTTED, ProjectStatus.SCANNED, ProjectStatus.ANNOTATED)
         and entry.snapshot.pinned_commit
+        and project_dir.exists()
     ):
         print(f"  [{entry.id}] Already snapshotted. Skipping (use --force to re-clone).")
         return entry
@@ -394,6 +397,24 @@ def snapshot_project(entry: ProjectEntry, force: bool = False) -> ProjectEntry:
             entry.screening.exclusion_criterion = "CLONE_ERROR"
             entry.screening.exclusion_reason = clone_err[:200]
             return entry
+
+    # Se o catálogo já define um commit pinado (re-clone em outra máquina),
+    # restaura exatamente aquele SHA para manter o corpus reprodutível.
+    if entry.snapshot.pinned_commit:
+        pin = entry.snapshot.pinned_commit
+        cur_code, cur_sha, _ = run_git(["rev-parse", "HEAD"], cwd=project_dir)
+        if cur_code == 0 and cur_sha != pin:
+            f_code, _, f_err = run_git(["fetch", "--depth", "1", "origin", pin], cwd=project_dir)
+            if f_code == 0:
+                c_code, _, c_err = run_git(["checkout", "--detach", pin], cwd=project_dir)
+                if c_code == 0:
+                    print(f"  [{entry.id}] Commit pinado restaurado: {pin[:10]}")
+                else:
+                    print(f"  [{entry.id}] ⚠️  checkout do commit pinado falhou ({c_err[:80]}) — "
+                          f"re-pinando HEAD atual.", file=sys.stderr)
+            else:
+                print(f"  [{entry.id}] ⚠️  fetch do commit pinado falhou ({f_err[:80]}) — "
+                      f"re-pinando HEAD atual.", file=sys.stderr)
 
     # Get pinned commit SHA
     _, commit_sha, _ = run_git(["rev-parse", "HEAD"], cwd=project_dir)

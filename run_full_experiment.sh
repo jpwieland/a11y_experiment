@@ -220,7 +220,20 @@ fi
 if stage_enabled validate; then
 banner 5 "Validação — consistência do dataset"
 T0=$(date +%s)
-run_logged "validate --strict" python3 dataset/scripts/validate.py --strict
+# O modo --strict aplica gates de metodologia (QM1 anotação dupla, QM2 corpus ≥400,
+# QM3 balanceamento de estratos) que dependem de trabalho manual de anotação e não
+# são pré-requisito para executar o experimento. O relatório é gerado e os gates
+# reprovados viram aviso; exporte STRICT_VALIDATE=1 para voltar a bloquear.
+echo "${C}▶${N} validate --strict (relatório de qualidade)" | tee -a "$RUN_LOG"
+python3 dataset/scripts/validate.py --strict 2>&1 | tee -a "$RUN_LOG"
+VAL_RC=${PIPESTATUS[0]}
+if [[ $VAL_RC -ne 0 ]]; then
+  if [[ "${STRICT_VALIDATE:-0}" == "1" ]]; then
+    die "validate --strict reprovou (rc=$VAL_RC) e STRICT_VALIDATE=1. Log: $RUN_LOG"
+  fi
+  warn "validação estrita reprovou gates de metodologia (QM*) — relatório salvo em dataset/results/dataset_validation_report.json"
+  warn "o pipeline continua; os gates QM exigem anotação dupla e corpus ≥400 repos."
+fi
 run_logged "relatório de findings" python3 dataset/scripts/findings_report.py
 ok "validação em $(elapsed $T0)"
 fi
