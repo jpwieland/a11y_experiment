@@ -109,6 +109,59 @@ progress_poller() {  # progress_poller <pid> <python_expr>
   printf "\r%-100s\r" " "
 }
 
+# Poller DETALHADO do experimento: bloco multi-linha que se atualiza no lugar,
+# mostrando repetição atual e, por modelo, status / progresso / sucesso / falha /
+# issues corrigidos / tempo médio / ETA / arquivo atual. Permite acompanhar o
+# experimento por completo sem precisar abrir o log gigante.
+experiment_poller() {  # experiment_poller <pid>
+  local pid=$1 prev=0 tty=0
+  [[ -t 1 ]] && tty=1
+  [[ $tty -eq 1 ]] && { tput civis 2>/dev/null || true; }
+  while kill -0 "$pid" 2>/dev/null; do
+    local block
+    block=$(python3 - <<'PYEOF' 2>/dev/null
+import json, glob, os
+files = glob.glob("experiment-results/*/experiment_progress.json")
+if not files:
+    raise SystemExit
+d = json.load(open(max(files, key=os.path.getmtime)))
+models = d.get("models", {})
+rep = d.get("current_repetition", 1); treps = d.get("total_repetitions", 1)
+tf = d.get("total_files", 0)
+def eta(s):
+    s = int(s or 0)
+    if s <= 0: return "—"
+    h, r = divmod(s, 3600); m = r // 60
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+gdone = sum(m.get("done", 0) for m in models.values())
+gtot = tf * max(1, len(models))
+gpct = (gdone * 100 // gtot) if gtot else 0
+print(f"  Rep {rep}/{treps} · progresso global {gpct}% ({gdone}/{gtot} arquivos-modelo)")
+icons = {"done": "✓", "running": "▶", "loading": "…", "pending": "·", "error": "✗"}
+for name, m in models.items():
+    st = m.get("status", "pending")
+    ic = icons.get(st, "·")
+    done = m.get("done", 0); ok = m.get("success", 0); fail = m.get("failed", 0)
+    fix = m.get("issues_fixed", 0); avg = m.get("avg_time_per_file_s")
+    avg_s = f"{avg:.0f}s/arq" if avg else "—"
+    line = f"    {ic} {name:20s} {st:8s} {done}/{tf}  ok={ok} fail={fail} fix={fix}  {avg_s}"
+    if st == "running":
+        cur = (m.get("current_file") or "")[:36]
+        line += f"  ETA {eta(m.get('eta_seconds'))}  {cur}"
+    print(line[:170])
+PYEOF
+)
+    if [[ -n "$block" ]]; then
+      local n; n=$(printf '%s\n' "$block" | wc -l)
+      if [[ $tty -eq 1 && $prev -gt 0 ]]; then printf "\033[%dA\033[J" "$prev"; fi
+      printf '%s\n' "$block"
+      prev=$n
+    fi
+    sleep 5
+  done
+  [[ $tty -eq 1 ]] && { tput cnorm 2>/dev/null || true; }
+}
+
 # Conta status no catálogo: imprime "<feitos> <total> <rótulo>"
 CATALOG_COUNT='
 import yaml, sys
@@ -155,19 +208,52 @@ check "@babel/parser (npm)"     sh -c 'test -d "$(npm root -g)/@babel/parser"'
 check "git"                     sh -c 'command -v git'
 check "disco ≥ 15 GB livres"    sh -c '[ "$(df -k . | awk "NR==2{print \$4}")" -gt 15728640 ]'
 
-# Ollama: servidor + modelos do template
+# Ollama: servidor + modelos do template.
+# Resolve cada NOME de modelo do template (ex.: codellama-7b) para o model_id
+# REAL definido em models.yaml (ex.: codellama:7b-instruct) e confere o tag
+# EXATO baixado. A versão antiga fazia match difuso pelo nome (regex em '-'),
+# o que dava falso-positivo: codellama:7b (base) "casava" com codellama-7b
+# mesmo sem codellama:7b-instruct → 404 no experimento (run dffbe9ec).
 if curl -s --max-time 5 http://localhost:11434/api/tags >/dev/null 2>&1; then
   ok "ollama server"
-  for m in $(python3 -c "
-import yaml; c = yaml.safe_load(open('$TEMPLATE_YAML'))
-print(' '.join(c.get('models', [])))"); do
-    if curl -s http://localhost:11434/api/tags | grep -q "$(echo "$m" | sed 's/-/[:.-]*/g')"; then
-      ok "modelo $m"
-    else
-      warn "modelo '$m' não encontrado no Ollama — rode: ollama pull <modelo>"
-      FAILED=1
+  # Lista "nome_no_template<TAB>model_id<TAB>backend" para modelos ollama.
+  MODEL_MAP=$(python3 - "$TEMPLATE_YAML" <<'PYEOF'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+try:
+    reg = yaml.safe_load(open("models.yaml")).get("models", {})
+except Exception:
+    reg = {}
+for name in cfg.get("models", []):
+    m = reg.get(name, {})
+    backend = m.get("backend", "ollama")
+    model_id = m.get("model_id", name)
+    print(f"{name}\t{model_id}\t{backend}")
+PYEOF
+)
+  TAGS_NOW=$(curl -s http://localhost:11434/api/tags | python3 -c "
+import json,sys
+try:
+    [print(m['name']) for m in json.load(sys.stdin).get('models',[])]
+except Exception: pass" 2>/dev/null || echo "")
+  while IFS=$'\t' read -r m_name m_id m_backend; do
+    [[ -z "$m_name" ]] && continue
+    if [[ "$m_backend" != "ollama" ]]; then
+      ok "modelo $m_name ($m_id, backend=$m_backend — não-ollama, pulado)"
+      continue
     fi
-  done
+    if echo "$TAGS_NOW" | grep -qx "$m_id"; then
+      ok "modelo $m_name → $m_id"
+    else
+      warn "modelo '$m_name' → tag '$m_id' ausente no Ollama — baixando…"
+      if ollama pull "$m_id" 2>&1 | tail -1; then
+        ok "modelo $m_name → $m_id (baixado)"
+      else
+        echo "  ${R}✗${N} falha ao baixar '$m_id' — rode manualmente: ollama pull $m_id"
+        FAILED=1
+      fi
+    fi
+  done <<< "$MODEL_MAP"
 else
   echo "  ${R}✗${N} ollama server (http://localhost:11434) — inicie com: ollama serve"
   FAILED=1
@@ -294,24 +380,14 @@ print("quick yaml gerado")
 PYEOF
 fi
 
-# Localizar o progress file mais recente do experimento (criado pelo runner)
-EXP_PROGRESS_EXPR='
-import json, glob, os
-files = glob.glob("experiment-results/*/experiment_progress.json")
-if not files: raise SystemExit
-f = max(files, key=os.path.getmtime)
-d = json.load(open(f))
-models = d.get("models", {})
-total = d.get("total_files", 0) * max(1, len(models))
-done = sum(m.get("done", 0) for m in models.values())
-running = [(k, v) for k, v in models.items() if v.get("status") == "running"]
-cur = f"{running[0][0]}:{running[0][1].get('"'"'current_file'"'"', '"'"'?'"'"')}" if running else ""
-print(done, total, cur[:50])
-'
+# A saída crua do runner vai para o log (gigante); o acompanhamento ao vivo é
+# feito pelo experiment_poller, que lê experiment_progress.json e mostra o
+# progresso completo por modelo/repetição no terminal.
+echo "  Acompanhe também: tail -f $RUN_LOG   |   python3 watch_experiment.py"
 python3 -m a11y_autofix.cli experiment run "$RUN_YAML" >> "$RUN_LOG" 2>&1 &
 EXP_PID=$!
-progress_poller $EXP_PID "$EXP_PROGRESS_EXPR"
-wait $EXP_PID || die "experimento falhou. Log: $RUN_LOG (checkpoints preservados — re-execute com --from experiment)"
+experiment_poller $EXP_PID
+wait $EXP_PID || die "experimento falhou. Log: $RUN_LOG (veja o erro/erros acima; checkpoints preservados — re-execute com --from experiment)"
 ok "experimento em $(elapsed $T0)"
 stage_status "[7/7] experiment — OK ($(elapsed $T0))  |  PIPELINE COMPLETO"
 fi
@@ -321,6 +397,24 @@ echo ""
 echo "${B}${G}══════════════════ PIPELINE COMPLETO em $(elapsed $T0_GLOBAL) ══════════════════${N}"
 LATEST=$(ls -td experiment-results/*/ 2>/dev/null | head -1)
 if [[ -n "$LATEST" ]]; then
+  # Status por modelo — torna visível qualquer condição que processou 0 arquivos
+  # (mesmo que o experimento como um todo tenha terminado).
+  if [[ -f "$LATEST/experiment_progress.json" ]]; then
+    echo "${B}Status por modelo:${N}"
+    python3 - "$LATEST/experiment_progress.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for name, m in d.get("models", {}).items():
+    done, ok_, failed = m.get("done", 0), m.get("success", 0), m.get("failed", 0)
+    if done == 0:
+        print(f"  \033[31m✗ {name}: 0 arquivos processados — CONDIÇÃO FALHOU\033[0m")
+    elif failed:
+        print(f"  \033[33m⚠ {name}: {ok_}/{done} ok, {failed} falha(s)\033[0m")
+    else:
+        print(f"  \033[32m✓ {name}: {ok_}/{done} ok\033[0m")
+PYEOF
+    echo ""
+  fi
   echo "${B}Artefatos gerados em ${LATEST}:${N}"
   for f in deep_report.html deep_report.md deep_report.json comparison.html \
            metrics.csv experiment_result.json repetitions_summary.json; do
