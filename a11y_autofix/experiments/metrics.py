@@ -183,7 +183,14 @@ def compute_experiment_metrics(
         total_attempts = sum(len(r.attempts) for r in results)
 
         # Token Efficiency (per condition — requires input token count from API response)
-        input_tokens = _input_tokens.get(model_name, 0)
+        # Preferir o valor explícito passado pelo caller; senão, derivar dos
+        # próprios resultados (os agentes registram tokens_prompt por tentativa).
+        # Antes de 06/2026 os agentes swe/openhands não preenchiam tokens_prompt,
+        # então input_tokens ficava 0 e TE/TPF/TE_norm caíam no fallback de
+        # tokens de saída ou None.
+        input_tokens = _input_tokens.get(model_name) or sum(
+            a.tokens_prompt or 0 for r in results for a in r.attempts
+        )
         te: float | None = None
         if input_tokens > 0:
             te = compute_te(ifr, total_issues, input_tokens)

@@ -177,6 +177,8 @@ class OpenHandsAgent(BaseAgent):
                 success=False,
                 error="OpenHands: no valid code block found in LLM response",
                 tokens_used=metrics.get("tokens_total"),
+                tokens_prompt=metrics.get("tokens_prompt"),
+                tokens_completion=metrics.get("tokens_completion"),
                 time_seconds=metrics.get("time_seconds", 0.0),
             )
 
@@ -195,5 +197,7 @@ class OpenHandsAgent(BaseAgent):
             new_content=new_content,
             diff=diff,
             tokens_used=metrics.get("tokens_total"),
+            tokens_prompt=metrics.get("tokens_prompt"),
+            tokens_completion=metrics.get("tokens_completion"),
             time_seconds=metrics.get("time_seconds", 0.0),
         )
