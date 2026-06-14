@@ -351,6 +351,10 @@ class Pipeline:
         current_content = task.file_content
         # Rastrear issues resolvidas por tentativa (baseado em diff aplicado)
         resolved_issue_ids: set[str] = set()
+        # Feedback de auto-correção: rejeição da tentativa anterior repassada ao
+        # agente na próxima. Sem isso, a temperatura baixa reproduz o mesmo patch
+        # rejeitado e as tentativas 2-3 são desperdiçadas.
+        previous_attempt: dict | None = None
 
         for attempt_num in range(1, self.settings.max_retries_per_agent + 1):
             pending_issues = [i for i in task.issues if i.issue_id not in resolved_issue_ids]
@@ -359,6 +363,7 @@ class Pipeline:
                 file_content=current_content,
                 issues=pending_issues,
                 wcag_level=task.wcag_level,
+                context={"previous_attempt": previous_attempt} if previous_attempt else {},
             )
 
             if not attempt_task.issues:
@@ -416,7 +421,18 @@ class Pipeline:
             )
             attempts.append(attempt)
 
+            if not patch_accepted:
+                # Guardar a causa da rejeição para o agente se auto-corrigir na
+                # próxima tentativa (excerpt = saída rejeitada, se houver).
+                excerpt = (patch.new_content or patch.diff or "")[:400]
+                previous_attempt = {
+                    "error": patch_error,
+                    "layer": validation_layer,
+                    "excerpt": excerpt,
+                }
+
             if patch_accepted:
+                previous_attempt = None  # tentativa aceita: sem feedback de erro
                 scan.file.write_text(patch.new_content, encoding="utf-8")
                 current_content = patch.new_content
 

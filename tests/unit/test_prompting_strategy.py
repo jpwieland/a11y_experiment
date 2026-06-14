@@ -16,6 +16,7 @@ from a11y_autofix.agents.direct_llm import DirectLLMAgent
 from a11y_autofix.agents.prompts import (
     PromptBuilder,
     PromptingStrategy,
+    build_direct_llm_prompt,
     build_swe_prompt,
 )
 from a11y_autofix.agents.swe import SWEAgent
@@ -118,6 +119,43 @@ class TestSwePromptStrategy:
         prompt = build_swe_prompt(_task(), strategy=PromptingStrategy.CHAIN_OF_THOUGHT)
         assert "<!-- CoT -->" in prompt
         assert "PATCH blocks" in prompt
+
+
+class TestRetryFeedbackLoop:
+    """Auto-correção: a rejeição da tentativa anterior deve chegar ao prompt.
+
+    Sem isso, a temperatura baixa reproduz o mesmo patch rejeitado e as
+    tentativas 2-3 são desperdiçadas (SR do swe-agent foi 19% no run dffbe9ec).
+    O feedback é uniforme entre estratégias/agentes (só muda tentativas ≥ 2),
+    então não confunde as comparações de IV2/agente.
+    """
+
+    _PREV = {"error": "functional_regression:export_signature", "layer": 2,
+             "excerpt": "export default Broken"}
+
+    def test_first_attempt_has_no_feedback(self):
+        assert "REJECTED" not in build_swe_prompt(_task())
+        assert "REJECTED" not in build_direct_llm_prompt(_task())
+        assert "REJECTED" not in PromptBuilder().build(
+            issues=[_issue()], file=Path("C.tsx"), file_content="<div/>")
+
+    def test_retry_injects_rejection_reason_all_agents(self):
+        swe = build_swe_prompt(_task(), previous_attempt=self._PREV)
+        direct = build_direct_llm_prompt(_task(), previous_attempt=self._PREV)
+        oh = PromptBuilder().build(
+            issues=[_issue()], file=Path("C.tsx"), file_content="<div/>",
+            previous_attempt=self._PREV)
+        for prompt in (swe, direct, oh):
+            assert "REJECTED" in prompt
+            assert "functional regression" in prompt  # camada 2 descrita
+
+    def test_feedback_does_not_leak_fewshot_into_zero_shot(self):
+        # Mesmo com feedback, zero-shot continua sem o Componente 5.
+        prompt = PromptBuilder().build(
+            issues=[_issue()], file=Path("C.tsx"), file_content="<div/>",
+            strategy=PromptingStrategy.ZERO_SHOT, previous_attempt=self._PREV)
+        assert "Component 5" not in prompt
+        assert "REJECTED" in prompt
 
 
 class TestStrategyFlowsThroughAgents:

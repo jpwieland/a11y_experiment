@@ -138,7 +138,11 @@ class SWEAgent(BaseAgent):
         Returns:
             PatchResult da execução.
         """
-        prompt = build_swe_prompt(task, strategy=self.strategy)
+        prompt = build_swe_prompt(
+            task,
+            strategy=self.strategy,
+            previous_attempt=task.context.get("previous_attempt"),
+        )
 
         try:
             response, metrics = await self.llm.complete_with_metrics(

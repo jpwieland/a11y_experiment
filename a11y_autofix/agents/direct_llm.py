@@ -54,6 +54,7 @@ class DirectLLMAgent(BaseAgent):
             file_content=task.file_content,
             strategy=self.strategy,
             wcag_level=task.wcag_level,
+            previous_attempt=task.context.get("previous_attempt"),
         )
 
         try:

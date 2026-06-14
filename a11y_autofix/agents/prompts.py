@@ -338,6 +338,7 @@ class PromptBuilder:
         file_content: str,
         strategy: PromptingStrategy = PromptingStrategy.FEW_SHOT,
         wcag_level: str = "WCAG2AA",
+        previous_attempt: dict | None = None,
     ) -> str:
         """
         Build a structured prompt for the given strategy.
@@ -403,6 +404,11 @@ class PromptBuilder:
         if component5:
             parts.append(component5)
         parts.append(component6)
+
+        # Feedback de auto-correção (apenas em tentativas ≥ 2)
+        feedback = format_retry_feedback(previous_attempt)
+        if feedback:
+            parts.append(feedback)
 
         return "\n\n".join(parts)
 
@@ -519,6 +525,7 @@ Fix ALL issues listed above. Return the complete corrected file in a ```tsx code
 def build_swe_prompt(
     task: AgentTask,
     strategy: PromptingStrategy = PromptingStrategy.FEW_SHOT,
+    previous_attempt: dict | None = None,
 ) -> str:
     """
     Constrói prompt do usuário para SWE-agent.
@@ -562,15 +569,20 @@ WCAG: {task.wcag_level}
 Issues to fix:
 {issues_text}{examples_section}{cot_section}
 
-Provide PATCH blocks (FIND/REPLACE) or complete file if restructuring needed."""
+Provide PATCH blocks (FIND/REPLACE) or complete file if restructuring needed.\
+{format_retry_feedback(previous_attempt)}"""
 
 
-def build_direct_llm_prompt(task: AgentTask) -> str:
+def build_direct_llm_prompt(
+    task: AgentTask,
+    previous_attempt: dict | None = None,
+) -> str:
     """
     Constrói prompt minimalista para DirectLLMAgent.
 
     Args:
         task: Tarefa com arquivo e issues.
+        previous_attempt: Feedback de rejeição da tentativa anterior (auto-correção).
 
     Returns:
         String do prompt.
@@ -589,7 +601,53 @@ Original file:
 {task.file_content}
 ```
 
-Return the complete corrected file."""
+Return the complete corrected file.{format_retry_feedback(previous_attempt)}"""
+
+
+_LAYER_NAMES = {
+    1: "syntax — the output was not valid/parseable TSX",
+    2: "functional regression — the patch removed/changed an export, a prop "
+       "interface, or an event handler (business logic must be preserved)",
+    3: "domain — the targeted accessibility issue was NOT actually resolved",
+    4: "code quality — the patch used a prohibited pattern "
+       "(e.g. dangerouslySetInnerHTML, tabIndex < -1)",
+}
+
+
+def format_retry_feedback(previous_attempt: dict | None) -> str:
+    """Render feedback about the previous REJECTED attempt for self-repair.
+
+    Threading the validator's rejection reason (and a short excerpt of the
+    rejected output) back into the prompt is what makes retries useful: at
+    temperature 0.1 a prompt without feedback reproduces the same rejected
+    output. Applied uniformly to all agents/strategies, so it does not
+    confound the IV2 (prompting) or agent comparisons — it only changes
+    attempts ≥ 2.
+
+    Args:
+        previous_attempt: dict with keys 'error', 'layer' (1-4 or None),
+            'excerpt' (optional snippet of the rejected output). None/empty
+            → returns "" (first attempt, no feedback).
+    """
+    if not previous_attempt:
+        return ""
+    layer = previous_attempt.get("layer")
+    reason = (previous_attempt.get("error") or "rejected").strip()
+    where = _LAYER_NAMES.get(layer, "validation") if layer else "validation/extraction"
+
+    lines = [
+        "\n\n## ⚠ Your PREVIOUS attempt was REJECTED — do not repeat it",
+        f"- Rejected at: {where}",
+        f"- Detail: {reason[:300]}",
+    ]
+    excerpt = (previous_attempt.get("excerpt") or "").strip()
+    if excerpt:
+        lines.append(f"- Excerpt of your rejected output:\n```\n{excerpt[:400]}\n```")
+    lines.append(
+        "Produce a DIFFERENT correction that resolves the issue AND avoids the "
+        "rejection cause above. Output the required format exactly."
+    )
+    return "\n".join(lines)
 
 
 def format_issues(issues: list[A11yIssue], verbose: bool = True) -> str:
