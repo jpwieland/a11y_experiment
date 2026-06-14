@@ -89,6 +89,8 @@ def _inferential_statistics(
             cliffs_delta,
             kruskal_wallis,
             mann_whitney_u,
+            test_h3_correction_rate_threshold,
+            test_h5_regression_threshold,
         )
     except Exception as exc:  # pragma: no cover - import defensivo
         log.warning("inferential_stats_unavailable", error=str(exc)[:200])
@@ -122,10 +124,32 @@ def _inferential_statistics(
             1.0 if a.validation_rejected_layer == 2 else 0.0
             for r in results for a in r.attempts
         ]
+        ifr_ci = _ci(ifr_bin)
+        rho_ci = _ci(rho_bin)
+
+        # Testes confirmatórios pré-registrados (metodologia §1.3):
+        #   H3: taxa de correção (IFR) ≥ 0,70
+        #   H5: taxa de regressão (ρ) < 0,05
+        # (H1 δ≥0,80 exige ground truth humano — fora do experimento de fix.)
+        n_total = len(ifr_bin)
+        n_fixed = int(sum(ifr_bin))
+        n_attempts = len(rho_bin)
+        n_reg = int(sum(rho_bin))
+        h3 = h5 = None
+        if n_total > 0:
+            h3 = test_h3_correction_rate_threshold(
+                ifr=ifr_ci["point"] or 0.0, n_fixed=n_fixed, n_total=n_total)
+        if n_attempts > 0:
+            h5 = test_h5_regression_threshold(
+                regression_rate=rho_ci["point"] or 0.0,
+                n_regressions=n_reg, n_attempts=n_attempts,
+                ci_lower=rho_ci["ci95"][0], ci_upper=rho_ci["ci95"][1])
+
         per_model[model] = {
-            "ifr": _ci(ifr_bin),
+            "ifr": ifr_ci,
             "sr_effective": _ci(sr_bin),
-            "rho": _ci(rho_bin),
+            "rho": rho_ci,
+            "hypothesis_tests": {"H3_correction_rate": h3, "H5_regression_rate": h5},
         }
 
     # Comparação entre modelos no IFR (issue-level)
@@ -443,6 +467,26 @@ class DeepReportGenerator:
                         for p in comp["pairwise"]]
                 add(self._md_table(
                     ["Par", "p (Bonferroni)", "Cliff's δ", "Significativo"], rows))
+                add("")
+            # Veredito das hipóteses confirmatórias pré-registradas (H3, H5)
+            ht_rows = []
+            for model, d in (infer.get("per_model") or {}).items():
+                ht = d.get("hypothesis_tests") or {}
+                h3, h5 = ht.get("H3_correction_rate"), ht.get("H5_regression_rate")
+                if h3:
+                    ht_rows.append([model, "H3: IFR ≥ 0.70",
+                                    f"{h3['observed']} (n={h3['n_total']})",
+                                    "✓ passou" if h3["passed"] else "✗ falhou"])
+                if h5:
+                    ci = h5.get("ci_95")
+                    ci_s = f" IC{ci}" if ci else ""
+                    ht_rows.append([model, "H5: ρ < 0.05",
+                                    f"{h5['observed']}{ci_s} (n={h5['n_attempts']})",
+                                    "✓ passou" if h5["passed"] else "✗ falhou"])
+            if ht_rows:
+                add("**Hipóteses confirmatórias pré-registradas (metodologia §1.3)**")
+                add("")
+                add(self._md_table(["Modelo", "Hipótese", "Observado", "Veredito"], ht_rows))
                 add("")
             add(f"_{infer.get('caveat', '')}_")
             add("")

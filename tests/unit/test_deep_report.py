@@ -137,6 +137,10 @@ class TestDeepReport:
         comp = infer["model_comparison"]
         assert comp["pairwise"][0]["cliffs_delta"] == 0.0
         assert comp["pairwise"][0]["significant"] is False
+        # hipóteses confirmatórias pré-registradas (H3 IFR≥0.70, H5 ρ<0.05)
+        ht = a["hypothesis_tests"]
+        assert ht["H3_correction_rate"]["passed"] is True   # IFR=0.75 ≥ 0.70
+        assert ht["H5_regression_rate"]["passed"] is False  # ρ=0.167 ≥ 0.05
 
     def test_validation_layer_breakdown(self, tmp_path: Path):
         report = self._generate(tmp_path)
