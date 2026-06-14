@@ -23,7 +23,18 @@
 #   SELEÇÃO DE MODELOS — JUSTIFICATIVA CIENTÍFICA
 #   ══════════════════════════════════════════════════════════════════════════
 #
-#   Dados observados (IFR = Issue Fix Rate, média de 3 repetições):
+#   ┌───────────────────────────────────────────────────────────────────────┐
+#   │ ⚠ AVISO DE VALIDADE — NÚMEROS DESATUALIZADOS (scanner antigo)          │
+#   │ Os IFRs abaixo (0.433 / 0.487 / 0.581) e o "size inversion" são do run │
+#   │ 0380ab19, feito com o SCANNER ANTIGO. NÃO REPLICAM com o scan atual:   │
+#   │ na revalidação 06/2026 o IFR (verificado por re-scan) ficou ~0.14 para │
+#   │ ambos os qwen, SEM inversão de tamanho, e o IC 95% dos dois se          │
+#   │ sobrepõe (diferença não significativa — ver deep_report).             │
+#   │ A seleção de MODELOS continua válida (3 famílias/2 tamanhos); apenas   │
+#   │ NÃO use os IFRs/achados abaixo como resultado. Mantidos como histórico.│
+#   └───────────────────────────────────────────────────────────────────────┘
+#
+#   Dados observados [HISTÓRICO — scanner antigo, run 0380ab19] (IFR, μ ± σ, 3 reps):
 #
 #   Modelo               Família      Params  VRAM Q4_K_M  IFR (μ ± σ)      Tempo/arq  Tokens/arq
 #   ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -32,21 +43,18 @@
 #   codellama-7b         Meta          7B     ~4.1 GB      0.581 ± 0.013   104.2 s     2889
 #
 #   [1] qwen2.5-coder-7b — SOTA 7B coding (Qwen2.5, out/2024). Maior da família
-#       no hardware alvo. IFR pior do grupo (0.433): contra-intuitivo e
-#       cientificamente relevante (tamanho ≠ qualidade neste corpus).
+#       no hardware alvo. (Justificativa de SELEÇÃO válida; IFR acima é histórico.)
 #
 #   [2] qwen2.5-coder-3b — Versão compacta da mesma família. Ablação intra-família
-#       (3B vs 7B). SIZE INVERSION FINDING: IFR 0.487 > 7B (0.433). Latência
-#       7× menor (5.5s vs 40.1s). Maior estabilidade (σ=0.009).
+#       (3B vs 7B). Latência menor. (O "SIZE INVERSION FINDING" do scanner antigo
+#       NÃO replicou — ver aviso acima.)
 #
 #   [3] codellama-7b — Meta/2023; 3ª família arquitetural, diversidade estrutural.
-#       Maior IFR absoluto (0.581). Trade-off: 104.2s/arquivo → runtime 3×
-#       maior que qwen2.5-7b. Temperatura forçada a 0.1 (ver execution abaixo).
+#       Temperatura forçada a 0.1 (ver execution abaixo).
 #
-#   ACHADOS PARA PUBLICAÇÃO:
-#     • Size inversion: 3B > 7B na mesma família em IFR
-#     • Latência vs qualidade: codellama lidera IFR mas custa 19× mais tempo que 3B
-#     • Eficiência (IFR/segundo) favorece qwen2.5-coder-3b para uso em produção
+#   ACHADOS [HISTÓRICOS — NÃO REPLICADOS pelo scan atual; ver deep_report do run novo]:
+#     • Size inversion (3B > 7B): NÃO replicou (IFR ~igual, dentro do IC).
+#     • Latência vs qualidade / eficiência: re-medir com o scan atual.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -186,9 +194,11 @@ description: |
 
 # ── Modelos ──────────────────────────────────────────────────────────────────
 models:
-  - qwen2.5-coder-7b   # SOTA 7B coding (Alibaba/Qwen, out/2024) — IFR: 0.433
-  - qwen2.5-coder-3b   # 3B mesma família — IFR: 0.487 > 7B (size inversion)
-  - codellama-7b       # Meta/CodeLlama (3ª família) — IFR: 0.581 (melhor absoluto)
+  # IFRs em comentário são HISTÓRICOS (scanner antigo) e NÃO replicaram — ver
+  # aviso no topo. Re-medir IFR pelo deep_report do run atual.
+  - qwen2.5-coder-7b   # SOTA 7B coding (Alibaba/Qwen, out/2024)
+  - qwen2.5-coder-3b   # 3B mesma família (ablação intra-família de tamanho)
+  - codellama-7b       # Meta/CodeLlama (3ª família arquitetural)
 
 # ── Nível WCAG ───────────────────────────────────────────────────────────────
 wcag_level: AA
@@ -375,11 +385,16 @@ advanced:
     - Government reduzido 5→4 (apenas 4 projetos scanned existem no corpus)
     - Distribuição de tipos de issue fica dentro de ±3 p.p. do corpus completo
 
-    Achados principais (run 0380ab19):
-    1. SIZE INVERSION: qwen2.5-coder-3B (IFR=0.487) > qwen2.5-coder-7B (IFR=0.433)
-    2. LATÊNCIA vs QUALIDADE: codellama-7B lidera IFR (0.581) mas custa 19× mais tempo
-    3. VIÉS DO CORPUS: 80.6% dos arquivos têm 0 issues; IFR é métrica primária
-    4. CONSENSUS=1: todos os issues observados têm tool_consensus=1 (limitação)
+    Achados HISTÓRICOS (run 0380ab19, SCANNER ANTIGO) — NÃO REPLICADOS:
+    ⚠ Na revalidação 06/2026 com o scan atual: IFR (re-scan) ~0.14 para ambos os
+      qwen, SEM size inversion, diferença não significativa (ICs sobrepostos).
+      Use o deep_report do run novo como fonte de verdade; itens 1-2 abaixo são
+      apenas registro do que o scanner antigo havia produzido.
+    1. [não replicou] SIZE INVERSION: 3B (IFR=0.487) > 7B (IFR=0.433)
+    2. [re-medir]     LATÊNCIA vs QUALIDADE: codellama liderava IFR (0.581)
+    3. [válido] VIÉS DO CORPUS: maioria dos arquivos tem 0 issues; IFR/SR-completo
+       são as métricas primárias (SR ≥1-fix é inflado por arquivos sem issue)
+    4. [válido] CONSENSUS=1: issues observados têm tool_consensus=1 (limitação)
 
     Hardware de referência:
       GPU: 4 GB VRAM (RTX 3050 4GB, GTX 1650 etc.)
