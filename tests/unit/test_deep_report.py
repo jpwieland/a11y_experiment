@@ -117,6 +117,26 @@ class TestDeepReport:
         assert stab["sr"]["sd"] == 0.0
         # ρ = 1 rejeição L2 / 6 tentativas ≈ 0.1667
         assert abs(stab["rho"]["mean"] - 1 / 6) < 0.001
+        # avg_time_s deve ser coletado (regressão: chave errada "avg_time_seconds"
+        # zerava a variância de tempo → n=0).
+        assert stab["avg_time_s"]["n"] == 2
+        assert stab["avg_time_s"]["mean"] is not None
+
+    def test_inferential_statistics(self, tmp_path: Path):
+        report = self._generate(tmp_path)
+        infer = report["inferential_statistics"]
+        assert infer, "seção de estatística inferencial vazia"
+        # IFR = 3 fixed / 4 issues = 0.75, com IC bootstrap
+        a = infer["per_model"]["model-a"]
+        assert a["ifr"]["point"] == 0.75
+        assert a["ifr"]["n"] == 4
+        assert a["ifr"]["ci95"][0] <= 0.75 <= a["ifr"]["ci95"][1]
+        # ρ = 1 rejeição L2 / 6 tentativas
+        assert abs(a["rho"]["point"] - 1 / 6) < 0.001
+        # comparação entre modelos idênticos: não significativa, δ=0
+        comp = infer["model_comparison"]
+        assert comp["pairwise"][0]["cliffs_delta"] == 0.0
+        assert comp["pairwise"][0]["significant"] is False
 
     def test_validation_layer_breakdown(self, tmp_path: Path):
         report = self._generate(tmp_path)

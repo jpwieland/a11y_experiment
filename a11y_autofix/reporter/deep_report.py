@@ -51,6 +51,131 @@ def _mean_sd(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def _inferential_statistics(
+    last_rep: dict[str, list[FixResult]],
+    models: list[str],
+    alpha: float = 0.05,
+    min_effect_size: float = 0.147,
+    n_bootstrap: int = 2000,
+) -> dict[str, Any]:
+    """Estatística inferencial sobre a última repetição.
+
+    Conecta analysis/statistical_analyser.py (antes dead code) ao relatório:
+      • IC 95% bootstrap (n=2000) para IFR, SR-efetivo e ρ por modelo;
+      • comparação entre modelos no IFR (issue-level): Kruskal-Wallis +
+        Mann-Whitney U par-a-par (Bonferroni) + Cliff's delta (tamanho de efeito).
+
+    Unidades de análise:
+      IFR  → 1 por issue (1=corrigida no re-scan, 0=não), agrupadas nos arquivos
+             COM issue (evita a diluição dos arquivos sem issue).
+      SR-ef→ 1 por arquivo-com-issue (final_success).
+      ρ    → 1 por tentativa de patch (rejeitada na Camada 2 = regressão).
+
+    Nota de validade: com poucos issues o IC é largo; modelos compartilham o
+    mesmo conjunto de issues (pareados), mas Mann-Whitney é não-pareado
+    (conservador). Análise sobre 1 repetição evita pseudo-replicação; a
+    variância entre repetições está em stability_across_repetitions.
+
+    Degrada com segurança para {} se o toolkit não puder ser importado.
+    """
+    try:
+        import sys
+        repo_root = Path(__file__).resolve().parents[2]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from analysis.statistical_analyser import (
+            _bonferroni_correct,
+            bootstrap_ci,
+            cliffs_delta,
+            kruskal_wallis,
+            mann_whitney_u,
+        )
+    except Exception as exc:  # pragma: no cover - import defensivo
+        log.warning("inferential_stats_unavailable", error=str(exc)[:200])
+        return {}
+
+    def _ci(values: list[float]) -> dict[str, Any]:
+        if not values:
+            return {"point": None, "ci95": [None, None], "n": 0}
+        lo, hi = bootstrap_ci(values, n_bootstrap=n_bootstrap, ci_level=0.95)
+        return {
+            "point": round(sum(values) / len(values), 4),
+            "ci95": [round(lo, 4), round(hi, 4)],
+            "n": len(values),
+        }
+
+    issue_outcomes: dict[str, list[float]] = {}
+    per_model: dict[str, Any] = {}
+    for model in models:
+        results = last_rep.get(model, [])
+        with_issues = [r for r in results if r.scan_result.issues]
+
+        ifr_bin: list[float] = []
+        for r in with_issues:
+            n_iss = len(r.scan_result.issues)
+            n_fix = max(0, min(r.issues_fixed, n_iss))
+            ifr_bin.extend([1.0] * n_fix + [0.0] * (n_iss - n_fix))
+        issue_outcomes[model] = ifr_bin
+
+        sr_bin = [1.0 if r.final_success else 0.0 for r in with_issues]
+        rho_bin = [
+            1.0 if a.validation_rejected_layer == 2 else 0.0
+            for r in results for a in r.attempts
+        ]
+        per_model[model] = {
+            "ifr": _ci(ifr_bin),
+            "sr_effective": _ci(sr_bin),
+            "rho": _ci(rho_bin),
+        }
+
+    # Comparação entre modelos no IFR (issue-level)
+    comparison: dict[str, Any] = {}
+    usable = [m for m in models if issue_outcomes.get(m)]
+    if len(usable) >= 2:
+        groups = [issue_outcomes[m] for m in usable]
+        kp = kruskal_wallis(*groups)
+        pairs = [(usable[i], usable[j])
+                 for i in range(len(usable)) for j in range(i + 1, len(usable))]
+        raw_p, deltas, us = [], [], []
+        for a, b in pairs:
+            u, p = mann_whitney_u(issue_outcomes[a], issue_outcomes[b])
+            raw_p.append(p)
+            us.append(u)
+            deltas.append(cliffs_delta(issue_outcomes[a], issue_outcomes[b]))
+        corr_p = _bonferroni_correct(raw_p)
+        comparison = {
+            "metric": "ifr_issue_level",
+            "kruskal_wallis_p": round(kp, 6),
+            "pairwise": [
+                {
+                    "a": a, "b": b,
+                    "p_value_bonferroni": round(pc, 6),
+                    "cliffs_delta": round(d, 4),
+                    "significant": bool(pc < alpha and abs(d) >= min_effect_size),
+                }
+                for (a, b), pc, d in zip(pairs, corr_p, deltas)
+            ],
+        }
+
+    return {
+        "method": (
+            "Bootstrap CI (n=2000, 95%) por modelo; comparação entre modelos por "
+            "Kruskal-Wallis + Mann-Whitney U (Bonferroni) + Cliff's delta."
+        ),
+        "alpha": alpha,
+        "min_effect_size": min_effect_size,
+        "n_bootstrap": n_bootstrap,
+        "analysis_unit": "última repetição (evita pseudo-replicação entre reps)",
+        "per_model": per_model,
+        "model_comparison": comparison,
+        "caveat": (
+            "Significância exige p<alpha E |Cliff's delta|>=min_effect_size. "
+            "Com poucos issues os ICs são largos; ausência de significância NÃO "
+            "prova equivalência."
+        ),
+    }
+
+
 def _failure_taxonomy(results: list[FixResult]) -> dict[str, int]:
     """Agrupa erros de tentativas falhas em categorias estáveis."""
     taxonomy: Counter[str] = Counter()
@@ -127,7 +252,10 @@ class DeepReportGenerator:
                 sr_fulls.append(sr_full)
                 ifrs.append(m.get("ifr"))
                 rhos.append(rho)
-                times.append(m.get("avg_time_seconds"))
+                # A chave produzida por compute_experiment_metrics é "avg_time"
+                # (não "avg_time_seconds"); a chave errada zerava a variância de
+                # tempo na seção de estabilidade (n=0).
+                times.append(m.get("avg_time"))
                 per_rep_rows.append({
                     "rep": rep_idx,
                     "model": model,
@@ -137,7 +265,7 @@ class DeepReportGenerator:
                     "rho": round(rho, 4),
                     "regressions": n_reg,
                     "attempts": n_att,
-                    "avg_time_s": m.get("avg_time_seconds"),
+                    "avg_time_s": m.get("avg_time"),
                 })
             stability[model] = {
                 "sr": _mean_sd(srs),
@@ -146,6 +274,9 @@ class DeepReportGenerator:
                 "rho": _mean_sd(rhos),
                 "avg_time_s": _mean_sd(times),
             }
+
+        # ── Estatística inferencial (IC bootstrap + comparação entre modelos) ─
+        inferential = _inferential_statistics(last_rep, models)
 
         # ── Taxonomia de falhas + drill-down (última repetição) ───────────
         failure_taxonomy = {m: _failure_taxonomy(last_rep[m]) for m in models}
@@ -188,6 +319,7 @@ class DeepReportGenerator:
                 "tool_versions": tool_versions or {},
             },
             "stability_across_repetitions": stability,
+            "inferential_statistics": inferential,
             "per_repetition": per_rep_rows,
             "metrics_last_repetition": full_metrics,
             "failure_taxonomy": failure_taxonomy,
@@ -263,6 +395,10 @@ class DeepReportGenerator:
         # 1. Estabilidade entre repetições
         add("## 1. Métricas primárias (média ± dp entre repetições)")
         add("")
+        add("> **Métricas primárias: IFR e SR-completo** (verificadas por re-scan / "
+            "por arquivo-com-issue). **SR (≥1 fix) é secundária e inflada**: conta "
+            "como sucesso os arquivos SEM issue. Use IFR/SR-completo para comparar modelos.")
+        add("")
         rows = []
         for model, s in report["stability_across_repetitions"].items():
             def fmt(key):
@@ -271,10 +407,45 @@ class DeepReportGenerator:
                     return "—"
                 sd = f" ± {v['sd']}" if v["sd"] is not None else ""
                 return f"{v['mean']}{sd}"
-            rows.append([model, fmt("sr"), fmt("sr_full"), fmt("ifr"), fmt("rho"), fmt("avg_time_s")])
+            rows.append([model, fmt("ifr"), fmt("sr_full"), fmt("rho"),
+                         fmt("avg_time_s"), fmt("sr")])
         add(self._md_table(
-            ["Modelo", "SR (≥1 fix)", "SR-completo", "IFR", "ρ (H5)", "Tempo médio (s)"], rows))
+            ["Modelo", "IFR (primária)", "SR-completo (primária)", "ρ (H5)",
+             "Tempo médio (s)", "SR ≥1 fix (sec., inflada)"], rows))
         add("")
+
+        # 1b. Estatística inferencial
+        infer = report.get("inferential_statistics") or {}
+        if infer:
+            add("## 1b. Estatística inferencial (IC 95% bootstrap + comparação entre modelos)")
+            add("")
+            add(f"_{infer.get('method', '')}_")
+            add("")
+            rows = []
+            for model, d in (infer.get("per_model") or {}).items():
+                def ci(metric):
+                    m = d.get(metric, {})
+                    pt, c = m.get("point"), m.get("ci95", [None, None])
+                    if pt is None:
+                        return "—"
+                    return f"{pt} [{c[0]}, {c[1]}] (n={m.get('n')})"
+                rows.append([model, ci("ifr"), ci("sr_effective"), ci("rho")])
+            add(self._md_table(
+                ["Modelo", "IFR [IC95]", "SR-efetivo [IC95]", "ρ [IC95]"], rows))
+            add("")
+            comp = infer.get("model_comparison") or {}
+            if comp.get("pairwise"):
+                add(f"**Comparação entre modelos (IFR issue-level)** — "
+                    f"Kruskal-Wallis p = {comp.get('kruskal_wallis_p')}")
+                add("")
+                rows = [[f"{p['a']} vs {p['b']}", p["p_value_bonferroni"],
+                         p["cliffs_delta"], "sim" if p["significant"] else "não"]
+                        for p in comp["pairwise"]]
+                add(self._md_table(
+                    ["Par", "p (Bonferroni)", "Cliff's δ", "Significativo"], rows))
+                add("")
+            add(f"_{infer.get('caveat', '')}_")
+            add("")
 
         # 2. Validação 4 camadas
         add("## 2. Validação em 4 camadas (última repetição)")
