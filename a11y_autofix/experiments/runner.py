@@ -41,6 +41,23 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+# Console rich em stderr para diagnósticos visíveis no terminal (separado dos
+# logs JSON estruturados de structlog, que ficam ilegíveis em runs longos).
+try:
+    from rich.console import Console as _RichConsole
+
+    _console = _RichConsole(stderr=True)
+except Exception:  # pragma: no cover - rich é dependência, mas degradamos com segurança
+    _console = None
+
+
+class ConditionRunError(RuntimeError):
+    """Levantada ao final quando uma ou mais condições (modelo×rep) falharam.
+
+    Garante que o pipeline NÃO seja reportado como "COMPLETO" quando um modelo
+    não processou nenhum arquivo (ex.: 404 do endpoint, modelo não baixado).
+    """
+
 
 # ── Auto-clone helpers ─────────────────────────────────────────────────────────
 
@@ -625,6 +642,13 @@ class ExperimentRunner:
         all_rep_results: list[dict[str, list[FixResult]]] = []
         last_experiment_result: ExperimentResult | None = None
 
+        # Rastreamento de falhas de condição (modelo×rep) para diagnóstico e
+        # para decidir o status final do pipeline. condition_errors guarda a
+        # última mensagem de erro por modelo; model_total_results conta quantos
+        # arquivos cada modelo processou somando todas as repetições.
+        condition_errors: dict[str, str] = {}
+        model_total_results: dict[str, int] = {m: 0 for m in models_to_test}
+
         for rep_idx in range(n_reps):
             rep_num = rep_idx + 1
             rep_label = f"rep_{rep_num}" if n_reps > 1 else "checkpoints"
@@ -727,12 +751,24 @@ class ExperimentRunner:
             results_by_model: dict[str, list[FixResult]] = {}
             for model_name, result in zip(models_to_test, model_results):
                 if isinstance(result, Exception):
+                    err = str(result)
                     log.error("model_run_failed", model=model_name,
-                              rep=rep_num, error=str(result))
+                              rep=rep_num, error=err)
+                    condition_errors[model_name] = err
+                    # Erro visível no terminal — não apenas enterrado no log JSON.
+                    if _console:
+                        _console.print(
+                            f"\n[bold red]✗ FALHA[/] [yellow]{model_name}[/] "
+                            f"(rep {rep_num}/{n_reps}) — condição não processou arquivos:"
+                        )
+                        for ln in err.splitlines():
+                            _console.print(f"    [red]{ln}[/]")
+                        _console.print()
                     results_by_model[model_name] = []
                 else:
                     name, results = result
                     results_by_model[name] = results
+                    model_total_results[name] = model_total_results.get(name, 0) + len(results)
 
             all_rep_results.append(results_by_model)
 
@@ -831,7 +867,61 @@ class ExperimentRunner:
             last_experiment_result.model_dump_json(indent=2), encoding="utf-8"
         )
 
+        # ── Status final: falha dura se algum modelo não processou NENHUM arquivo ──
+        # Os relatórios já foram gerados acima (dados parciais preservados), mas o
+        # pipeline NÃO pode ser reportado como "COMPLETO" se uma condição inteira
+        # falhou. Levantar aqui faz o CLI sair com código != 0 e o orquestrador
+        # (run_full_experiment.sh) parar com mensagem clara, em vez de imprimir
+        # "PIPELINE COMPLETO" com um modelo a 0.0%.
+        failed_models = [
+            m for m in models_to_test
+            if model_total_results.get(m, 0) == 0 and len(files) > 0
+        ]
+        if failed_models:
+            self._print_failure_summary(failed_models, condition_errors, output_dir)
+            detail = "; ".join(
+                f"{m}: {condition_errors.get(m, 'nenhum arquivo processado').splitlines()[0]}"
+                for m in failed_models
+            )
+            raise ConditionRunError(
+                f"{len(failed_models)} de {len(models_to_test)} modelo(s) falharam "
+                f"sem processar nenhum arquivo: {', '.join(failed_models)}.\n"
+                f"Causa: {detail}\n"
+                f"Relatórios parciais salvos em {output_dir}. Corrija o endpoint/modelo "
+                f"e re-execute com --from experiment (checkpoints serão reaproveitados)."
+            )
+
         return last_experiment_result
+
+    def _print_failure_summary(
+        self,
+        failed_models: list[str],
+        condition_errors: dict[str, str],
+        output_dir: Path,
+    ) -> None:
+        """Imprime um painel de erro consolidado no terminal para diagnóstico."""
+        if not _console:
+            for m in failed_models:
+                log.error("condition_failed_final", model=m,
+                          error=condition_errors.get(m, "nenhum arquivo processado"))
+            return
+        from rich.panel import Panel
+
+        lines: list[str] = []
+        for m in failed_models:
+            lines.append(f"[bold yellow]● {m}[/]")
+            err = condition_errors.get(m, "nenhum arquivo processado (causa desconhecida)")
+            for ln in err.splitlines():
+                lines.append(f"   [red]{ln}[/]")
+            lines.append("")
+        lines.append(f"[dim]Relatórios parciais: {output_dir}[/]")
+        _console.print(
+            Panel(
+                "\n".join(lines).rstrip(),
+                title="[bold red]EXPERIMENTO INCOMPLETO — condições falharam[/]",
+                border_style="red",
+            )
+        )
 
     def _aggregate_repetitions(
         self,
@@ -1007,6 +1097,13 @@ class ExperimentRunner:
             timestamp=datetime.now(tz=timezone.utc).isoformat(),
         )
 
+        # ── Garantir que o modelo está disponível ANTES de qualquer coisa ─────
+        # Se o tag do model_id (ex.: codellama:7b-instruct) não estiver baixado
+        # no Ollama, o endpoint /v1/chat/completions responde 404 e a condição
+        # inteira é perdida. Baixar aqui (fatal em caso de erro) evita gastar o
+        # tempo de scan e produz um resultado de 0 arquivos silencioso.
+        await self._ensure_model_available(model_id)
+
         try:
             await self._stop_model_server(model_id)
         except Exception as e:
@@ -1018,6 +1115,85 @@ class ExperimentRunner:
         except Exception as e:
             # Non-fatal: if cold-start fails, proceed with existing server state
             log.warning("cold_start_failed", model=model_id, error=str(e))
+
+    async def _ensure_model_available(self, model_id: str) -> None:
+        """Garante que o modelo está baixado/servível antes de rodar a condição.
+
+        Para o backend Ollama: consulta `ollama list`; se o tag exato do
+        ``model_id`` não estiver presente, executa `ollama pull <model_id>`.
+        Falha de pull é FATAL (RuntimeError) — é melhor abortar a condição com
+        uma mensagem clara do que receber um 404 silencioso e registrar 0
+        arquivos processados (foi exatamente o que aconteceu com
+        codellama:7b-instruct no run dffbe9ec).
+
+        Backends always-on/externos (vLLM, LM Studio) são no-op: o servidor é
+        gerenciado fora do runner e o pre-flight de chat do pipeline detecta
+        problemas de endpoint.
+        """
+        try:
+            model_config = self.registry.get(model_id)
+        except ValueError:
+            return
+
+        if model_config.backend.value != "ollama":
+            return
+
+        tag = model_config.model_id  # ex.: "codellama:7b-instruct"
+
+        # 1. Já está disponível?
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ollama", "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            installed = out.decode("utf-8", "replace")
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"Comando 'ollama' não encontrado no PATH — necessário para o "
+                f"modelo '{model_id}' ({tag}).\nInstale o Ollama: https://ollama.com/download"
+            ) from e
+        except Exception as e:
+            # Se 'ollama list' falhar, não bloqueamos aqui: deixamos o pull tentar
+            log.debug("ollama_list_failed", model=model_id, error=str(e))
+            installed = ""
+
+        # Ollama lista os nomes na 1ª coluna; o tag exato (com ':') aparece lá.
+        if any(line.split()[0] == tag for line in installed.splitlines() if line.split()):
+            log.info("model_available", model=model_id, tag=tag)
+            return
+
+        # 2. Baixar (pode levar minutos na primeira vez). Stream para o log.
+        log.info("model_pull_start", model=model_id, tag=tag)
+        if _console:
+            _console.print(f"[cyan]⬇ Baixando modelo Ollama ausente:[/] {tag} …")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ollama", "pull", tag,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            pull_out, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+            rc = proc.returncode
+        except Exception as e:
+            raise RuntimeError(
+                f"Falha ao baixar o modelo Ollama '{tag}' (modelo '{model_id}').\n"
+                f"Erro: {e}\n"
+                f"Verifique conectividade e o nome do tag (ollama list / ollama pull {tag})."
+            ) from e
+
+        if rc != 0:
+            detail = (pull_out or b"").decode("utf-8", "replace").strip()[-500:]
+            raise RuntimeError(
+                f"`ollama pull {tag}` falhou (rc={rc}) para o modelo '{model_id}'.\n"
+                f"Saída: {detail}\n"
+                f"Tags válidos em https://ollama.com/library — confira models.yaml."
+            )
+
+        log.info("model_pull_done", model=model_id, tag=tag)
+        if _console:
+            _console.print(f"[green]✓ Modelo pronto:[/] {tag}")
 
     async def _stop_model_server(self, model_id: str) -> None:
         """Stop the running model server (backend-specific)."""

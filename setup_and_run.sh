@@ -616,11 +616,14 @@ for m in data.get('models', []):
     print(m['name'])
 " 2>/dev/null || echo "")
 
-for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b; do
-  # Normalizar nome: qwen2.5-coder:3b pode aparecer como qwen2.5-coder:3b ou qwen2.5-coder-3b
-  BASE="${MODEL%%:*}"
-  TAG="${MODEL##*:}"
-  if echo "$MODELS_AVAIL" | grep -qi "${BASE}"; then
+# IMPORTANTE: os tags DEVEM bater exatamente com model_id em models.yaml.
+# codellama:7b (base) ≠ codellama:7b-instruct (instruct). O experimento pede o
+# instruct; baixar só o base produz HTTP 404 no /v1/chat/completions (bug do
+# run dffbe9ec, onde codellama processou 0 arquivos nas 3 repetições).
+for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b-instruct; do
+  # Comparação por TAG EXATO (1ª coluna de ollama list / nome em /api/tags).
+  # grep só pela BASE daria falso-positivo se outro tag da família estivesse baixado.
+  if echo "$MODELS_AVAIL" | grep -qx "${MODEL}"; then
     ok "Modelo disponível: $MODEL"
   else
     warn "Modelo ausente: $MODEL"
@@ -894,10 +897,17 @@ else
   warn "GPU NVIDIA não detectada — inferência em CPU (~7× mais lento para modelos 7B)"
 fi
 
-# Modelos
-for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b; do
-  BASE="${MODEL%%:*}"
-  if curl -s http://localhost:11434/api/tags | grep -qi "${BASE}"; then
+# Modelos — verificação por TAG EXATO (igual a model_id em models.yaml).
+TAGS_AVAIL=$(curl -s http://localhost:11434/api/tags | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for m in data.get('models', []): print(m['name'])
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+for MODEL in qwen2.5-coder:3b qwen2.5-coder:7b codellama:7b-instruct; do
+  if echo "$TAGS_AVAIL" | grep -qx "${MODEL}"; then
     ok "Modelo Ollama: $MODEL"
   else
     fail "Modelo Ollama ausente: $MODEL"
@@ -940,7 +950,7 @@ else
   echo "${Y}${B}  ATENÇÃO — Estimativa de tempo:${N}"
   echo "    qwen2.5-coder:3b  (3 reps) →   ~6 horas"
   echo "    qwen2.5-coder:7b  (3 reps) →  ~42 horas"
-  echo "    codellama:7b      (3 reps) → ~110 horas"
+  echo "    codellama:7b-instruct (3 reps) → ~110 horas"
   echo "    Scan dos projetos          →   ~4 horas"
   echo ""
   echo "  O experimento completo leva ~7 dias em GPU com 4 GB VRAM."

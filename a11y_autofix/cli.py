@@ -418,7 +418,15 @@ def experiment_run(
     )
 
     console.print(f"[cyan]Running experiment:[/] {config}")
-    result = asyncio.run(runner.run_experiment(config, output))
+    from a11y_autofix.experiments.runner import ConditionRunError
+    try:
+        result = asyncio.run(runner.run_experiment(config, output))
+    except ConditionRunError as e:
+        # Falha de condição (ex.: modelo não baixado / 404). Os relatórios
+        # parciais já foram salvos pelo runner; aqui só comunicamos com clareza
+        # e saímos com código != 0 para o orquestrador parar.
+        console.print(f"\n[bold red]Experimento incompleto:[/]\n{e}")
+        raise typer.Exit(2)
 
     # Mostrar resultado
     table = Table(title=f"Experiment: {result.experiment_name}", header_style="bold magenta")
