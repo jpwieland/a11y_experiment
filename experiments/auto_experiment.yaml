@@ -278,19 +278,19 @@ agent_timeout_s: 600         # Conservador: cobre codellama-7b em CPU-offload
 model_load_timeout_s: 300
 
 # ── Métricas ─────────────────────────────────────────────────────────────────
+# Gerado a partir de chosen_experiment.yaml. Métricas de DETECÇÃO (detection_rate,
+# precision) ficam fora: exigem ground truth independente e seriam circulares
+# contra os próprios scanners. correction_rate = IFR (removida por redundância).
 metrics:
   # Primárias (publicação):
-  - sr             # Success Rate file-level — reportar com nota sobre inflação por arquivos sem issues
-  - ifr            # Issue Fix Rate — métrica principal
+  - ifr            # Issue Fix Rate (verificado por re-scan) — métrica principal
+  - effective_sr   # SR apenas em arquivos com issues (evita inflação por arquivos sem issue)
   - mttr           # Mean Time to Remediate
   - te             # Token Efficiency (IFR/1000 tokens)
   # Secundárias:
-  - effective_sr        # SR apenas em arquivos com issues (evita inflação)
-  - noop_rate           # Taxa de arquivos sem modificação
-  - regression_rate     # Taxa de introdução de novos problemas
-  - detection_rate
-  - correction_rate
-  - precision
+  - sr             # SR file-level — INFLADO por arquivos sem issue; reportar só com ressalva
+  - noop_rate           # Taxa de patches aceitos sem alteração real
+  - regression_rate     # ρ (H5) — rejeições na Camada 2 / tentativas
   - tokens_used
   - time_per_file_s
   - issues_by_type

@@ -127,10 +127,14 @@ model_load_timeout_s: 120    # carregamento do modelo na VRAM (ollama)
 
 # ── Métricas ──────────────────────────────────────────────────────────────────
 metrics:
-  - detection_rate           # δ — issues detectadas / total_issues  (H1)
-  - correction_rate          # τ — issues corrigidas / issues_detectadas (H3)
-  - regression_rate          # ρ — regressões / patches aplicados (H5)
-  - precision
+  # Métricas de CORREÇÃO computadas pelo experimento. Detecção (δ, precision)
+  # exige ground truth independente e seria circular contra os scanners — fica
+  # no estágio de validação do dataset. correction_rate = IFR (redundante).
+  - ifr                      # τ (H3) = issues corrigidas / total — verificado por re-scan
+  - effective_sr             # SR só em arquivos com issue (evita inflação)
+  - mttr                     # tempo médio de reparo
+  - te                       # token efficiency
+  - regression_rate          # ρ (H5) — rejeições na Camada 2 / tentativas
   - tokens_used              # consumo de tokens por arquivo
   - time_per_file_s          # latência de correção por arquivo
   - issues_by_type           # semantic, contrast, aria, label, alt-text

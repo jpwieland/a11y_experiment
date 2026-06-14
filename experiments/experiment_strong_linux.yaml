@@ -144,10 +144,14 @@ model_load_timeout_s: 180    # carregamento do modelo na VRAM (vLLM/Ollama)
 
 # ── Métricas (idênticas ao weak_gpu para comparabilidade) ─────────────────────
 metrics:
-  - detection_rate
-  - correction_rate
-  - regression_rate
-  - precision
+  # Métricas de CORREÇÃO computadas pelo experimento. Detecção (detection_rate δ,
+  # precision) exige ground truth independente e seria circular contra os
+  # scanners — fica no estágio de validação do dataset. correction_rate = IFR.
+  - ifr                  # τ (H3) — verificado por re-scan
+  - effective_sr         # SR só em arquivos com issue (evita inflação)
+  - mttr
+  - te
+  - regression_rate      # ρ (H5)
   - tokens_used
   - time_per_file_s
   - issues_by_type

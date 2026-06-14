@@ -114,10 +114,15 @@ seed: 42                     # seed para reprodutibilidade
 
 # ── Métricas a calcular ──────────────────────────────────────────────────────
 metrics:
-  - detection_rate           # δ = issues_detected / total_issues (H1)
-  - correction_rate          # τ = issues_fixed / issues_detected  (H3)
-  - regression_rate          # ρ = regressions / patches_applied   (H5)
-  - precision                # precision no conjunto com ground-truth
+  # Métricas de CORREÇÃO computadas pelo experimento. As de DETECÇÃO (δ,
+  # precision) exigem ground truth independente e seriam circulares contra os
+  # scanners — vivem no estágio de validação do dataset, não aqui.
+  # correction_rate = IFR (τ da H3); listada só como ifr para não duplicar.
+  - ifr                      # τ (H3) = issues corrigidas / total — verificado por re-scan
+  - effective_sr             # SR só em arquivos com issue (evita inflação)
+  - mttr                     # tempo médio de reparo
+  - te                       # token efficiency
+  - regression_rate          # ρ (H5) = rejeições na Camada 2 / tentativas
   - tokens_used              # consumo de tokens por arquivo
   - time_per_file_s          # tempo de processamento por arquivo
   - issues_by_type           # breakdown: semantic, contrast, aria, label, alt-text
