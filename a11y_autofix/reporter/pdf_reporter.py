@@ -20,6 +20,18 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+
+def _xesc(text: object) -> str:
+    """Escapa texto dinâmico para a mini-marcação XML do reportlab.
+
+    Mensagens de scanner ("Ensure <img> elements have alt text") e seletores
+    CSS ("div > button", "[aria-label]") contêm <, > e & que o parser de
+    Paragraph do reportlab interpreta como marcação e aborta a geração do PDF.
+    Escapar APENAS os valores dinâmicos preserva as tags <font>/<b> nossas.
+    """
+    s = str(text)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 # ─── Paleta de cores Lighthouse ─────────────────────────────────────────────
 _GREEN  = (0.06, 0.74, 0.35)    # ≥ 90
 _ORANGE = (1.00, 0.56, 0.00)    # 50–89
@@ -762,8 +774,8 @@ class PDFReporter:
         story: list[Any] = []
         issues  = file_entry.get("issues", [])
         fix     = file_entry.get("fix")
-        fname   = Path(str(file_entry.get("file", "unknown"))).name
-        tools   = ", ".join(file_entry.get("tools_used", []))
+        fname   = _xesc(Path(str(file_entry.get("file", "unknown"))).name)
+        tools   = _xesc(", ".join(file_entry.get("tools_used", [])))
         n_issues = len(issues)
         scan_mode = file_entry.get("scan_mode", "desktop")
         screenshot_path = file_entry.get("screenshot_path")
@@ -877,11 +889,13 @@ class PDFReporter:
 
         impact      = issue.get("impact", "minor")
         issue_type  = issue.get("type", "other")
-        wcag        = issue.get("wcag_criteria") or "N/A"
-        confidence  = issue.get("confidence", "low")
-        message     = (issue.get("message", "") or "")[:160]
-        selector    = (issue.get("selector", "") or "")[:80]
-        found_by    = ", ".join(issue.get("found_by", []))
+        wcag        = _xesc(issue.get("wcag_criteria") or "N/A")
+        confidence  = _xesc(issue.get("confidence", "low"))
+        # message e selector vêm dos scanners e contêm <, >, & → escapar para
+        # não quebrar o parser de Paragraph do reportlab (bug do scan Angular).
+        message     = _xesc((issue.get("message", "") or "")[:160])
+        selector    = _xesc((issue.get("selector", "") or "")[:80])
+        found_by    = _xesc(", ".join(issue.get("found_by", [])))
         consensus   = issue.get("tool_consensus", 1)
 
         impact_color = _IMPACT_COLOR.get(impact, _GRAY_MID)
