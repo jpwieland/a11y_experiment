@@ -572,6 +572,7 @@ class Pipeline:
 
         O PDF só é gerado quando generate_pdf=True (flag --pdf no CLI).
         """
+        from a11y_autofix.reporter.csv_reporter import CSVReporter
         from a11y_autofix.reporter.html_reporter import HTMLReporter
         from a11y_autofix.reporter.json_reporter import JSONReporter
         import json
@@ -580,6 +581,7 @@ class Pipeline:
 
         json_reporter = JSONReporter(self.settings)
         html_reporter = HTMLReporter()
+        csv_reporter = CSVReporter()
 
         def _maybe_pdf(
             data: dict,
@@ -604,6 +606,7 @@ class Pipeline:
         )
         report_data = json.loads(json_path.read_text(encoding="utf-8"))
         html_reporter.generate(report_data=report_data, output_dir=output_dir)
+        csv_reporter.generate(report_data=report_data, output_dir=output_dir)
         _maybe_pdf(report_data, output_dir)
 
         # ── Relatório mobile separado (se houver issues) ──────────────────────
@@ -620,6 +623,7 @@ class Pipeline:
             )
             mobile_data = json.loads(mobile_json_path.read_text(encoding="utf-8"))
             html_reporter.generate(report_data=mobile_data, output_dir=mobile_dir)
+            csv_reporter.generate(report_data=mobile_data, output_dir=mobile_dir)
             _maybe_pdf(mobile_data, mobile_dir, "accessibility_report_mobile.pdf")
             log.info("mobile_report_generated", files=len(mobile_scans), dir=str(mobile_dir))
         else:
@@ -639,5 +643,6 @@ class Pipeline:
             )
             hc_data = json.loads(hc_json_path.read_text(encoding="utf-8"))
             html_reporter.generate(report_data=hc_data, output_dir=hc_dir)
+            csv_reporter.generate(report_data=hc_data, output_dir=hc_dir)
             _maybe_pdf(hc_data, hc_dir, "accessibility_report_high_contrast.pdf")
             log.info("high_contrast_report_generated", files=len(hc_scans), dir=str(hc_dir))
