@@ -472,6 +472,12 @@ def main() -> None:
         cell_dirs[cell_name] = cell_dir
         legacy = cell_dir.parent != RESULTS_ROOT
         metrics_by_model = _cell_metrics(cell_dir)
+        if not metrics_by_model:
+            table.append({
+                "célula": cell_id, "estratégia": strategy, "agente": agent,
+                "status": "SEM_DADOS", "ifr": "", "sr": "", "tempo_medio_s": "",
+            })
+            continue
         if len(metrics_by_model) > 1:
             print(f"[aviso] célula {cell_id} tem {len(metrics_by_model)} modelos — "
                   f"apenas o primeiro é incluído na tabela sumária.")
