@@ -559,8 +559,11 @@ class ExperimentRunner:
         exp_id = str(uuid.uuid4())[:8]
 
         if output_dir is None:
-            safe_name = config.name.replace(" ", "_").replace("/", "_")[:30]
-            output_dir = self.settings.results_dir / f"{safe_name}_{exp_id}"
+            if config.output_dir:
+                output_dir = Path(config.output_dir)
+            else:
+                safe_name = config.name.replace(" ", "_").replace("/", "_")[:30]
+                output_dir = self.settings.results_dir / f"{safe_name}_{exp_id}"
 
         output_dir.mkdir(parents=True, exist_ok=True)
         models_to_test = self._resolve_models(config.models)

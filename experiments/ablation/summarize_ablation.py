@@ -35,22 +35,93 @@ CELLS = {
     "cell_B3_fewshot_openhands": ("B3", "few-shot", "openhands"),
 }
 
+# Prefixos que o runner antigo gerava em experiment-results/ (antes do fix
+# que passou a respeitar o campo output_dir do YAML).  Derivados de:
+#   name.replace(" ", "_").replace("/", "_")[:30]
+_LEGACY_PREFIXES: dict[str, str] = {
+    "cell_A1_baseline_fewshot_auto": "Ablation_A1_—_Baseline_(few-sh",
+    "cell_A2_zeroshot_auto":         "Ablation_A2_—_Zero-shot_(route",
+    "cell_A3_cot_auto":              "Ablation_A3_—_Chain-of-Thought",
+    "cell_B1_fewshot_direct":        "Ablation_B1_—_Prompt_pleno_6_c",
+    "cell_B2_fewshot_swe":           "Ablation_B2_—_Prompt_cirúrgico",
+    "cell_B3_fewshot_openhands":     "Ablation_B3_—_Prompt_contexto_",
+}
 
-def _find_result_json(cell_dir: Path) -> Path | None:
-    """Localiza o experiment_result.json mais recente da célula."""
-    if not cell_dir.exists():
+
+def _resolve_cell_dir(cell_name: str) -> Path | None:
+    """Localiza o diretório de resultados de uma célula nos dois formatos possíveis.
+
+    Formato novo (output_dir no YAML):
+        experiment-results/ablation/<cell_name>/
+
+    Formato legado (runner gerava o nome a partir de config.name):
+        experiment-results/<prefix>_<uuid8>/
+        onde <prefix> = config.name.replace(' ','_').replace('/','_')[:30]
+
+    Quando existem múltiplos diretórios legados para a mesma célula (reruns),
+    retorna o mais recente por mtime.
+    """
+    canonical = RESULTS_ROOT / cell_name
+    if _collect_result_paths(canonical):
+        return canonical
+
+    prefix = _LEGACY_PREFIXES.get(cell_name)
+    if prefix is None:
         return None
-    candidates = sorted(cell_dir.rglob("experiment_result.json"))
-    return candidates[-1] if candidates else None
+
+    legacy_root = RESULTS_ROOT.parent
+    candidates = [
+        d for d in legacy_root.iterdir()
+        if d.is_dir() and d.name.startswith(prefix)
+    ]
+    if not candidates:
+        return None
+
+    # Prefere o mais recente por mtime se houver múltiplos reruns
+    return max(candidates, key=lambda d: d.stat().st_mtime)
 
 
-def _cell_metrics(result_path: Path) -> dict:
-    """Extrai métricas agregadas de um experiment_result.json."""
-    with open(result_path, encoding="utf-8") as f:
-        data = json.load(f)
+def _collect_result_paths(cell_dir: Path) -> list[Path]:
+    """Retorna todos os experiment_result.json da célula, cobrindo repetições.
+
+    Para células com rep_1/rep_2/rep_3, retorna todos os arquivos de rep
+    ordenados numericamente — assim os dados de TODAS as repetições são
+    processados juntos em vez de só a mais recente.
+    Se não houver subdiretórios rep_*, retorna o único arquivo raiz.
+    """
+    if not cell_dir.exists():
+        return []
+    rep_files = sorted(
+        cell_dir.glob("rep_*/experiment_result.json"),
+        key=lambda p: int(p.parent.name.split("_")[1]) if p.parent.name.split("_")[1].isdigit() else 0,
+    )
+    if rep_files:
+        return rep_files
+    root = cell_dir / "experiment_result.json"
+    return [root] if root.exists() else []
+
+
+def _merge_results_by_model(paths: list[Path]) -> dict[str, list]:
+    """Funde os results_by_model de múltiplos JSONs (repetições) em um único dict."""
+    merged: dict[str, list] = {}
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        for model, results in data.get("results_by_model", {}).items():
+            merged.setdefault(model, []).extend(results)
+    return merged
+
+
+def _cell_metrics(cell_dir: Path) -> dict:
+    """Extrai métricas agregadas de uma célula, fundindo todas as repetições."""
+    paths = _collect_result_paths(cell_dir)
+    if not paths:
+        return {}
+    merged = _merge_results_by_model(paths)
+    n_reps = len(paths)
 
     rows = {}
-    for model, results in data.get("results_by_model", {}).items():
+    for model, results in merged.items():
         files_with_issues = [
             r for r in results if r.get("scan_result", {}).get("issues")
         ]
@@ -63,6 +134,7 @@ def _cell_metrics(result_path: Path) -> dict:
         n = len(files_with_issues)
         rows[model] = {
             "files_com_issues": n,
+            "n_reps": n_reps,
             "issues": total_issues,
             "ifr": round(fixed / total_issues, 3) if total_issues else None,
             "sr": round(succeeded / n, 3) if n else None,
@@ -71,20 +143,26 @@ def _cell_metrics(result_path: Path) -> dict:
     return rows
 
 
-def _cell_file_outcomes(result_path: Path) -> dict[str, int]:
+def _cell_file_outcomes(cell_dir: Path) -> dict[str, int]:
     """SR file-level por arquivo COM issue: {caminho: 1 se final_success senão 0}.
 
-    É a unidade dos testes H1/H2 (McNemar/Kruskal). Restringir a arquivos com
-    issue evita a diluição dos arquivos sem issue (que "passam" trivialmente).
+    Funde todas as repetições: se o mesmo arquivo aparece em múltiplas reps,
+    conta 1 se teve sucesso em QUALQUER repetição (política OR — conservadora
+    e consistente com o objetivo de medir se o agente consegue corrigir).
     """
-    with open(result_path, encoding="utf-8") as f:
-        data = json.load(f)
+    paths = _collect_result_paths(cell_dir)
     outcomes: dict[str, int] = {}
-    for results in data.get("results_by_model", {}).values():
-        for r in results:
-            if not r.get("scan_result", {}).get("issues"):
-                continue
-            outcomes[str(r.get("file", ""))] = 1 if r.get("final_success") else 0
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        for results in data.get("results_by_model", {}).values():
+            for r in results:
+                if not r.get("scan_result", {}).get("issues"):
+                    continue
+                key = str(r.get("file", ""))
+                val = 1 if r.get("final_success") else 0
+                # OR entre repetições: uma vez bem-sucedido, conta como sucesso
+                outcomes[key] = max(outcomes.get(key, 0), val)
     return outcomes
 
 
@@ -110,8 +188,8 @@ def _load_stats():
         return None
 
 
-def _cell_fix_results(result_path: Path):
-    """Reconstrói os objetos FixResult de uma célula a partir do JSON.
+def _cell_fix_results(cell_dir: Path):
+    """Reconstrói objetos FixResult da célula fundindo todas as repetições.
 
     Permite reusar TODAS as funções canônicas de métricas (IFR, SR-completo,
     SR-efetivo, ρ, MTTR, TE, TPF, decomposições por tipo/WCAG/complexidade)
@@ -119,10 +197,9 @@ def _cell_fix_results(result_path: Path):
     """
     _ensure_repo_on_path()
     from a11y_autofix.config import FixResult  # noqa: PLC0415
-    with open(result_path, encoding="utf-8") as f:
-        data = json.load(f)
+    merged = _merge_results_by_model(_collect_result_paths(cell_dir))
     by_model: dict[str, list] = {}
-    for model, results in data.get("results_by_model", {}).items():
+    for model, results in merged.items():
         objs = []
         for r in results:
             try:
@@ -184,7 +261,14 @@ def _cell_rich_metrics(fix_results: list) -> dict:
             sr_bin.append(1.0 if r.final_success else 0.0)
         for r in fix_results:
             for a in r.attempts:
-                rho_bin.append(1.0 if a.validation_rejected_layer == 2 else 0.0)
+                # Caminho preferido: campo estruturado (ValidationPipeline 06/2026).
+                # Fallback: prefixo no error (dados anteriores ao fix do harness).
+                layer = getattr(a, "validation_rejected_layer", None)
+                if layer is not None:
+                    rho_bin.append(1.0 if layer == 2 else 0.0)
+                else:
+                    err = getattr(a, "error", None) or ""
+                    rho_bin.append(1.0 if err.startswith("functional_regression:") else 0.0)
 
         def _ci(vals):
             if not vals:
@@ -238,7 +322,7 @@ def run_inferential(
         kp = s["kruskal"](*[groups[i] for i in ids])
         res: dict = {
             "kruskal_wallis_p": round(kp, 6),
-            "per_cell_mean": {i: round(sum(groups[i]) / len(groups[i]), 4) for i in ids},
+            "per_cell_mean": {i: round(sum(groups[i]) / len(groups[i]), 4) if groups[i] else None for i in ids},
             "n_by_cell": {i: len(groups[i]) for i in ids},
         }
         # Friedman (pareado): alinhar pelos arquivos comuns às 3 células
@@ -376,20 +460,29 @@ def _print_inferential(infer: dict) -> None:
 
 def main() -> None:
     table: list[dict] = []
+    cell_dirs: dict[str, Path] = {}  # cell_name → dir resolvido (novo ou legado)
     for cell_name, (cell_id, strategy, agent) in CELLS.items():
-        result_path = _find_result_json(RESULTS_ROOT / cell_name)
-        if result_path is None:
+        cell_dir = _resolve_cell_dir(cell_name)
+        if cell_dir is None:
             table.append({
                 "célula": cell_id, "estratégia": strategy, "agente": agent,
                 "status": "PENDENTE", "ifr": "", "sr": "", "tempo_medio_s": "",
             })
             continue
-        for model, m in _cell_metrics(result_path).items():
-            table.append({
-                "célula": cell_id, "estratégia": strategy, "agente": agent,
-                "status": "ok",
-                "ifr": m["ifr"], "sr": m["sr"], "tempo_medio_s": m["tempo_medio_s"],
-            })
+        cell_dirs[cell_name] = cell_dir
+        legacy = cell_dir.parent != RESULTS_ROOT
+        metrics_by_model = _cell_metrics(cell_dir)
+        if len(metrics_by_model) > 1:
+            print(f"[aviso] célula {cell_id} tem {len(metrics_by_model)} modelos — "
+                  f"apenas o primeiro é incluído na tabela sumária.")
+        model, m = next(iter(metrics_by_model.items()))
+        n_reps = m.get("n_reps", 1)
+        fmt = "legado" if legacy else "novo"
+        table.append({
+            "célula": cell_id, "estratégia": strategy, "agente": agent,
+            "status": f"ok ({n_reps} rep{'s' if n_reps > 1 else ''}, {fmt})",
+            "ifr": m["ifr"], "sr": m["sr"], "tempo_medio_s": m["tempo_medio_s"],
+        })
 
     # Markdown
     headers = ["célula", "estratégia", "agente", "status", "ifr", "sr", "tempo_medio_s"]
@@ -412,12 +505,12 @@ def main() -> None:
     ifr_by_cell: dict[str, dict[str, float]] = {}
     rich_by_cell: dict[str, dict] = {}
     for cell_name, (cell_id, strategy, agent) in CELLS.items():
-        rp = _find_result_json(RESULTS_ROOT / cell_name)
-        if rp is None:
+        cell_dir = cell_dirs.get(cell_name)
+        if cell_dir is None:
             continue
-        outcomes_by_cell[cell_name] = _cell_file_outcomes(rp)
+        outcomes_by_cell[cell_name] = _cell_file_outcomes(cell_dir)
         try:
-            by_model = _cell_fix_results(rp)
+            by_model = _cell_fix_results(cell_dir)
             fr = next(iter(by_model.values()), [])
             if fr:
                 ifr_by_cell[cell_name] = _cell_file_ifr(fr)
