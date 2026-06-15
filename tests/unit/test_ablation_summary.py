@@ -24,6 +24,23 @@ def _outcomes(success_files: int, total: int) -> dict[str, int]:
     return {f"/snap/proj/f{i}.tsx": (1 if i < success_files else 0) for i in range(total)}
 
 
+def test_toolkit_friedman_and_effect_labels():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from analysis.statistical_analyser import friedman_test, interpret_cliffs_delta
+    # 3 condições pareadas claramente diferentes → p pequeno
+    g1 = [5, 6, 7, 8, 9] * 4
+    g2 = [1, 2, 1, 2, 1] * 4
+    g3 = [9, 9, 8, 9, 8] * 4
+    assert friedman_test(g1, g2, g3) < 0.05
+    # tamanhos desiguais → não-pareável → 1.0
+    assert friedman_test([1, 2, 3], [1, 2]) == 1.0
+    assert interpret_cliffs_delta(0.05) == "negligible"
+    assert interpret_cliffs_delta(0.2) == "small"
+    assert interpret_cliffs_delta(0.4) == "medium"
+    assert interpret_cliffs_delta(0.8) == "large"
+
+
 def test_inferential_axisA_and_axisB_present():
     sa = _load_module()
     outcomes = {
@@ -33,18 +50,30 @@ def test_inferential_axisA_and_axisB_present():
         "cell_B1_fewshot_direct":        _outcomes(10, 40),   # scaffolding fraco
         "cell_B3_fewshot_openhands":     _outcomes(33, 40),
     }
-    infer = sa.run_inferential(outcomes)
+    ifrs = {  # IFR por arquivo (contínuo) para a comparação complementar
+        "cell_A1_baseline_fewshot_auto": {f"/snap/proj/f{i}.tsx": (0.8 if i < 34 else 0.1) for i in range(40)},
+        "cell_A2_zeroshot_auto":         {f"/snap/proj/f{i}.tsx": (0.4 if i < 16 else 0.0) for i in range(40)},
+        "cell_A3_cot_auto":              {f"/snap/proj/f{i}.tsx": (0.8 if i < 33 else 0.1) for i in range(40)},
+        "cell_B1_fewshot_direct":        {f"/snap/proj/f{i}.tsx": (0.3 if i < 10 else 0.0) for i in range(40)},
+        "cell_B3_fewshot_openhands":     {f"/snap/proj/f{i}.tsx": (0.8 if i < 33 else 0.1) for i in range(40)},
+    }
+    infer = sa.run_inferential(outcomes, ifrs)
     assert infer is not None
-    # Eixo A: omnibus + 3 pares (A1/A2/A3)
-    assert "kruskal_wallis_p" in infer["axisA"]
-    assert len(infer["axisA"]["pairwise"]) == 3
-    a1a2 = next(p for p in infer["axisA"]["pairwise"] if {p["a"], p["b"]} == {"A1", "A2"})
-    assert a1a2["significant"] is True  # SR 0.85 vs 0.40, δ grande
-    # Eixo B: McNemar pareado vs A1, para B1 e B3 (B2 ausente → ignorado)
-    cells = {c["cell"] for c in infer["axisB"]["comparisons"]}
+    # Eixo A (SR): omnibus Kruskal + Friedman pareado + 3 pares com magnitude
+    a = infer["axisA_sr"]
+    assert "kruskal_wallis_p" in a and a["friedman_p"] is not None
+    assert len(a["pairwise"]) == 3
+    a1a2 = next(p for p in a["pairwise"] if {p["a"], p["b"]} == {"A1", "A2"})
+    assert a1a2["significant"] is True and a1a2["effect"] in {"medium", "large"}
+    # Eixo A (IFR contínuo) presente
+    assert infer["axisA_ifr"] and "kruskal_wallis_p" in infer["axisA_ifr"]
+    # Eixo B (SR): McNemar pareado vs A1, para B1 e B3 (B2 ausente → ignorado)
+    cells = {c["cell"] for c in infer["axisB_sr"]["comparisons"]}
     assert cells == {"B1", "B3"}
-    b1 = next(c for c in infer["axisB"]["comparisons"] if c["cell"] == "B1")
+    b1 = next(c for c in infer["axisB_sr"]["comparisons"] if c["cell"] == "B1")
     assert b1["n_pairs"] == 40 and b1["significant"] is True
+    # Eixo B (IFR): tamanho de efeito presente
+    assert infer["axisB_ifr"] and any(c["cell"] == "B1" for c in infer["axisB_ifr"]["comparisons"])
 
 
 def test_cell_file_outcomes_only_files_with_issues(tmp_path: Path):

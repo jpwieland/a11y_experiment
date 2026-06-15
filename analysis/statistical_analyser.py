@@ -158,6 +158,60 @@ def cliffs_delta(x: list[float], y: list[float]) -> float:
     return dom / (n_x * n_y)
 
 
+def interpret_cliffs_delta(delta: float) -> str:
+    """Rótulo de magnitude de Cliff's delta (limiares de Romano et al., 2006).
+
+    |δ| < 0.147 negligível · < 0.33 pequeno · < 0.474 médio · senão grande.
+    """
+    ad = abs(delta)
+    if ad < 0.147:
+        return "negligible"
+    if ad < 0.33:
+        return "small"
+    if ad < 0.474:
+        return "medium"
+    return "large"
+
+
+def friedman_test(*groups: list[float]) -> float:
+    """Teste de Friedman para ≥3 condições PAREADAS (mesmos sujeitos).
+
+    Complemento pareado do Kruskal-Wallis: apropriado quando as condições
+    (ex.: estratégias de prompting rodadas sobre os MESMOS arquivos) não são
+    independentes. Todos os grupos devem ter o mesmo tamanho (medidas pareadas).
+    Retorna o p-valor; 1.0 se indisponível/degenerado.
+    """
+    if len(groups) < 3 or any(len(g) != len(groups[0]) for g in groups) or not groups[0]:
+        return 1.0
+    if _HAS_SCIPY:
+        try:
+            return float(_scipy_stats.friedmanchisquare(*groups).pvalue)
+        except Exception:
+            return 1.0
+    # Fallback puro-Python: estatística de Friedman + aprox. qui-quadrado (df=k-1)
+    k = len(groups)
+    n = len(groups[0])
+    rank_sums = [0.0] * k
+    for i in range(n):
+        row = [(groups[j][i], j) for j in range(k)]
+        row.sort(key=lambda t: t[0])
+        # ranks médios para empates
+        ranks = [0.0] * k
+        x = 0
+        while x < k:
+            y = x
+            while y < k - 1 and row[y + 1][0] == row[x][0]:
+                y += 1
+            avg = (x + y) / 2 + 1
+            for z in range(x, y + 1):
+                ranks[row[z][1]] = avg
+            x = y + 1
+        for j in range(k):
+            rank_sums[j] += ranks[j]
+    chi2 = (12.0 / (n * k * (k + 1))) * sum(r ** 2 for r in rank_sums) - 3 * n * (k + 1)
+    return _chi2_sf_approx(chi2, k - 1)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Utility: Bootstrap CI
 # ═══════════════════════════════════════════════════════════════════════════════
