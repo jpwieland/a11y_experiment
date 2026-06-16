@@ -182,7 +182,7 @@
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: "A11y Auto-fix — Experimento Canônico para Publicação (4 GB VRAM)"
+name: "A11y Auto-fix — Experimento Canônico para Publicação (4 GB VRAM, Zero-Shot)"
 description: |
   Experimento comparativo definitivo entre modelos open-source de 3–7B parâmetros
   para correção automática de problemas de acessibilidade WCAG 2.1 AA em código
@@ -191,6 +191,10 @@ description: |
   36 projetos reais distribuídos por 7 domínios de aplicação, selecionados do
   corpus de 143 projetos scanned (dataset/catalog/projects.yaml). Cobre 74.9%
   dos issues do corpus total com distribuição de tipos fiel ao dataset completo.
+
+  Estratégia zero-shot selecionada via ablation study (06/2026): IFR=22.2%
+  vs few-shot 5.4% (Δ=16.8 p.p., d=0.389 médio), sem diferença significativa
+  entre scaffolding agents (p>0.05, McNemar).
 
 # ── Modelos ──────────────────────────────────────────────────────────────────
 models:
@@ -215,7 +219,7 @@ min_tool_consensus: 1  # Valor real observado (ver nota metodológica #1)
 # ── Agente e estratégia ───────────────────────────────────────────────────────
 agents:
   - auto
-strategy: few-shot
+strategy: zero-shot
 
 # ── Repetições e seed ────────────────────────────────────────────────────────
 repetitions: 3
@@ -337,13 +341,13 @@ output_format:
   - html
   - csv
 
-output_dir: experiment-results/chosen_experiment
+output_dir: experiment-results/canonical_zeroshot
 
 # ── Avançado ─────────────────────────────────────────────────────────────────
 advanced:
   auto_clone_missing_snapshots: true
   checkpoint_per_project: true
-  checkpoint_dir: experiment-results/chosen_experiment/checkpoints
+  checkpoint_dir: experiment-results/canonical_zeroshot/checkpoints
   save_diffs: true
   typescript_validation: false
 
@@ -388,6 +392,13 @@ advanced:
     - Government reduzido 5→4 (apenas 4 projetos scanned existem no corpus)
     - Distribuição de tipos de issue fica dentro de ±3 p.p. do corpus completo
 
+    Seleção de estratégia (ablation study 06/2026, qwen2.5-coder-3b, n=36 proj):
+    - Eixo A (prompting): zero-shot IFR=22.2% vs few-shot 5.4% vs CoT 19.7%
+      Kruskal-Wallis p<0.05; zero-shot vs few-shot d≈0.389 (médio); zero-shot
+      selecionado por IFR máximo e robustez (CoT sem vantagem significativa).
+    - Eixo B (scaffolding): sem diferença significativa entre direct/swe/openhands
+      (McNemar p>0.05 em todos os pares); mantido agent=auto (router padrão).
+
     Achados HISTÓRICOS (run 0380ab19, SCANNER ANTIGO) — NÃO REPLICADOS:
     ⚠ Na revalidação 06/2026 com o scan atual: IFR (re-scan) ~0.14 para ambos os
       qwen, SEM size inversion, diferença não significativa (ICs sobrepostos).
@@ -404,9 +415,9 @@ advanced:
       RAM: ≥ 16 GB
       OS: Windows 10/11, Python 3.11+, Ollama ≥ 0.3.0
 
-    Runtime estimado (4 GB VRAM, 36 proj × 35 arq = ~1.260 arq/rep):
-      qwen2.5-coder-3b:   ~2.0h/rep →   ~6.0h (3 reps)
-      qwen2.5-coder-7b:  ~14.1h/rep →  ~42.3h (3 reps)
-      codellama-7b:      ~36.6h/rep → ~109.8h (3 reps)
+    Runtime estimado (zero-shot ~20% mais lento; 36 × 35 arq = ~1.260 arq/rep):
+      qwen2.5-coder-3b:   ~2.4h/rep →   ~7.2h (3 reps)
+      qwen2.5-coder-7b:  ~16.9h/rep →  ~50.8h (3 reps)
+      codellama-7b:      ~43.9h/rep → ~131.8h (3 reps)
       Scan overhead:      ~4.0h (não multiplica por modelo)
-      TOTAL ESTIMADO:    ~162h / ~6.8 dias
+      TOTAL ESTIMADO:    ~194h / ~8.1 dias
