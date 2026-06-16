@@ -69,16 +69,29 @@ def _resolve_cell_dir(cell_name: str) -> Path | None:
     if prefix is None:
         return None
 
-    legacy_root = RESULTS_ROOT.parent
-    candidates = [
-        d for d in legacy_root.iterdir()
-        if d.is_dir() and d.name.startswith(prefix)
+    # Locais onde o runner legado pode ter gravado: raiz de experiment-results/
+    # e o próprio diretório do script (quando executado com CWD dentro dele).
+    search_roots = [
+        RESULTS_ROOT.parent,       # experiment-results/
+        Path(__file__).parent,     # experiments/ablation/
     ]
+    candidates = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for d in root.iterdir():
+            if d.is_dir() and d.name.startswith(prefix) and _collect_result_paths(d):
+                candidates.append(d)
+
     if not candidates:
         return None
 
-    # Prefere o mais recente por mtime se houver múltiplos reruns
-    return max(candidates, key=lambda d: d.stat().st_mtime)
+    # Prefere o diretório com mais repetições completas; mtime como desempate.
+    def _score(d: Path) -> tuple[int, float]:
+        n = len(list(d.glob("rep_*/experiment_result.json")))
+        return (n, d.stat().st_mtime)
+
+    return max(candidates, key=_score)
 
 
 def _collect_result_paths(cell_dir: Path) -> list[Path]:
