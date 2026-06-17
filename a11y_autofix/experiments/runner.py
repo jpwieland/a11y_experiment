@@ -1281,6 +1281,22 @@ class ExperimentRunner:
         strategy = getattr(config, "strategy", "few-shot")
         model_config = self.registry.get(model_name)
 
+        # Aplicar temperatura uniforme do bloco execution: (se definida no YAML).
+        # Sem esse override, cada modelo usa seu default em models.yaml, tornando
+        # a comparação inválida (ex: codellama=0.2 vs qwen=0.1).
+        exec_temp = getattr(getattr(config, "execution", None), "temperature", None)
+        if exec_temp is not None and exec_temp != model_config.temperature:
+            import copy
+            original_temp = model_config.temperature
+            model_config = copy.deepcopy(model_config)
+            model_config.temperature = exec_temp
+            log.info(
+                "temperature_override",
+                model=model_name,
+                original=original_temp,
+                override=exec_temp,
+            )
+
         # ── Ablation: force_agent_type bypasses the router (methodology C1.4) ──
         # If set in ExperimentConfig, pass it as agent_preference to the Pipeline
         # so the router is short-circuited and a fixed agent is used for all files.
