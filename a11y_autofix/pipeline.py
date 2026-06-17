@@ -416,6 +416,8 @@ class Pipeline:
                 diff=patch.diff if patch_accepted else "",
                 new_content=patch.new_content if patch_accepted else "",
                 tokens_used=patch.tokens_used,
+                tokens_prompt=patch.tokens_prompt,
+                tokens_completion=patch.tokens_completion,
                 time_seconds=patch.time_seconds,
                 error=patch_error,
                 validation_passed=validation_passed,

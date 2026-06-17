@@ -173,30 +173,46 @@ class LocalLLMClient(BaseLLMClient):
         }
 
         t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        raise RuntimeError(
+                            f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
+                            f"Model requested: {self.config.model_id}\n"
+                            f"Possible fixes:\n"
+                            f"  1. Verify Ollama is running: ollama serve\n"
+                            f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
+                            f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
+                            f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
+                            f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
+                        ) from e
                     raise RuntimeError(
-                        f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
-                        f"Model requested: {self.config.model_id}\n"
-                        f"Possible fixes:\n"
-                        f"  1. Verify Ollama is running: ollama serve\n"
-                        f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
-                        f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
-                        f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
-                        f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
+                        f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
                     ) from e
-                raise RuntimeError(
-                    f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
-                ) from e
-            data = resp.json()
+                data = resp.json()
+        except httpx.ConnectError as e:
+            raise RuntimeError(
+                f"Cannot connect to LLM at {self._base_url}.\n"
+                f"Backend: {self.config.backend.value}\n"
+                f"Model: {self.config.model_id}\n"
+                f"Make sure the server is running.\n"
+                f"Original error: {e}"
+            ) from e
+        except httpx.TimeoutException as e:
+            raise RuntimeError(
+                f"LLM timeout after {self.config.timeout}s.\n"
+                f"Model: {self.config.model_id}\n"
+                f"Try a smaller model or increase AGENT_TIMEOUT in .env.\n"
+                f"Original error: {e}"
+            ) from e
 
         elapsed = time.perf_counter() - t0
         content = str(data["choices"][0]["message"]["content"])
