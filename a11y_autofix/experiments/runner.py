@@ -1324,6 +1324,7 @@ class ExperimentRunner:
             model_config,
             agent_preference=agent_preference,
             strategy=strategy,
+            prompt_log_dir=output_dir.parent / "prompt_logs",
         )
 
         # Usar concorrência dinâmica fornecida ou cair no default das settings

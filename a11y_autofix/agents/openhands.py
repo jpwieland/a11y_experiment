@@ -148,6 +148,7 @@ class OpenHandsAgent(BaseAgent):
         # identidade de contexto amplo do scaffolding OpenHands.
         from a11y_autofix.agents.prompts import PromptBuilder
 
+        system_prompt = system_prompt_openhands()
         prompt = PromptBuilder().build(
             issues=task.issues,
             file=task.file,
@@ -156,17 +157,36 @@ class OpenHandsAgent(BaseAgent):
             wcag_level=task.wcag_level,
             previous_attempt=task.context.get("previous_attempt"),
         )
+        attempt_num = len(task.context.get("previous_attempt") or []) + 1
 
         try:
             response, metrics = await self.llm.complete_with_metrics(
-                system=system_prompt_openhands(),
+                system=system_prompt,
                 user=prompt,
             )
         except Exception as e:
             log.error("openhands_llm_failed", error=str(e))
+            if self.prompt_logger:
+                self.prompt_logger.append(
+                    file=task.file.name, attempt=attempt_num,
+                    system_prompt=system_prompt, user_prompt=prompt,
+                    response="", tokens_prompt=None, tokens_completion=None,
+                    time_s=None, success=False, extra={"error": str(e)},
+                )
             return PatchResult(success=False, error=str(e))
 
         new_content = self.extract_code_block(response)
+
+        if self.prompt_logger:
+            self.prompt_logger.append(
+                file=task.file.name, attempt=attempt_num,
+                system_prompt=system_prompt, user_prompt=prompt,
+                response=response,
+                tokens_prompt=metrics.get("tokens_prompt"),
+                tokens_completion=metrics.get("tokens_completion"),
+                time_s=metrics.get("time_seconds"),
+                success=bool(new_content and self.validate_tsx_basic(new_content)),
+            )
 
         if not new_content or not self.validate_tsx_basic(new_content):
             log.warning(

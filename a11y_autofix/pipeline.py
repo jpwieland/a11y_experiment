@@ -61,6 +61,7 @@ class Pipeline:
         dry_run: bool = False,
         framework: str = "auto",
         strategy: str = "few-shot",
+        prompt_log_dir: "Path | None" = None,
     ) -> None:
         """
         Args:
@@ -78,6 +79,7 @@ class Pipeline:
         self.dry_run = dry_run
         self.framework = framework
         self.strategy = strategy
+        self.prompt_log_dir = prompt_log_dir
 
         self.scanner = MultiToolScanner(settings)
         self.router = Router(settings)
@@ -525,12 +527,17 @@ class Pipeline:
 
     def _create_agent(self, agent_name: str) -> "BaseAgent":
         """Instancia o agente pelo nome, propagando a estratégia de prompting."""
+        prompt_logger = None
+        if self.prompt_log_dir is not None:
+            from a11y_autofix.utils.prompt_logger import PromptLogger
+            prompt_logger = PromptLogger(self.prompt_log_dir, self.model_config.model_id)
+
         if agent_name == "openhands":
-            return OpenHandsAgent(self.llm_client, strategy=self.strategy)
+            return OpenHandsAgent(self.llm_client, strategy=self.strategy, prompt_logger=prompt_logger)
         elif agent_name == "swe-agent":
-            return SWEAgent(self.llm_client, strategy=self.strategy)
+            return SWEAgent(self.llm_client, strategy=self.strategy, prompt_logger=prompt_logger)
         else:
-            return DirectLLMAgent(self.llm_client, strategy=self.strategy)
+            return DirectLLMAgent(self.llm_client, strategy=self.strategy, prompt_logger=prompt_logger)
 
     def _discover_files(self, targets: list[Path] | list[str]) -> list[Path]:
         """

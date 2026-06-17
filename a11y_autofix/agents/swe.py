@@ -138,19 +138,28 @@ class SWEAgent(BaseAgent):
         Returns:
             PatchResult da execução.
         """
+        system_prompt = system_prompt_swe()
         prompt = build_swe_prompt(
             task,
             strategy=self.strategy,
             previous_attempt=task.context.get("previous_attempt"),
         )
+        attempt_num = len(task.context.get("previous_attempt") or []) + 1
 
         try:
             response, metrics = await self.llm.complete_with_metrics(
-                system=system_prompt_swe(),
+                system=system_prompt,
                 user=prompt,
             )
         except Exception as e:
             log.error("swe_llm_failed", error=str(e))
+            if self.prompt_logger:
+                self.prompt_logger.append(
+                    file=task.file.name, attempt=attempt_num,
+                    system_prompt=system_prompt, user_prompt=prompt,
+                    response="", tokens_prompt=None, tokens_completion=None,
+                    time_s=None, success=False, extra={"error": str(e)},
+                )
             return PatchResult(success=False, error=str(e))
 
         # Tentar código completo primeiro
@@ -159,6 +168,17 @@ class SWEAgent(BaseAgent):
         # Tentar patches cirúrgicos
         if not new_content:
             new_content = self.apply_surgical_patches(response, task.file_content)
+
+        if self.prompt_logger:
+            self.prompt_logger.append(
+                file=task.file.name, attempt=attempt_num,
+                system_prompt=system_prompt, user_prompt=prompt,
+                response=response,
+                tokens_prompt=metrics.get("tokens_prompt"),
+                tokens_completion=metrics.get("tokens_completion"),
+                time_s=metrics.get("time_seconds"),
+                success=bool(new_content and self.validate_tsx_basic(new_content)),
+            )
 
         if not new_content or not self.validate_tsx_basic(new_content):
             return PatchResult(

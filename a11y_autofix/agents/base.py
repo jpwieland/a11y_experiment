@@ -10,6 +10,7 @@ from a11y_autofix.config import AgentTask, PatchResult
 
 if TYPE_CHECKING:
     from a11y_autofix.llm.base import BaseLLMClient
+    from a11y_autofix.utils.prompt_logger import PromptLogger
 
 
 class BaseAgent(ABC):
@@ -24,6 +25,7 @@ class BaseAgent(ABC):
         self,
         llm_client: "BaseLLMClient",
         strategy: "str | None" = None,
+        prompt_logger: "PromptLogger | None" = None,
     ) -> None:
         """
         Args:
@@ -33,11 +35,13 @@ class BaseAgent(ABC):
                       Controla a presença do Componente 5 (exemplos few-shot)
                       e da instrução CoT no Componente 6 do prompt.
                       Default: 'few-shot'.
+            prompt_logger: Logger opcional para salvar prompts/respostas em JSONL.
         """
         from a11y_autofix.agents.prompts import PromptingStrategy
 
         self.llm = llm_client
         self.strategy = PromptingStrategy(strategy) if strategy else PromptingStrategy.FEW_SHOT
+        self.prompt_logger = prompt_logger
 
     @abstractmethod
     async def run(self, task: AgentTask) -> PatchResult:

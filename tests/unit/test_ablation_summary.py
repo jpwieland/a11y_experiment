@@ -88,5 +88,5 @@ def test_cell_file_outcomes_only_files_with_issues(tmp_path: Path):
     ]}}
     rp = tmp_path / "experiment_result.json"
     rp.write_text(json.dumps(result), encoding="utf-8")
-    outcomes = sa._cell_file_outcomes(rp)
+    outcomes = sa._cell_file_outcomes(tmp_path)
     assert outcomes == {"/p/a.tsx": 1, "/p/b.tsx": 0}  # c.tsx excluído
