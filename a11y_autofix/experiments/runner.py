@@ -178,11 +178,11 @@ class _ProgressTracker:
     Permite que watch_experiment.py leia o estado em tempo real.
 
     Campos adicionais por modelo:
-      started_at         — ISO timestamp de quando o modelo começou
-      avg_time_per_file_s — média móvel (últimas 10 amostras) de tempo por arquivo
-      eta_seconds        — estimativa de segundos restantes para o modelo
-      tokens_input       — total de tokens de input consumidos
-      tokens_output      — total de tokens de output produzidos
+      started_at          — ISO timestamp de quando o modelo começou a rodar
+      avg_time_per_file_s — tempo médio real (elapsed/done_new, exclui checkpoints)
+      eta_seconds         — estimativa de segundos restantes para o modelo
+      tokens_input        — total de tokens de input consumidos
+      tokens_output       — total de tokens de output produzidos
     """
 
     _DEFAULT_MODEL_STATE: dict[str, Any] = {
@@ -206,8 +206,11 @@ class _ProgressTracker:
             "models": {m: dict(self._DEFAULT_MODEL_STATE) for m in models},
         }
         self._lock = asyncio.Lock()
-        # Histórico de tempos por arquivo para média móvel
-        self._file_times: dict[str, list[float]] = {m: [] for m in models}
+        # Contadores de arquivos NOVOS (não retomados de checkpoint) por modelo,
+        # e timestamp monotônico de quando o modelo começou a processar arquivos novos.
+        # ETA = elapsed_real / done_new × remaining — imune a tempos históricos.
+        self._new_files_count: dict[str, int] = {m: 0 for m in models}
+        self._model_start_mono: dict[str, float] = {}
         self._flush()
 
     async def update(
@@ -221,6 +224,7 @@ class _ProgressTracker:
         time_seconds: float = 0.0,
         tokens_input: int = 0,
         tokens_output: int = 0,
+        from_checkpoint: bool = False,
     ) -> None:
         async with self._lock:
             m = self._state["models"].setdefault(model, dict(self._DEFAULT_MODEL_STATE))
@@ -236,14 +240,23 @@ class _ProgressTracker:
             else:
                 m["failed"] += 1
 
-            # ── ETA via média móvel das últimas 10 amostras ───────────────────
-            if time_seconds > 0:
-                times = self._file_times.setdefault(model, [])
-                times.append(time_seconds)
-                recent = times[-10:]
-                avg = sum(recent) / len(recent)
-                m["avg_time_per_file_s"] = round(avg, 1)
+            # ── ETA via tempo real decorrido ÷ arquivos novos processados ─────
+            # Exclui arquivos retomados de checkpoint: eles inflam a média com
+            # tempos históricos de uma execução anterior (potencialmente em
+            # hardware diferente ou com cold-start). Arquivos novos usam o
+            # tempo de parede real desde o início do processamento deste modelo,
+            # o que amoriza naturalmente a mistura de scan-only vs LLM-heavy.
+            if not from_checkpoint and time_seconds > 0:
+                if model not in self._model_start_mono:
+                    # Primeiro arquivo novo: marcar início e descontar o tempo
+                    # deste arquivo (ele já está incluído no elapsed futuro).
+                    self._model_start_mono[model] = time.monotonic() - time_seconds
+                self._new_files_count[model] = self._new_files_count.get(model, 0) + 1
+                done_new = self._new_files_count[model]
+                elapsed = time.monotonic() - self._model_start_mono[model]
+                avg = elapsed / done_new
                 remaining = max(0, self.total_files - m["done"])
+                m["avg_time_per_file_s"] = round(avg, 1)
                 m["eta_seconds"] = round(avg * remaining)
 
             self._state["last_update"] = datetime.now(tz=timezone.utc).isoformat()
@@ -1368,6 +1381,7 @@ class ExperimentRunner:
                         issues_total=len(r.scan_result.issues),
                         time_seconds=r.total_time,
                         tokens_output=tokens_out,
+                        from_checkpoint=True,  # não contamina o cálculo de ETA
                     )
 
         if not pending_files:
