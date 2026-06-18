@@ -42,6 +42,14 @@ class LocalLLMClient(BaseLLMClient):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__(config)
         self._base_url = self._resolve_base_url()
+        # Cliente persistente com connection pooling — evita TCP handshake por requisição
+        self._http = httpx.AsyncClient(
+            timeout=self.config.timeout,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     def _resolve_base_url(self) -> str:
         """Resolve URL base do backend."""
@@ -90,56 +98,55 @@ class LocalLLMClient(BaseLLMClient):
             "Authorization": f"Bearer {self.config.api_key}",
         }
 
-        async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-            try:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                return str(content)
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            return str(content)
 
-            except httpx.ConnectError as e:
-                raise RuntimeError(
-                    f"Cannot connect to LLM at {self._base_url}.\n"
-                    f"Backend: {self.config.backend.value}\n"
-                    f"Model: {self.config.model_id}\n"
-                    f"Make sure the server is running.\n"
-                    f"Original error: {e}"
-                ) from e
+        except httpx.ConnectError as e:
+            raise RuntimeError(
+                f"Cannot connect to LLM at {self._base_url}.\n"
+                f"Backend: {self.config.backend.value}\n"
+                f"Model: {self.config.model_id}\n"
+                f"Make sure the server is running.\n"
+                f"Original error: {e}"
+            ) from e
 
-            except httpx.TimeoutException as e:
-                raise RuntimeError(
-                    f"LLM timeout after {self.config.timeout}s.\n"
-                    f"Model: {self.config.model_id}\n"
-                    f"Try a smaller model or increase AGENT_TIMEOUT in .env.\n"
-                    f"Original error: {e}"
-                ) from e
+        except httpx.TimeoutException as e:
+            raise RuntimeError(
+                f"LLM timeout after {self.config.timeout}s.\n"
+                f"Model: {self.config.model_id}\n"
+                f"Try a smaller model or increase AGENT_TIMEOUT in .env.\n"
+                f"Original error: {e}"
+            ) from e
 
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    raise RuntimeError(
-                        f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
-                        f"Model requested: {self.config.model_id}\n"
-                        f"Possible fixes:\n"
-                        f"  1. Verify Ollama is running: ollama serve\n"
-                        f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
-                        f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
-                        f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
-                        f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
-                    ) from e
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
                 raise RuntimeError(
-                    f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+                    f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
+                    f"Model requested: {self.config.model_id}\n"
+                    f"Possible fixes:\n"
+                    f"  1. Verify Ollama is running: ollama serve\n"
+                    f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
+                    f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
+                    f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
+                    f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
                 ) from e
+            raise RuntimeError(
+                f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+            ) from e
 
-            except (KeyError, IndexError) as e:
-                raise RuntimeError(
-                    f"Unexpected LLM response format: {data}\n"
-                    f"Original error: {e}"
-                ) from e
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(
+                f"Unexpected LLM response format: {data}\n"
+                f"Original error: {e}"
+            ) from e
 
     async def complete_with_metrics(
         self,
@@ -174,30 +181,29 @@ class LocalLLMClient(BaseLLMClient):
 
         t0 = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
-                try:
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 404:
-                        raise RuntimeError(
-                            f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
-                            f"Model requested: {self.config.model_id}\n"
-                            f"Possible fixes:\n"
-                            f"  1. Verify Ollama is running: ollama serve\n"
-                            f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
-                            f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
-                            f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
-                            f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
-                        ) from e
+            resp = await self._http.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
                     raise RuntimeError(
-                        f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+                        f"HTTP 404 — model endpoint not found at {self._base_url}/chat/completions.\n"
+                        f"Model requested: {self.config.model_id}\n"
+                        f"Possible fixes:\n"
+                        f"  1. Verify Ollama is running: ollama serve\n"
+                        f"  2. Verify model is loaded: ollama run {self.config.model_id}\n"
+                        f"  3. Check model ID format (run 'ollama list' to see exact names)\n"
+                        f"  4. Ollama >= 0.1.24 required for /v1/chat/completions endpoint\n"
+                        f"  5. If using vLLM, set LLM_BACKEND=vllm in .env"
                     ) from e
-                data = resp.json()
+                raise RuntimeError(
+                    f"LLM HTTP error {e.response.status_code}: {e.response.text[:200]}"
+                ) from e
+            data = resp.json()
         except httpx.ConnectError as e:
             raise RuntimeError(
                 f"Cannot connect to LLM at {self._base_url}.\n"

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
+import os
 import random
 import subprocess
 import time
@@ -49,6 +51,35 @@ try:
     _console = _RichConsole(stderr=True)
 except Exception:  # pragma: no cover - rich é dependência, mas degradamos com segurança
     _console = None
+
+
+# ── Helpers de checkpoint ─────────────────────────────────────────────────────
+
+def _stable_file_id(file: Path) -> str:
+    """
+    ID estável para checkpoint baseado em hash SHA-1 do path relativo a 'snapshots/'.
+
+    Substitui file.stem que colide entre projetos distintos: 'index.tsx' existe
+    em 10+ projetos diferentes e todos mapeariam para 'index.json', fazendo com
+    que reps 2+ retomem silenciosamente o checkpoint errado. Com hash do path
+    relativo cada arquivo tem um ID único globalmente.
+    """
+    path_str = str(file).replace("\\", "/")
+    rel = path_str.split("snapshots/", 1)[1] if "snapshots/" in path_str else path_str
+    digest = hashlib.sha1(rel.encode()).hexdigest()[:8]
+    return f"{file.stem}_{digest}"
+
+
+def _atomic_write_json(path: Path, data: "dict[str, Any]") -> None:
+    """Escrita atômica via arquivo temporário + os.replace (rename no mesmo filesystem).
+
+    Evita checkpoints corrompidos (truncados) em caso de interrupção do processo
+    durante a escrita — o rename é atômico no POSIX e no Windows/NTFS.
+    """
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class ConditionRunError(RuntimeError):
@@ -331,14 +362,11 @@ class ScanResultCache:
 
     def save(self) -> None:
         try:
-            self._path.write_text(
-                json.dumps(
-                    {"version": self._VERSION, "scans": self._data},
-                    ensure_ascii=False,
-                    indent=None,       # compacto — pode ter milhares de entradas
-                ),
-                encoding="utf-8",
-            )
+            payload = {"version": self._VERSION, "scans": self._data}
+            content = json.dumps(payload, ensure_ascii=False, indent=None)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, self._path)
         except Exception as exc:
             log.warning("scan_cache_save_failed", error=str(exc))
 
@@ -374,6 +402,20 @@ class ScanResultCache:
 
     def __len__(self) -> int:
         return len(self._data)
+
+    def get_tool_versions(self) -> dict[str, str]:
+        """Retorna versões das ferramentas do primeiro ScanResult que as registrou.
+
+        O scanner popula tool_versions em cada ScanResult; este método extrai
+        o primeiro conjunto não-vazio para gravar nos artefatos do experimento.
+        Retorna {} se o cache estiver vazio ou nenhuma entrada tiver versões.
+        """
+        for raw in self._data.values():
+            if isinstance(raw, dict):
+                versions = raw.get("tool_versions", {})
+                if versions:
+                    return dict(versions)
+        return {}
 
     @staticmethod
     def _is_page_level_issue(issue: dict[str, Any]) -> bool:
@@ -746,6 +788,7 @@ class ExperimentRunner:
                         gpu_monitor=gpu_monitor,
                         scan_cache=scan_cache,
                         scan_dict=scan_dict,
+                        rep_num=_rep_num,
                     )
 
                     # Persistir scan results para o próximo modelo / repetição
@@ -803,7 +846,7 @@ class ExperimentRunner:
                 avg_time_by_model={m: v["avg_time"] for m, v in metrics.items()},
                 issues_fixed_by_model={m: v["issues_fixed"] for m, v in metrics.items()},
                 config_snapshot=config.model_dump(),
-                tool_versions={},
+                tool_versions=scan_cache.get_tool_versions(),
             )
             rep_result_path = (
                 (output_dir / rep_label / "experiment_result.json")
@@ -1050,6 +1093,11 @@ class ExperimentRunner:
 
         results_by_temp: dict[float, ExperimentResult] = {}
 
+        # Reset inicial: garante estado original dos snapshots antes do primeiro
+        # run de sensibilidade. O experimento principal pode ter deixado patches
+        # se foi interrompido antes do cleanup pós-modelo.
+        await self._reset_snapshot_dirs(config)
+
         for temp in temperatures:
             temp_dir = output_dir / "sensitivity" / str(temp).replace(".", "_")
             temp_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1120,17 @@ class ExperimentRunner:
                 output_dir=temp_dir,
             )
 
+            # Reset após cada temperatura: próxima condição recebe código original.
+            # Sem isso, temperaturas mais altas herdam patches das anteriores.
+            await self._reset_snapshot_dirs(config)
+
+            # Coletar versões das ferramentas do primeiro resultado com scan válido
+            tool_versions: dict[str, str] = {}
+            for r in results:
+                if r.scan_result.tool_versions:
+                    tool_versions = dict(r.scan_result.tool_versions)
+                    break
+
             metrics = compute_experiment_metrics({best_model: results})
             exp_result = ExperimentResult(
                 experiment_id=exp_id,
@@ -1084,7 +1143,7 @@ class ExperimentRunner:
                 avg_time_by_model={best_model: metrics[best_model]["avg_time"]},
                 issues_fixed_by_model={best_model: metrics[best_model]["issues_fixed"]},
                 config_snapshot={"temperature": temp, "seed": seed},
-                tool_versions={},
+                tool_versions=tool_versions,
             )
 
             (temp_dir / "experiment_result.json").write_text(
@@ -1282,6 +1341,7 @@ class ExperimentRunner:
         gpu_monitor: "GpuMonitor | None" = None,
         scan_cache: "ScanResultCache | None" = None,
         scan_dict: "dict[str, Any] | None" = None,
+        rep_num: int = 1,
     ) -> tuple[str, list[FixResult]]:
         """
         Executa o pipeline para um único modelo.
@@ -1337,7 +1397,7 @@ class ExperimentRunner:
             model_config,
             agent_preference=agent_preference,
             strategy=strategy,
-            prompt_log_dir=output_dir.parent / "prompt_logs",
+            prompt_log_dir=output_dir.parent / "prompt_logs" / f"rep_{rep_num}",
         )
 
         # Usar concorrência dinâmica fornecida ou cair no default das settings
@@ -1349,8 +1409,8 @@ class ExperimentRunner:
         resumed_results: list[FixResult] = []
 
         for f in files:
-            if self.is_condition_complete(model_name, strategy, f.stem, checkpoints_dir):
-                cp = self._load_checkpoint(model_name, strategy, f.stem, checkpoints_dir)
+            if self.is_condition_complete(model_name, strategy, _stable_file_id(f), checkpoints_dir):
+                cp = self._load_checkpoint(model_name, strategy, _stable_file_id(f), checkpoints_dir)
                 if cp:
                     scan = (scan_cache.get(f) if scan_cache else None)
                     if scan is None:
@@ -1372,7 +1432,8 @@ class ExperimentRunner:
             if tracker:
                 from a11y_autofix.utils.files import label_for_path
                 for r in resumed_results:
-                    tokens_out = sum(a.tokens_used or 0 for a in r.attempts)
+                    tokens_in = sum(a.tokens_prompt or 0 for a in r.attempts)
+                    tokens_out = sum(a.tokens_completion or 0 for a in r.attempts)
                     await tracker.update(
                         model=model_name,
                         file_name=label_for_path(r.file),
@@ -1380,6 +1441,7 @@ class ExperimentRunner:
                         issues_fixed=r.issues_fixed,
                         issues_total=len(r.scan_result.issues),
                         time_seconds=r.total_time,
+                        tokens_input=tokens_in,
                         tokens_output=tokens_out,
                         from_checkpoint=True,  # não contamina o cálculo de ETA
                     )
@@ -1407,7 +1469,8 @@ class ExperimentRunner:
         from a11y_autofix.utils.files import label_for_path
         async def _on_file_done(fix_result: FixResult) -> None:
             if tracker:
-                tokens_out = sum(a.tokens_used or 0 for a in fix_result.attempts)
+                tokens_in = sum(a.tokens_prompt or 0 for a in fix_result.attempts)
+                tokens_out = sum(a.tokens_completion or 0 for a in fix_result.attempts)
                 await tracker.update(
                     model=model_name,
                     # Rótulo "<projeto> › <arquivo>" deixa o dashboard mostrar
@@ -1417,6 +1480,7 @@ class ExperimentRunner:
                     issues_fixed=fix_result.issues_fixed,
                     issues_total=len(fix_result.scan_result.issues),
                     time_seconds=fix_result.total_time,
+                    tokens_input=tokens_in,
                     tokens_output=tokens_out,
                 )
             self._save_file_checkpoint(
@@ -1438,7 +1502,7 @@ class ExperimentRunner:
 
         # Fallback checkpoint para arquivos que o callback não cobriu
         for fix_result in new_results:
-            fid = fix_result.file.stem
+            fid = _stable_file_id(fix_result.file)
             cp_path = (
                 checkpoints_dir
                 / model_name.replace("/", "_")
@@ -1495,8 +1559,8 @@ class ExperimentRunner:
 
         Estratégia conservadora:
           • git checkout -- .  → reverte arquivos rastreados modificados
-          • git clean -f       → remove arquivos novos não rastreados criados pelo LLM
-            (sem -d para preservar node_modules e outros diretórios grandes)
+          • git clean -fd      → remove arquivos e diretórios não rastreados criados pelo LLM
+            (dirs em .gitignore como node_modules não são afetados pelo -d)
 
         Apenas diretórios que são repositórios git válidos são processados.
         Falhas são logadas mas não interrompem o experimento.
@@ -1550,10 +1614,10 @@ class ExperimentRunner:
                 _, stderr1 = await asyncio.wait_for(r1.communicate(), timeout=30)
                 rc1 = r1.returncode
 
-                # Passo 2: remover arquivos não rastreados criados pelo LLM
-                # -f: forçar; sem -d para não apagar node_modules etc.
+                # Passo 2: remover arquivos e diretórios não rastreados criados pelo LLM
+                # -fd: remove dirs também; gitignored (node_modules etc.) não são afetados
                 r2 = await asyncio.create_subprocess_exec(
-                    "git", "clean", "-f",
+                    "git", "clean", "-fd",
                     cwd=str(snap_dir),
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
@@ -1610,24 +1674,43 @@ class ExperimentRunner:
 
     def _stub_scan(self, file: Path, cp: dict[str, Any]) -> "Any":
         """
-        Cria ScanResult mínimo a partir dos metadados do checkpoint.
-        Usado quando o scan_cache não tem entrada para o arquivo.
+        Cria ScanResult a partir dos metadados do checkpoint.
+
+        Restaura tipos reais de issue do campo scan_result_issues (adicionado em 06/2026)
+        para não contaminar análise por tipo com IssueType.OTHER genérico.
+        Fallback para stub genérico em checkpoints antigos sem esse campo.
         """
         from a11y_autofix.config import (
             A11yIssue, Complexity, Confidence, IssueType, ScanResult,
         )
-        n_issues = cp.get("ifr_denominator", 0)
-        issues = [
-            A11yIssue(
-                file=str(file),
-                selector="",
-                issue_type=IssueType.OTHER,
-                complexity=Complexity.SIMPLE,
-                confidence=Confidence.HIGH,
-                message="(restored from checkpoint)",
-            )
-            for _ in range(n_issues)
-        ]
+        saved = cp.get("scan_result_issues", [])
+        if saved:
+            issues = [
+                A11yIssue(
+                    file=str(file),
+                    selector=entry.get("selector", ""),
+                    issue_type=IssueType(entry.get("issue_type", "other")),
+                    complexity=Complexity(entry.get("complexity", "simple")),
+                    confidence=Confidence(entry.get("confidence", "high")),
+                    wcag_criteria=entry.get("wcag_criteria"),
+                    message=entry.get("message", "(restored from checkpoint)"),
+                )
+                for entry in saved
+            ]
+        else:
+            # Checkpoints antigos sem scan_result_issues: stub com tipo genérico
+            n_issues = cp.get("ifr_denominator", 0)
+            issues = [
+                A11yIssue(
+                    file=str(file),
+                    selector="",
+                    issue_type=IssueType.OTHER,
+                    complexity=Complexity.SIMPLE,
+                    confidence=Confidence.HIGH,
+                    message="(restored from checkpoint — type unknown)",
+                )
+                for _ in range(n_issues)
+            ]
         return ScanResult(
             file=file,
             file_hash="sha256:checkpoint",
@@ -1683,7 +1766,7 @@ class ExperimentRunner:
 
         Filename convention: checkpoints/{model_id}/{strategy}/{file_id}.json
         """
-        file_id = fix_result.file.stem
+        file_id = _stable_file_id(fix_result.file)
         checkpoint_dir = checkpoints_dir / model_id.replace("/", "_") / strategy
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1784,6 +1867,19 @@ class ExperimentRunner:
                 c: sum(1 for i in fix_result.scan_result.issues if i.confidence.value == c)
                 for c in ("high", "medium", "low")
             },
+            # Issue metadata completo: necessário para _stub_scan restaurar tipos reais
+            # ao retomar o checkpoint sem o scan_cache disponível (evita IssueType.OTHER genérico)
+            "scan_result_issues": [
+                {
+                    "issue_type": i.issue_type.value,
+                    "wcag_criteria": i.wcag_criteria,
+                    "selector": i.selector,
+                    "confidence": i.confidence.value,
+                    "complexity": i.complexity.value,
+                    "message": i.message,
+                }
+                for i in fix_result.scan_result.issues
+            ],
 
             # Timestamps
             "cold_start_timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -1791,7 +1887,7 @@ class ExperimentRunner:
         }
 
         checkpoint_path = checkpoint_dir / f"{file_id}.json"
-        checkpoint_path.write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
+        _atomic_write_json(checkpoint_path, checkpoint)
 
     def _load_checkpoint(
         self,

@@ -12,6 +12,7 @@ import yaml
 from a11y_autofix.config import FixResult, ScanResult, ScanTool, Settings
 from a11y_autofix.experiments.config_schema import ExperimentConfig, load_experiment_config
 from a11y_autofix.experiments.metrics import compute_experiment_metrics, rank_models
+from a11y_autofix.experiments.runner import _stable_file_id
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -295,3 +296,91 @@ class TestEnsureModelAvailable:
         runner = self._runner()
         with pytest.raises(RuntimeError, match="codellama:7b-instruct"):
             await runner._ensure_model_available("codellama-7b")
+
+
+# ─── _stable_file_id ─────────────────────────────────────────────────────────
+
+
+class TestStableFileId:
+    """Garante que _stable_file_id não produz colisões entre projetos distintos."""
+
+    def test_different_projects_same_stem_produce_different_ids(self) -> None:
+        """index.tsx em dois projetos distintos → IDs distintos."""
+        p1 = Path("/repo/dataset/snapshots/projectA/src/index.tsx")
+        p2 = Path("/repo/dataset/snapshots/projectB/src/index.tsx")
+        assert _stable_file_id(p1) != _stable_file_id(p2)
+
+    def test_same_file_same_id(self) -> None:
+        """Mesma chamada com mesmo path → mesmo ID (determinístico)."""
+        p = Path("/repo/dataset/snapshots/projectA/src/index.tsx")
+        assert _stable_file_id(p) == _stable_file_id(p)
+
+    def test_id_contains_stem_prefix(self) -> None:
+        """ID começa com o stem do arquivo para legibilidade nos logs."""
+        p = Path("/repo/dataset/snapshots/projectA/components/Button.tsx")
+        assert _stable_file_id(p).startswith("Button_")
+
+    def test_different_paths_same_project_produce_different_ids(self) -> None:
+        """index.tsx em dirs distintos do mesmo projeto → IDs distintos."""
+        p1 = Path("/repo/dataset/snapshots/projectA/src/index.tsx")
+        p2 = Path("/repo/dataset/snapshots/projectA/components/index.tsx")
+        assert _stable_file_id(p1) != _stable_file_id(p2)
+
+    def test_no_snapshots_in_path_uses_full_path(self) -> None:
+        """Fallback para path sem 'snapshots/' não lança exceção."""
+        p = Path("/tmp/some_file.tsx")
+        result = _stable_file_id(p)
+        assert result.startswith("some_file_")
+        assert len(result) > 5
+
+
+# ─── ScanResultCache.get_tool_versions ───────────────────────────────────────
+
+
+class TestScanResultCacheGetToolVersions:
+    """Testa que get_tool_versions extrai versões reais do cache em vez de {}."""
+
+    def _make_cache(self, versions: dict) -> "ScanResultCache":
+        from a11y_autofix.experiments.runner import ScanResultCache
+        import tempfile, json
+        tmp = Path(tempfile.mktemp(suffix=".json"))
+        entry = {
+            "file": "/fake/snapshots/proj/src/Button.tsx",
+            "file_hash": "sha256:abc",
+            "issues": [],
+            "tools_used": ["pa11y"],
+            "tool_versions": versions,
+            "scan_time": 0.1,
+        }
+        tmp.write_text(json.dumps({
+            "version": 2,
+            "scans": {"/fake/snapshots/proj/src/Button.tsx": entry},
+        }))
+        cache = ScanResultCache(tmp)
+        cache.load()
+        tmp.unlink(missing_ok=True)
+        return cache
+
+    def test_returns_versions_from_cache(self) -> None:
+        cache = self._make_cache({"pa11y": "6.7.0", "axe-core": "4.9.1"})
+        v = cache.get_tool_versions()
+        assert v["pa11y"] == "6.7.0"
+        assert v["axe-core"] == "4.9.1"
+
+    def test_returns_empty_when_cache_empty(self) -> None:
+        import tempfile
+        from a11y_autofix.experiments.runner import ScanResultCache
+        tmp = Path(tempfile.mktemp(suffix=".json"))
+        cache = ScanResultCache(tmp)
+        assert cache.get_tool_versions() == {}
+
+    def test_returns_empty_when_all_versions_empty(self) -> None:
+        cache = self._make_cache({})
+        assert cache.get_tool_versions() == {}
+
+    def test_result_is_independent_copy(self) -> None:
+        """Mutação do resultado não altera o cache interno."""
+        cache = self._make_cache({"pa11y": "6.7.0"})
+        v = cache.get_tool_versions()
+        v["injected"] = "hacked"
+        assert "injected" not in cache.get_tool_versions()
