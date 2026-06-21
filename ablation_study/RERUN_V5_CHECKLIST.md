@@ -7,15 +7,21 @@ machine that holds the corpus, and regenerate the corrected report.
 ## Why this re-run is needed
 
 - V5 bypasses the validation pipeline as a **gate**, but the runner now also
-  **measures** Layer-2 (structural functional preservation) without enforcing
-  it. This lets us tell whether a Pa11y-credited fix also **broke the
-  component** (e.g. dropped an export / prop / handler).
-- The original V5 runs predate this instrumentation, so the fields
+  **measures** two functional signals without enforcing them:
+  1. **Layer 2** — programmatic interface preservation (props / exports / handlers).
+  2. **Structure-preservation guard** (`check_structure_preserved`) — detects a
+     fix that resolves a violation by **deleting** a heading / landmark / content
+     instead of repairing it. This is the decisive check for the `semantic`
+     question: V5's `semantic` IFR jumps 0.16 → 0.91, and the guard tells us how
+     much of that is real vs. fixes that simply removed the offending element.
+- The original runs predate this instrumentation, so the fields
   `functional_regression` / `resolved_functional_clean` are absent and must be
   regenerated.
-- Only **V5** needs re-running. For the other four conditions Layer 2 was an
-  enforced gate, so `resolved_functional_clean == resolved` by construction and
-  the report fills that in automatically.
+- **The structure guard applies to ALL five conditions**, not only V5, so the
+  functional-clean IFR is comparable across conditions. To close the `semantic`
+  point specifically, **re-running V5 is sufficient** (that is where the suspect
+  fixes are). For a fully comparable functional-clean table across every
+  condition, do the **full 5-condition re-run** (see the last section).
 
 > The report also now uses **file-level pairing** (n = number of files) instead
 > of violation-level pairing pooled across reps (which inflated n to 681 and the
