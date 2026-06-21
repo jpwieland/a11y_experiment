@@ -64,7 +64,7 @@ from a11y_autofix.config import (
     ScanResult,
 )
 from a11y_autofix.pipeline import Pipeline
-from a11y_autofix.validation.layer2 import run_layer2
+from a11y_autofix.validation.layer2 import run_layer2, check_structure_preserved
 
 from ablation_study.src.ablation_conditions import (
     CONDITIONS,
@@ -575,6 +575,23 @@ async def _repair_file(
                 att.layer2_error_msg = f"layer2_error:{str(l2_exc)[:120]}"
         att.time_validation_s = time.perf_counter() - t_val
 
+        # ── Structure-preservation guard (semantic-deletion detector) ──────────
+        # Applied to EVERY condition (not just V5) so the functional-clean IFR is
+        # comparable across conditions. run_layer2 / the validation gate verify
+        # the programmatic interface but are blind to deleted headings, landmarks,
+        # or content — the dominant risk for `semantic` fixes. structure_pass is
+        # NOT a gate (it never blocks injection or the re-scan); it only annotates
+        # whether a Pa11y-credited fix preserved document structure.
+        structure_pass = True
+        if patched_content:
+            try:
+                sp = check_structure_preserved(current_content, patched_content)
+                structure_pass = sp.passed
+                if not sp.passed and not att.layer2_error_msg:
+                    att.layer2_error_msg = f"structure_regression:{sp.failed_check or 'unknown'}"
+            except Exception:
+                structure_pass = True  # fail-open
+
         att.patch_accepted = patch_accepted
 
         # ── Pa11y re-scan (write → scan → restore) ────────────────────────────
@@ -633,10 +650,12 @@ async def _repair_file(
                 for iss in newly_resolved:
                     resolved_issue_ids.add(iss.issue_id)
                     # A fix counts as functionally clean iff the attempt that
-                    # produced it preserved the component's structure (L2 pass).
-                    # For non-V5 conditions L2 was an enforced gate, so reaching
-                    # the re-scan already implies layer2_functional_pass is True.
-                    if att.layer2_functional_pass:
+                    # produced it preserved BOTH the component's programmatic
+                    # interface (L2: props/exports/handlers) AND its document
+                    # structure (headings/landmarks/content). The structure guard
+                    # is what distinguishes a real `semantic` fix from one that
+                    # merely deleted the offending element.
+                    if att.layer2_functional_pass and structure_pass:
                         resolved_clean_ids.add(iss.issue_id)
 
                 if newly_resolved:

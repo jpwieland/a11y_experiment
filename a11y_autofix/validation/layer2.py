@@ -187,3 +187,82 @@ def run_layer2(original: str, patched: str) -> Layer2Result:
             return result
 
     return Layer2Result(passed=True)
+
+
+# ── Structure-preservation guard (semantic-deletion detector) ──────────────────
+#
+# run_layer2 above verifies the component's PROGRAMMATIC interface (props,
+# exports, handlers). It is blind to the DOCUMENT STRUCTURE — headings,
+# landmarks, and visible content. That blindness is exactly the failure mode
+# suspected for `semantic` violations: a model can make a heading-order or
+# landmark violation "disappear" by DELETING the offending element instead of
+# repairing it. Pa11y then credits the fix (the element is gone, so is the
+# violation) even though the page regressed.
+#
+# check_structure_preserved flags a patch that resolves a violation by reducing
+# document structure. It is intentionally tolerant of ADDITIONS (a real fix may
+# add a landmark or re-tag a heading) and only fails on net REMOVAL beyond a
+# tolerance.
+
+_HEADING_RE  = re.compile(r'<h[1-6][\s/>]|role\s*=\s*["\']heading["\']', re.I)
+_LANDMARK_RE = re.compile(
+    r'<(?:nav|main|header|footer|aside)[\s/>]'
+    r'|role\s*=\s*["\'](?:banner|navigation|main|contentinfo|complementary|region)["\']',
+    re.I,
+)
+_TAG_RE      = re.compile(r'<[A-Za-z]')
+_STRIP_TAGS_RE = re.compile(r'<[^>]+>')
+_STRIP_EXPR_RE = re.compile(r'\{[^{}]*\}')
+
+# Tolerances: a localized accessibility fix should not shrink the file much.
+_TEXT_FLOOR_RATIO    = 0.80   # patched visible text must stay >= 80% of original
+_ELEMENT_FLOOR_RATIO = 0.70   # patched element count must stay >= 70% of original
+
+
+def _visible_text_len(code: str) -> int:
+    """Rough proxy for visible copy: strip JSX tags and {expressions}, count non-space."""
+    t = _STRIP_TAGS_RE.sub(" ", code)
+    t = _STRIP_EXPR_RE.sub(" ", t)
+    return len("".join(t.split()))
+
+
+def check_structure_preserved(original: str, patched: str) -> Layer2Result:
+    """
+    Detect fixes that resolve a violation by deleting document structure.
+
+    Fails (in priority order) when the patch, relative to the original:
+      * removes a heading            -> failed_check="heading_removed"
+      * removes a landmark           -> failed_check="landmark_removed"
+      * truncates visible text >20%  -> failed_check="content_truncation"
+      * drops element count >30%     -> failed_check="element_truncation"
+
+    Counts of zero in the original skip the corresponding sub-check, so the
+    guard never penalises files that had no headings/landmarks to begin with.
+    """
+    t0 = time.perf_counter()
+
+    def _fail(check: str) -> Layer2Result:
+        return Layer2Result(passed=False, failed_check=check,
+                            elapsed_ms=(time.perf_counter() - t0) * 1000)
+
+    h_orig = len(_HEADING_RE.findall(original))
+    h_patch = len(_HEADING_RE.findall(patched))
+    if h_orig > 0 and h_patch < h_orig:
+        return _fail("heading_removed")
+
+    l_orig = len(_LANDMARK_RE.findall(original))
+    l_patch = len(_LANDMARK_RE.findall(patched))
+    if l_orig > 0 and l_patch < l_orig:
+        return _fail("landmark_removed")
+
+    txt_orig = _visible_text_len(original)
+    txt_patch = _visible_text_len(patched)
+    if txt_orig > 0 and txt_patch < _TEXT_FLOOR_RATIO * txt_orig:
+        return _fail("content_truncation")
+
+    el_orig = len(_TAG_RE.findall(original))
+    el_patch = len(_TAG_RE.findall(patched))
+    if el_orig > 0 and el_patch < _ELEMENT_FLOOR_RATIO * el_orig:
+        return _fail("element_truncation")
+
+    return Layer2Result(passed=True, elapsed_ms=(time.perf_counter() - t0) * 1000)
