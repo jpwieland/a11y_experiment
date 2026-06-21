@@ -185,8 +185,13 @@ def plot_ifr_bar(results: StudyResults, output_path: Path) -> None:
     labels = [_PLAIN_LABELS.get(c, c) for c in conds]
     ifrs   = [results.ifr_by_condition.get(c, 0.0) * 100 for c in conds]
     cis    = [results.ifr_ci_by_condition.get(c, (0.0, 0.0)) for c in conds]
-    errs_lo = [ifrs[i] - cis[i][0] * 100 for i in range(len(conds))]
-    errs_hi = [cis[i][1] * 100 - ifrs[i] for i in range(len(conds))]
+    # Clip at 0: with file-level pairing the CI (bootstrap over file means) and
+    # the point estimate (micro-average over violations) measure slightly
+    # different quantities, so the point can fall just outside the CI. matplotlib
+    # rejects negative error bars, so we clamp; the CI text in the table is
+    # authoritative.
+    errs_lo = [max(0.0, ifrs[i] - cis[i][0] * 100) for i in range(len(conds))]
+    errs_hi = [max(0.0, cis[i][1] * 100 - ifrs[i]) for i in range(len(conds))]
 
     fig, ax = plt.subplots(figsize=(9, 4))
 

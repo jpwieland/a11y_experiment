@@ -77,53 +77,89 @@ def build_paired_matrix(
     records: list[dict],
     baseline_condition: str = "full",
     metric: str = "resolved",
+    pairing: str = "file",
 ) -> dict[str, dict]:
     """
-    Build a paired (violation × condition) outcome matrix for Wilcoxon tests.
+    Build a paired outcome matrix for Wilcoxon tests.
 
-    Each violation_id that appears in both the baseline condition and an
-    ablation condition (within the same repetition) forms a natural pair.
+    pairing="file" (default, statistically correct):
+        The experimental unit is the FILE. For each file present in both the
+        baseline and the ablation condition, we average the metric over all of
+        that file's violations and over all repetitions, yielding ONE pair per
+        file (n = number of files). This respects the pre-registered paired
+        design ("same file order per seed") and avoids pseudo-replication —
+        violations within a file and repetitions of the same file are NOT
+        independent, so treating each (violation × rep) as its own pair (the
+        old behaviour) inflates n and the significance.
+
+    pairing="violation" (legacy):
+        Each (violation_id × repetition) common to baseline and ablation forms a
+        pair. Retained for backward comparison only; n is inflated.
 
     Returns:
-        {condition_id: {"baseline": [0/1, ...], "ablation": [0/1, ...]}}
+        {condition_id: {"baseline": [float, ...], "ablation": [float, ...]}}
     """
     from collections import defaultdict
 
-    # Index: (condition_id, repetition, violation_id) → metric value
-    index: dict[tuple, float] = {}
-    for r in records:
-        key = (r["condition_id"], r["repetition"], r["violation_id"])
-        index[key] = float(r[metric]) if metric in r else 0.0
-
-    # Find all violations covered by the baseline across all reps
     ablation_conditions = [
         c for c in {r["condition_id"] for r in records}
         if c != baseline_condition
     ]
-    repetitions = sorted({r["repetition"] for r in records})
 
-    paired: dict[str, dict] = {c: {"baseline": [], "ablation": []} for c in ablation_conditions}
+    if pairing == "violation":
+        index: dict[tuple, float] = {}
+        for r in records:
+            key = (r["condition_id"], r["repetition"], r["violation_id"])
+            index[key] = float(r[metric]) if metric in r else 0.0
 
+        repetitions = sorted({r["repetition"] for r in records})
+        paired = {c: {"baseline": [], "ablation": []} for c in ablation_conditions}
+
+        for cond in ablation_conditions:
+            for rep in repetitions:
+                baseline_vids = {
+                    r["violation_id"] for r in records
+                    if r["condition_id"] == baseline_condition and r["repetition"] == rep
+                }
+                ablation_vids = {
+                    r["violation_id"] for r in records
+                    if r["condition_id"] == cond and r["repetition"] == rep
+                }
+                for vid in sorted(baseline_vids & ablation_vids):
+                    paired[cond]["baseline"].append(index.get((baseline_condition, rep, vid), 0.0))
+                    paired[cond]["ablation"].append(index.get((cond, rep, vid), 0.0))
+        return paired
+
+    if pairing != "file":
+        raise ValueError(f"pairing must be 'file' or 'violation', got {pairing!r}")
+
+    # ── File-level pairing (default) ───────────────────────────────────────────
+    # (condition, file_path) → [sum_metric, n_violation_rows]  pooled over reps
+    sums: dict[tuple, list] = defaultdict(lambda: [0.0, 0])
+    for r in records:
+        fp = r.get("file_path", "")
+        v = float(r[metric]) if metric in r else 0.0
+        cell = sums[(r["condition_id"], fp)]
+        cell[0] += v
+        cell[1] += 1
+
+    def file_metric(cond: str, fp: str) -> float | None:
+        cell = sums.get((cond, fp))
+        if not cell or cell[1] == 0:
+            return None
+        return cell[0] / cell[1]
+
+    paired = {c: {"baseline": [], "ablation": []} for c in ablation_conditions}
     for cond in ablation_conditions:
-        for rep in repetitions:
-            baseline_violations = {
-                r["violation_id"]
-                for r in records
-                if r["condition_id"] == baseline_condition and r["repetition"] == rep
-            }
-            ablation_violations = {
-                r["violation_id"]
-                for r in records
-                if r["condition_id"] == cond and r["repetition"] == rep
-            }
-            common = baseline_violations & ablation_violations
-
-            for vid in sorted(common):
-                b_val = index.get((baseline_condition, rep, vid), 0.0)
-                a_val = index.get((cond, rep, vid), 0.0)
-                paired[cond]["baseline"].append(b_val)
-                paired[cond]["ablation"].append(a_val)
-
+        baseline_files = {fp for (c, fp) in sums if c == baseline_condition}
+        ablation_files = {fp for (c, fp) in sums if c == cond}
+        for fp in sorted(baseline_files & ablation_files):
+            b = file_metric(baseline_condition, fp)
+            a = file_metric(cond, fp)
+            if b is None or a is None:
+                continue
+            paired[cond]["baseline"].append(b)
+            paired[cond]["ablation"].append(a)
     return paired
 
 
@@ -261,7 +297,7 @@ def holm_bonferroni_correction(
     reject, p_corrected, _, _ = multipletests(
         p_values, alpha=alpha, method="holm"
     )
-    return list(p_corrected.astype(float)), list(reject)
+    return list(p_corrected.astype(float)), [bool(x) for x in reject]
 
 
 # ── Main analysis pipeline ─────────────────────────────────────────────────────
@@ -282,6 +318,7 @@ def run_analysis(
     n_bootstrap: int = 10_000,
     ci_level: float = 0.95,
     metrics_to_test: list[str] | None = None,
+    pairing: str = "file",
 ) -> StudyResults:
     """
     Run the full statistical analysis pipeline.
@@ -305,7 +342,14 @@ def run_analysis(
     if not records:
         raise FileNotFoundError(f"No violations.jsonl files found under {results_dir}")
 
-    # IFR per condition (macro-averaged over reps then micro-averaged over violations)
+    # IFR per condition. The point estimate must match the unit of the paired
+    # test so that the IFR table, its CI, and the Wilcoxon result are mutually
+    # consistent:
+    #   pairing="file"      → macro-average (mean of per-file IFRs). This is the
+    #                         honest estimate: it does not let a few violation-
+    #                         heavy files dominate, and it brackets correctly
+    #                         within the file-level bootstrap CI.
+    #   pairing="violation" → micro-average over all violation rows (legacy).
     ifr_by_condition: dict[str, float] = {}
     ifr_ci_by_cond:   dict[str, tuple[float, float]] = {}
 
@@ -313,11 +357,24 @@ def run_analysis(
 
     for cond in all_conditions:
         sub = [r for r in records if r["condition_id"] == cond]
-        outcomes = [float(r["resolved"]) for r in sub]
-        ifr_by_condition[cond] = float(np.mean(outcomes)) if outcomes else 0.0
+        if not sub:
+            ifr_by_condition[cond] = 0.0
+            continue
+        if pairing == "file":
+            from collections import defaultdict as _dd
+            per_file: dict[str, list] = _dd(lambda: [0.0, 0])
+            for r in sub:
+                cell = per_file[r.get("file_path", "")]
+                cell[0] += float(r["resolved"])
+                cell[1] += 1
+            file_ifrs = [s / n for s, n in per_file.values() if n]
+            ifr_by_condition[cond] = float(np.mean(file_ifrs)) if file_ifrs else 0.0
+        else:
+            outcomes = [float(r["resolved"]) for r in sub]
+            ifr_by_condition[cond] = float(np.mean(outcomes)) if outcomes else 0.0
 
     # Primary pairwise tests (resolved metric)
-    paired_matrix = build_paired_matrix(records, baseline_condition, "resolved")
+    paired_matrix = build_paired_matrix(records, baseline_condition, "resolved", pairing=pairing)
     ablation_conditions = [c for c in all_conditions if c != baseline_condition]
 
     raw_p_values: list[float] = []
@@ -381,11 +438,20 @@ def run_analysis(
         }
 
     # Bootstrap CIs on IFR per condition
-    paired_all = build_paired_matrix(records, baseline_condition, "resolved")
+    paired_all = build_paired_matrix(records, baseline_condition, "resolved", pairing=pairing)
     for cond in all_conditions:
         if cond == baseline_condition:
-            b_outcomes = [float(r["resolved"]) for r in records if r["condition_id"] == cond]
-            # Self-CI via bootstrap
+            # Self-CI via bootstrap, over the SAME unit as the point estimate.
+            if pairing == "file":
+                from collections import defaultdict as _dd
+                _pf: dict[str, list] = _dd(lambda: [0.0, 0])
+                for r in records:
+                    if r["condition_id"] == cond:
+                        cell = _pf[r.get("file_path", "")]
+                        cell[0] += float(r["resolved"]); cell[1] += 1
+                b_outcomes = [s / n for s, n in _pf.values() if n]
+            else:
+                b_outcomes = [float(r["resolved"]) for r in records if r["condition_id"] == cond]
             rng = np.random.default_rng(42)
             boot = [
                 float(np.mean(rng.choice(b_outcomes, size=len(b_outcomes), replace=True)))
@@ -420,6 +486,7 @@ def run_analysis(
         "n_bootstrap": n_bootstrap,
         "ci_level": ci_level,
         "all_conditions": all_conditions,
+        "pairing_unit": pairing,
     }
 
     return StudyResults(

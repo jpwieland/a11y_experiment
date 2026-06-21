@@ -50,6 +50,7 @@ _GPU_POLL_INTERVAL = 4  # poll GPU every N seconds (nvidia-smi has ~200ms startu
 # ── Condition ordering / labels ────────────────────────────────────────────────
 
 _ORDER = [
+    # Component ablation conditions
     "full",
     "minus_role",
     "minus_user_impact",
@@ -58,20 +59,32 @@ _ORDER = [
     "minus_few_shot",
     "minus_output_format",
     "raw_baseline",
+    # Architecture ablation conditions (pipeline format)
+    "arch_full",
+    "arch_no_reflection",
+    "arch_no_few_shot",
+    "arch_no_wcag_guidelines",
+    "arch_no_internal_validation",
 ]
 _SHORT = {
-    "full":                "Full",
-    "minus_role":          "−Role",
-    "minus_user_impact":   "−UserImpact",
-    "minus_code_context":  "−CodeCtx",
-    "minus_constraints":   "−Constraints",
-    "minus_few_shot":      "−FewShot",
-    "minus_output_format": "−OutFmt",
-    "raw_baseline":        "RawBaseline",
+    "full":                       "Full",
+    "minus_role":                 "−Role",
+    "minus_user_impact":          "−UserImpact",
+    "minus_code_context":         "−CodeCtx",
+    "minus_constraints":          "−Constraints",
+    "minus_few_shot":             "−FewShot",
+    "minus_output_format":        "−OutFmt",
+    "raw_baseline":               "RawBaseline",
+    "arch_full":                  "V1:Full",
+    "arch_no_reflection":         "V2:−Reflect",
+    "arch_no_few_shot":           "V3:−FewShot",
+    "arch_no_wcag_guidelines":    "V4:−WCAG",
+    "arch_no_internal_validation":"V5:−Validation",
 }
 _CONDITION_COLOR = {
-    "full":        "bold cyan",
+    "full":       "bold cyan",
     "raw_baseline":"bold red",
+    "arch_full":  "bold cyan",
 }
 
 
@@ -136,6 +149,35 @@ def _load_json(path: Path) -> dict | None:
         return None
 
 
+def _active_condition_order(current: dict | None, summaries: list[dict]) -> list[str]:
+    """
+    Return the subset of _ORDER relevant to the running study.
+    Detects study type from the running condition or completed summaries.
+    Falls back to all conditions if neither is available.
+    """
+    _arch   = [c for c in _ORDER if c.startswith("arch_")]
+    _comp   = [c for c in _ORDER if not c.startswith("arch_")]
+
+    cids: set[str] = set()
+    if current:
+        cid = current.get("condition_id", "")
+        if cid:
+            cids.add(cid)
+    for s in summaries:
+        cid = s.get("condition_id", "")
+        if cid:
+            cids.add(cid)
+
+    has_arch = any(c.startswith("arch_") for c in cids)
+    has_comp = any(not c.startswith("arch_") for c in cids)
+
+    if has_arch and not has_comp:
+        return _arch
+    if has_comp and not has_arch:
+        return _comp
+    return _ORDER
+
+
 def load_study_state(results_dir: Path) -> dict[str, Any]:
     """
     Aggregate all status.json and summary.json files into one state dict.
@@ -147,13 +189,15 @@ def load_study_state(results_dir: Path) -> dict[str, Any]:
     summaries = [s for f in summary_files if (s := _load_json(f))]
 
     study_meta = current or {}
+    active_order = _active_condition_order(current, summaries)
 
     return {
-        "current":     current,
-        "summaries":   summaries,
-        "study_start": study_meta.get("study_start", ""),
-        "cells_total": study_meta.get("cells_total", 0),
-        "cells_done":  len(summaries),
+        "current":      current,
+        "summaries":    summaries,
+        "study_start":  study_meta.get("study_start", ""),
+        "cells_total":  study_meta.get("cells_total", 0),
+        "cells_done":   len(summaries),
+        "active_order": active_order,
     }
 
 
@@ -232,7 +276,7 @@ def _overall_progress_panel(state: dict, elapsed_s: float) -> Panel:
 
 
 def _cell_grid_panel(state: dict) -> Panel:
-    """3×8 grid of model × condition cells. ✓ = done, ● = running, · = pending."""
+    """Grid of model × condition cells. ✓ = done, ● = running, · = pending."""
     summaries = state.get("summaries", [])
     current   = state.get("current") or {}
 
@@ -240,19 +284,32 @@ def _cell_grid_panel(state: dict) -> Panel:
     for s in summaries:
         done_keys.add((s.get("condition_id"), s.get("model_name"), s.get("repetition")))
 
-    models = ["qwen2.5-coder-3b", "codellama-7b", "qwen2.5-coder-7b"]
+    # Detect models from summaries + current run (dynamic — works for both studies)
+    _model_order = ["qwen2.5-coder-3b", "codellama-7b", "qwen2.5-coder-7b"]
+    all_models_seen = ({s.get("model_name") for s in summaries} | {current.get("model")}) - {None, ""}
+    seen_models: list[str] = []
+    for m in _model_order:
+        if m in all_models_seen:
+            seen_models.append(m)
+    for m in sorted(all_models_seen):
+        if m not in seen_models:
+            seen_models.append(m)
+    models = seen_models if seen_models else _model_order
+
     model_short = {
         "qwen2.5-coder-3b": "Qwen3B",
         "codellama-7b":      "CL7B",
         "qwen2.5-coder-7b":  "Qwen7B",
     }
 
+    active_order = state.get("active_order", _ORDER)
+
     t = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold dim")
     t.add_column("Condition", style="dim", min_width=14)
     for m in models:
-        t.add_column(model_short[m], justify="center", min_width=8)
+        t.add_column(model_short.get(m, m[:7]), justify="center", min_width=8)
 
-    for cid in _ORDER:
+    for cid in active_order:
         cells = []
         for model in models:
             rep_chars = []
@@ -336,6 +393,12 @@ def _current_run_panel(state: dict) -> Panel:
     last_total = current.get("last_cell_total")
     last_wall  = current.get("last_cell_wall_s")
 
+    # Pipeline runner tracks files; single-violation runner tracks violations
+    files_done  = current.get("files_done")
+    files_total = current.get("files_total")
+    progress_label = "Violations:" if files_total is None else "Violations:"
+    files_str   = f"  ({files_done}/{files_total} files)" if files_total else ""
+
     t = Table.grid(padding=(0, 1))
     t.add_column(style="dim", min_width=16)
     t.add_column(style="bold")
@@ -344,9 +407,9 @@ def _current_run_panel(state: dict) -> Panel:
     t.add_row("Rep:",       f"Rep {rep}")
     t.add_row("Stage:",     Text(stage, style="yellow"))
     t.add_row("", "")
-    t.add_row("Violations:", Text(f"{v_done} / {v_total}", style="white"))
-    t.add_row("Progress:",   Text(f"[{bar}] {v_done/max(v_total,1)*100:.0f}%", style="bright_green"))
-    t.add_row("Attempt:",    f"{cur_att} / {max_att}")
+    t.add_row(progress_label, Text(f"{v_done} / {v_total}{files_str}", style="white"))
+    t.add_row("Progress:",  Text(f"[{bar}] {v_done/max(v_total,1)*100:.0f}%", style="bright_green"))
+    t.add_row("Attempt:",   f"{cur_att} / {max_att}")
     t.add_row("", "")
     t.add_row("Live IFR:",   Text(live_ifr, style="bold magenta"))
     t.add_row("Cell ETA:",   Text(cell_eta_str, style="magenta"))
@@ -469,7 +532,18 @@ def _ifr_table_panel(state: dict) -> Panel:
         ifr   = s.get("ifr", float("nan"))
         data[cid][model].append(ifr)
 
-    models = ["qwen2.5-coder-3b", "codellama-7b", "qwen2.5-coder-7b"]
+    # Detect models from summaries (dynamic — works for both studies)
+    _model_order = ["qwen2.5-coder-3b", "codellama-7b", "qwen2.5-coder-7b"]
+    all_models_seen = {s.get("model_name") for s in summaries} - {None}
+    seen_models: list[str] = []
+    for m in _model_order:
+        if m in all_models_seen:
+            seen_models.append(m)
+    for m in sorted(all_models_seen):
+        if m not in seen_models:
+            seen_models.append(m)
+    models = seen_models or _model_order
+
     model_short = {
         "qwen2.5-coder-3b": "Qwen3B",
         "codellama-7b":      "CL7B",
@@ -482,12 +556,14 @@ def _ifr_table_panel(state: dict) -> Panel:
         t.add_column(model_short[m], justify="right", min_width=9)
     t.add_column("Reps", justify="center", min_width=5)
 
+    active_order = state.get("active_order", _ORDER)
+
     best: dict[str, float] = {}
     for m in models:
-        vals = [_mean(data[cid][m]) for cid in _ORDER if data[cid][m]]
+        vals = [_mean(data[cid][m]) for cid in active_order if data[cid][m]]
         best[m] = max(vals) if vals else 0.0
 
-    for cid in _ORDER:
+    for cid in active_order:
         if not any(data[cid][m] for m in models):
             continue
 

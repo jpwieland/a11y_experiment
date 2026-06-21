@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ablation_study.src.metrics_schema import (
+        ArchFileAttemptRecord,
         AttemptRecord,
         FileRecord,
         RunSummary,
@@ -60,6 +61,9 @@ class MetricsCollector:
         self._files_path      = self.run_dir / "files.jsonl"
         self._summary_path    = self.run_dir / "summary.json"
         self._prompts_path    = self.run_dir / "prompts.jsonl"
+        self._progress_path   = self.run_dir / "progress.jsonl"
+        self._checkpoint_path = self.run_dir / "checkpoint.json"
+        self._run_meta_path   = self.run_dir / "run_meta.json"
 
         self._write_prompt_log     = write_prompt_log
         self._prompt_log_max_chars = prompt_log_max_chars
@@ -69,11 +73,19 @@ class MetricsCollector:
         self._lock_violations = threading.Lock()
         self._lock_files      = threading.Lock()
         self._lock_prompts    = threading.Lock()
+        self._lock_progress   = threading.Lock()
 
     # ── Public write methods ──────────────────────────────────────────────────
 
     def write_attempt(self, record: "AttemptRecord") -> None:
         self._append_jsonl(self._attempts_path, self._lock_attempts, record)
+
+    def write_file_attempt(self, record: "ArchFileAttemptRecord") -> None:
+        """Append one ArchFileAttemptRecord to file_attempts.jsonl (arch pipeline format)."""
+        path = self.run_dir / "file_attempts.jsonl"
+        with self._lock_attempts:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(dataclasses.asdict(record), default=str) + "\n")  # type: ignore[arg-type]
 
     def write_violation(self, record: "ViolationRecord") -> None:
         self._append_jsonl(self._violations_path, self._lock_violations, record)
@@ -97,16 +109,47 @@ class MetricsCollector:
     ) -> None:
         if not self._write_prompt_log:
             return
+        prompt_truncated   = prompt   if self._prompt_log_max_chars == 0 else prompt[:self._prompt_log_max_chars]
+        response_truncated = response if self._prompt_log_max_chars == 0 else response[:self._prompt_log_max_chars]
         entry = {
             "timestamp": _now_iso(),
             "violation_id": violation_id,
             "attempt_number": attempt_number,
-            "prompt": prompt[: self._prompt_log_max_chars],
-            "response": response[: self._prompt_log_max_chars],
+            "prompt": prompt_truncated,
+            "response": response_truncated,
         }
         with self._lock_prompts:
             with self._prompts_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def write_run_meta(self, meta: dict) -> None:
+        """Escrito UMA VEZ no início do run. Contém config, condition, seed, git_hash."""
+        tmp = self._run_meta_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+        tmp.replace(self._run_meta_path)
+
+    def write_checkpoint(self, stats: dict) -> None:
+        """
+        Checkpoint incremental — sobrescreve checkpoint.json após cada arquivo.
+        Garante que um crash pós-arquivo não perde o progresso do run.
+        stats deve incluir: files_done, files_total, violations_done, violations_resolved,
+        ifr_running, last_file, last_file_ifr, timestamp.
+        """
+        payload = {"checkpoint_type": "file_complete", **stats}
+        tmp = self._checkpoint_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        tmp.replace(self._checkpoint_path)
+
+    def write_progress(self, entry: dict) -> None:
+        """
+        Append de uma linha em progress.jsonl após cada violação.
+        Permite calcular curva de IFR cumulativo e detectar o ponto de crash.
+        entry deve incluir: ts, violations_done, violations_resolved, ifr_running, violation_id.
+        """
+        line = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
+        with self._lock_progress:
+            with self._progress_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -127,6 +170,8 @@ def aggregate_violation_record(
     condition_id: str,
     model_name: str,
     repetition: int,
+    seed: int = 0,
+    git_hash: str = "",
 ) -> "ViolationRecord":
     """Build a ViolationRecord by collapsing a list of AttemptRecords."""
     from ablation_study.src.metrics_schema import ViolationRecord
@@ -150,6 +195,8 @@ def aggregate_violation_record(
         condition_id=condition_id,
         model_name=model_name,
         repetition=repetition,
+        seed=seed,
+        git_hash=git_hash,
         violation_id=first.violation_id,
         file_path=first.file_path,
         wcag_criterion=first.wcag_criterion,
@@ -163,6 +210,8 @@ def aggregate_violation_record(
         attempt1_success=attempts[0].attempt_success if attempts else False,
         attempt1_failure_layer=attempts[0].failure_layer if attempts else None,
         attempt1_failure_type=attempts[0].failure_type if attempts else "",
+        validation_bypassed=any(a.validation_bypassed for a in attempts),
+        reflection_feedback_active=all(a.reflection_feedback_active for a in attempts),
         tokens_output_total=tokens_out,
         tokens_input_estimated_total=tokens_in,
         time_total_s=total_time,
@@ -355,6 +404,16 @@ def build_run_summary(
         mean_tokens_input_estimated=(
             sum(a.tokens_input_estimated for a in attempt_records) / n_attempts
             if n_attempts else 0.0
+        ),
+        mean_response_chars=(
+            sum(a.response_chars for a in attempt_records) / n_attempts
+            if n_attempts else 0.0
+        ),
+        n_validation_bypassed=sum(
+            1 for a in attempt_records if a.validation_bypassed
+        ),
+        n_reflection_feedback_inactive=sum(
+            1 for a in attempt_records if not a.reflection_feedback_active
         ),
     )
 

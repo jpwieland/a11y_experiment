@@ -1,0 +1,106 @@
+# arch_ablation_pipeline_config.yaml
+# ═════════════════════════════════════════════════════════════════════════════
+# Arch ablation study — PIPELINE FORMAT
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs the 5 architecture conditions in the same format as the main experiment:
+#   • All violations in a file sent to the LLM in a single call
+#   • L1-L4 validation gates each attempt (bypassed for V5)
+#   • Pa11y browser re-scan as the oracle (same as main pipeline)
+#   • File restored to original content after each processing session
+#
+# This produces IFR values directly comparable to the main experiment (~54%
+# baseline), avoiding the ~40 pp ceiling effect of the single-violation format.
+#
+# Statistical design:
+#   5 conditions × 1 model × 3 repetitions = 15 cells
+#   Paired Wilcoxon signed-rank, Holm-Bonferroni, 4 comparisons (V2-V5 vs V1)
+#
+# Oracle: Pa11y re-scan  (verify_fixes_by_rescan = true)
+# Runner: ablation_study/src/arch_ablation_pipeline_runner.py
+# ═════════════════════════════════════════════════════════════════════════════
+
+experiment:
+  name: "arch_ablation_pipeline"
+  description: >
+    Architecture ablation in main-experiment format.
+    Tests which pipeline components (reflection feedback, few-shot,
+    WCAG semantic guidelines, internal validation) drive repair performance,
+    using the same oracle and prompt structure as the main experiment.
+  version: "1.0.0"
+  researcher: "jpvbwieland"
+  hypothesis: >
+    V2-V5 conditions will each show statistically significant lower IFR than V1
+    (arch_full) after Holm-Bonferroni correction, establishing individual
+    contributions of each architecture component.
+
+# ── Conditions ────────────────────────────────────────────────────────────────
+conditions:
+  # Only arch_* conditions are valid for this runner.
+  # The runner raises ValueError if a non-arch condition is listed.
+  active:
+    - arch_full                   # V1: full pipeline (control)
+    - arch_no_reflection          # V2: no rejection feedback on retries
+    - arch_no_few_shot            # V3: zero-shot (no few-shot examples)
+    - arch_no_wcag_guidelines     # V4: rule_id + WCAG number only
+    - arch_no_internal_validation # V5: L1-L3 bypassed; Pa11y measures true IFR
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  primary: "qwen2.5-coder-7b"
+  all:
+    - "qwen2.5-coder-7b"
+  # Same model as main experiment for direct comparability
+
+# ── Repetitions ───────────────────────────────────────────────────────────────
+repetitions:
+  n: 3
+  seeds:
+    - 42     # rep 1
+    - 137    # rep 2
+    - 2025   # rep 3
+  # Seeds control corpus shuffle order; identical to ablation_config.yaml
+  # so paired comparisons (file-level IFR) are over the same file sequence.
+
+# ── Agent / LLM settings ──────────────────────────────────────────────────────
+agent:
+  max_retries_per_file: 3       # attempts per file (matches main pipeline default)
+  timeout_per_attempt_s: 180    # per-LLM-call timeout
+  temperature: 0.1              # matches main experiment temperature
+
+# ── Corpus ────────────────────────────────────────────────────────────────────
+corpus:
+  # Relative path from the ablation_study/ directory to scan_results.json files
+  corpus_results_dir: "../dataset/results"
+
+  # Optional: path to a YAML file listing selected project paths.
+  # Uses the same canonical 36-project selection as the main experiment.
+  project_selection_file: "../experiments/chosen_experiment.yaml"
+
+  # Subset settings (null = use full corpus)
+  subset_size: null
+  stratify_subset: true
+
+# ── Validation ────────────────────────────────────────────────────────────────
+validation:
+  # Pa11y re-scan is mandatory for this format — never set to false.
+  verify_fixes_by_rescan: true
+
+  # Whether to run L1-L4 validation before Pa11y re-scan.
+  # For arch_no_internal_validation this is overridden by the condition flag.
+  internal_validation: true
+
+  # Wcag level passed to Pa11y on re-scan (must match corpus scan level)
+  wcag_level: "WCAG2AA"
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output:
+  # Pipeline results go here — separate from single-violation results/arch_ablation/
+  results_dir: "results/arch_ablation_pipeline"
+
+  # Write one row per LLM prompt to a per-run prompt log (useful for auditing)
+  write_prompt_log: true
+  # 0 = full prompt; >0 = truncate to N chars
+  prompt_log_max_chars: 0
+
+  # Level of logging verbosity: "quiet" | "normal" | "verbose"
+  verbosity: "normal"

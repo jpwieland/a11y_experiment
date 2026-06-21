@@ -1,0 +1,149 @@
+# ablation_study/config/arch_ablation_config.yaml
+#
+# Architectural ablation study: isolates the contribution of each pipeline
+# component to IFR (Issue Fix Rate) and SR (Success Rate).
+#
+# Design rationale (methodology Section 4.2):
+#   Five conditions share an identical corpus, model, and temperature so that
+#   the only source of variation is the component being ablated.
+#
+#   V1 arch_full               — all components active (control)
+#   V2 arch_no_reflection      — retry feedback loop disabled
+#   V3 arch_no_few_shot        — zero-shot prompting (no Component 5)
+#   V4 arch_no_wcag_guidelines — raw rule_id only, no semantic descriptions
+#   V5 arch_no_internal_validation — L1-L3 bypassed; oracle = non-empty output
+#
+# Statistical design:
+#   4 pairwise tests (V2-V5 vs V1), Wilcoxon signed-rank, Holm-Bonferroni.
+#   All conditions processed in the same file order per seed (paired design).
+#
+# Reproducibility:
+#   Seeds are fixed and pre-determined. Each record in the output JSONL contains
+#   run_id, seed, git_hash, and condition_id for full auditability.
+
+experiment:
+  name: "architectural_component_ablation_v1"
+  description: >
+    Architectural ablation study isolating the contribution of (1) reflection
+    feedback loop, (2) few-shot examples, (3) WCAG semantic guidelines, and
+    (4) internal validation pipeline to IFR and SR. Conditions V2-V5 are each
+    compared against the full-pipeline control (V1) using Wilcoxon signed-rank
+    with Holm-Bonferroni correction.
+  version: "1.0.0"
+  paper_section: "Section 4.3 / Architectural Ablation"
+
+# ── Corpus ───────────────────────────────────────────────────────────────────
+corpus:
+  corpus_results_dir: "../dataset/results"
+  # Use the same 36-project canonical corpus as the main experiment.
+  # Set to null to run on the full corpus (all available projects).
+  project_selection_file: "../experiments/chosen_experiment.yaml"
+  # Exclude files with zero violations: they contribute nothing to IFR
+  # and inflate token cost without informative signal.
+  include_regression_guards: false
+  # null = use all selected projects (recommended for statistical power)
+  subset_size: null
+  # Stratify by WCAG category to maintain category distribution across reps
+  stratify_subset: true
+
+# ── Models ───────────────────────────────────────────────────────────────────
+# Run all conditions with the primary model from the main experiment.
+# Extend to all_models for cross-model interaction analysis (exploratory).
+models:
+  primary: "qwen2.5-coder-7b"
+  all:
+    - "qwen2.5-coder-7b"
+    # Uncomment to run on additional models (exploratory; not confirmatory):
+    # - "codellama-7b"
+    # - "qwen2.5-coder-3b"
+  hardware_constraint_gb: 8
+
+# ── Repetitions & Randomization ─────────────────────────────────────────────
+repetitions:
+  n: 3
+  # Seeds are fixed pre-determined (not chosen post-hoc) for replication.
+  # All conditions within a repetition use the same seed so that file order
+  # effects are held constant — this is what makes the Wilcoxon test paired.
+  seeds: [42, 137, 2025]
+
+# ── Conditions ───────────────────────────────────────────────────────────────
+# The five architecture conditions. The runner maps these to AblationCondition
+# objects in ablation_conditions.py via the CONDITIONS registry.
+conditions:
+  active:
+    - arch_full                  # V1: control (all components)
+    - arch_no_reflection         # V2: no retry feedback
+    - arch_no_few_shot           # V3: zero-shot
+    - arch_no_wcag_guidelines    # V4: raw rule_id only
+    - arch_no_internal_validation # V5: bypass L1-L3
+
+# ── Agent Configuration ──────────────────────────────────────────────────────
+agent:
+  primary: "swe-agent"
+  fallback: "openhands"
+  # max_retries: keep at 3 for all conditions, including arch_no_reflection.
+  # Reducing retries in V2 would confound "no feedback" with "fewer attempts".
+  # The distinction is: V2 retries 3x but without rejection-reason context.
+  max_retries_per_file: 3
+  max_issues_per_session: 4
+  temperature: 0.1
+  # Fixed temperature for all conditions prevents model stochasticity from
+  # being a confound. 0.1 is the value used in the main experiment.
+  timeout_per_attempt_s: 120
+  # Arquivos processados em paralelo via asyncio.Semaphore.
+  # 1 = sequencial (padrão, seguro com qualquer config do Ollama).
+  # 2-4 = paralelo; requer OLLAMA_NUM_PARALLEL >= N no servidor Ollama.
+  # Para ativar: pkill ollama && OLLAMA_NUM_PARALLEL=2 ollama serve
+  max_concurrent_violations: 1
+
+# ── Validation Pipeline ──────────────────────────────────────────────────────
+# All four layers remain active for all conditions EXCEPT arch_no_internal_validation.
+# For V5, the runner bypasses L1-L3 at the condition level (via skip_internal_validation
+# flag in ComponentFlags). Disabling layers here for other conditions would confound
+# prompt effects with oracle effects.
+validation:
+  layer1_syntax: true
+  layer2_functional: true
+  layer3_domain: true
+  layer4_quality: true
+  # For arch_no_internal_validation: any non-empty LLM code output is accepted.
+  # The layer fields above are overridden by ComponentFlags.skip_internal_validation.
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output:
+  results_dir: "results/arch_ablation"
+  format: "jsonl"
+  write_summary: true
+  write_prompt_log: true
+  prompt_log_max_chars: 0    # 0 = sem truncamento; salva prompt e resposta completos
+
+# ── Statistical Analysis ─────────────────────────────────────────────────────
+statistics:
+  # Primary confirmatory test: IFR difference between each ablated condition
+  # and the full-pipeline control.
+  primary_metric: "ifr"
+  baseline_condition: "arch_full"
+  secondary_metrics:
+    - "sr_violation_files"           # file-level SR (all issues resolved)
+    - "mttr_s"                       # mean time to repair
+    - "tokens_output_per_fix"        # output tokens per resolved issue
+    - "layer1_fail_rate"             # syntax rejection rate (informative for V5)
+    - "layer2_fail_rate"             # functional regression rate
+    - "layer3_fail_rate"             # domain heuristic rejection rate
+    - "retry_exhaustion_rate"        # fraction exhausting max_retries
+  # Inferential settings (pre-registered; do not change post data collection)
+  test: "wilcoxon_signed_rank"
+  effect_size: "rank_biserial_r"
+  correction: "holm_bonferroni"      # 4 pairwise tests (V2-V5 vs V1)
+  ci_method: "bootstrap"
+  ci_n_bootstrap: 10000
+  ci_level: 0.95
+  alpha: 0.05
+  # Hypotheses (one per ablated condition):
+  #   H_V2: arch_no_reflection IFR < arch_full IFR (reflection feedback helps)
+  #   H_V3: arch_no_few_shot IFR < arch_full IFR (few-shot examples help)
+  #   H_V4: arch_no_wcag_guidelines IFR < arch_full IFR (WCAG semantic context helps)
+  #   H_V5: arch_no_internal_validation IFR != arch_full IFR (validation pipeline net effect)
+  # All tests are two-sided. H_V5 is two-sided because the pipeline could
+  # over-reject valid patches (lower IFR) or under-reject bad ones (higher apparent IFR).
+  alternative: "two-sided"

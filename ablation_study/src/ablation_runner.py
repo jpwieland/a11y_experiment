@@ -1129,6 +1129,7 @@ class AblationAttemptRunner:
         n_tools: int,
         tools_detected_by: list[str],
         wcag_category: str,
+        previous_rejection: dict | None = None,
     ) -> AttemptRecord:
         record = AttemptRecord(
             run_id=self.run_id,
@@ -1149,17 +1150,22 @@ class AblationAttemptRunner:
             timestamp_start=_now_iso(),
             condition_components_active=components_active(self.condition),
         )
+        record.reflection_feedback_active = self.condition.flags.reflection_feedback
 
         prompt = build_ablation_prompt(
-            task, self.condition, issue, confidence, n_tools
+            task, self.condition, issue, confidence, n_tools,
+            previous_rejection=previous_rejection,
         )
         record.prompt_char_count = len(prompt)
         record.tokens_input_estimated = len(prompt) // 4
 
         t_total_start = time.perf_counter()
 
+        _response_text   = ""
+        _patched_content = ""
+        record._debug_prompt = prompt  # non-dataclass attr, usado pelo prompt log
         try:
-            result = await asyncio.wait_for(
+            _response_text, _patched_content = await asyncio.wait_for(
                 self._call_agent(task, issue, prompt, record),
                 timeout=self.timeout_s,
             )
@@ -1173,6 +1179,10 @@ class AblationAttemptRunner:
             record.failure_type = "invalid_patch"
             record.layer1_error_msg = str(exc)[:500]
             _vprint(f"        [bold red]LLM ERROR: {str(exc)[:200]}[/bold red]")
+
+        record.response_chars  = len(_response_text)
+        record.patched_excerpt = _patched_content[:3000]
+        record._debug_response = _response_text  # non-dataclass attr, usado pelo prompt log
 
         record.time_total_s = time.perf_counter() - t_total_start
         record.timestamp_end = _now_iso()
@@ -1224,7 +1234,7 @@ class AblationAttemptRunner:
         issue: A11yIssue,
         prompt: str,
         record: AttemptRecord,
-    ) -> None:
+    ) -> tuple[str, str]:
         """
         Call the LLM and run validation layers.
 
@@ -1237,8 +1247,9 @@ class AblationAttemptRunner:
         response_text, llm_metrics = await self.pipeline.llm_client.complete_with_metrics(
             system=(
                 "You are an expert React accessibility engineer. "
-                "Fix the accessibility violation in the provided component "
-                "while preserving all existing functionality."
+                "Fix the accessibility violation in the provided file "
+                "while preserving all existing functionality. "
+                "Always return the complete file, not just the changed element."
             ),
             user=prompt,
             temperature=self.condition.flags.role_definition and 0.2 or 0.2,
@@ -1262,6 +1273,8 @@ class AblationAttemptRunner:
         await self._run_validation(task, patched_content, record)
         record.time_validation_s = time.perf_counter() - t_val
 
+        return response_text, patched_content
+
     async def _run_validation(
         self,
         task: AgentTask,
@@ -1269,6 +1282,21 @@ class AblationAttemptRunner:
         record: AttemptRecord,
     ) -> None:
         """Run layers 1-4 via ValidationPipeline.validate() and populate record fields."""
+        # V5 (arch_no_internal_validation): bypass L1-L3; success = non-empty code output.
+        # L4 is still logged but does not block attempt_success (same soft-gate behaviour).
+        if self.condition.flags.skip_internal_validation:
+            record.validation_bypassed = True
+            non_empty = bool(response.strip())
+            record.layer1_syntax_pass   = non_empty
+            record.layer2_functional_pass = non_empty
+            record.layer3_domain_pass   = non_empty
+            record.layer4_quality_pass  = non_empty
+            if not non_empty:
+                record.failure_layer = 1
+                record.failure_type  = "empty_response"
+                record.layer1_error_msg = "LLM returned empty output (V5 bypass)"
+            return
+
         from a11y_autofix.validation.pipeline import ValidationPipeline
 
         vp = ValidationPipeline()
@@ -1372,6 +1400,9 @@ class SingleRunOrchestrator:
         self.max_retries = agent_cfg.get("max_retries_per_file", 3)
         self.timeout_s   = agent_cfg.get("timeout_per_attempt_s", 120)
         self.temperature = agent_cfg.get("temperature", 0.2)
+        # >1 enables file-level concurrency via asyncio.Semaphore.
+        # Requires OLLAMA_NUM_PARALLEL >= max_concurrent_violations.
+        self.max_concurrent_violations = agent_cfg.get("max_concurrent_violations", 1)
 
         corpus_cfg = config.get("corpus", {})
         self.include_guards = corpus_cfg.get("include_regression_guards", False)
@@ -1437,6 +1468,30 @@ class SingleRunOrchestrator:
             prompt_log_max_chars=self.prompt_log_max_chars,
         )
 
+        collector.write_run_meta({
+            "run_id":           self.run_id,
+            "condition_id":     self.condition.id,
+            "condition_label":  self.condition.label,
+            "condition_flags":  {
+                "reflection_feedback":       self.condition.flags.reflection_feedback,
+                "wcag_semantic":             self.condition.flags.wcag_semantic,
+                "skip_internal_validation":  self.condition.flags.skip_internal_validation,
+                "few_shot":                  self.condition.flags.few_shot,
+                "role_definition":           self.condition.flags.role_definition,
+                "output_format":             self.condition.flags.output_format,
+            },
+            "model_name":       self.model_name,
+            "repetition":       self.repetition,
+            "seed":             self.seed,
+            "git_hash":         self.git_hash,
+            "max_retries":      self.max_retries,
+            "temperature":      self.temperature,
+            "started_at":       _now_iso(),
+            "config_agent":     self.config.get("agent", {}),
+            "config_corpus":    self.config.get("corpus", {}),
+            "config_statistics":self.config.get("statistics", {}),
+        })
+
         pipeline = self._build_pipeline()
         attempt_runner = AblationAttemptRunner(
             pipeline=pipeline,
@@ -1450,127 +1505,38 @@ class SingleRunOrchestrator:
         )
 
         all_attempts:   list[AttemptRecord] = []
-        all_violations = []
-        all_files       = []
+        all_violations: list = []
+        all_files:      list = []
 
         t_wall_start = time.perf_counter()
         ts_start = _now_iso()
 
-        scan_cache: dict[str, Any] = {}
-        violations_done = 0
-        violations_resolved = 0
+        # Shared mutable counters — safe in asyncio (single-threaded cooperative scheduler;
+        # mutations between `await` points are atomic from the event loop's perspective).
+        shared: dict[str, Any] = {
+            "violations_done":     0,
+            "violations_resolved": 0,
+            "files_done":          0,
+            "all_attempts":        all_attempts,
+            "all_violations":      all_violations,
+            "all_files":           all_files,
+        }
 
-        for file_idx, entry in enumerate(entries, 1):
-            file_path   = entry["file_path"]
-            issues_raw  = entry.get("issues", [])
-            file_content = entry.get("file_content", "")
+        sem = asyncio.Semaphore(self.max_concurrent_violations)
 
-            issues: list[A11yIssue] = []
-            for raw in issues_raw:
-                try:
-                    issues.append(A11yIssue(**raw) if isinstance(raw, dict) else raw)
-                except Exception:
-                    pass
-            if not issues:
-                continue
-
-            short_path = Path(file_path).name
-            _vprint(
-                f"  [bold white]▶ File {file_idx}/{n_files}[/bold white]  "
-                f"[cyan]{short_path}[/cyan]  "
-                f"[dim]({len(issues)} violation{'s' if len(issues) != 1 else ''})[/dim]"
+        coros = [
+            self._process_one_file(
+                file_idx, entry, attempt_runner, collector,
+                sem, shared, n_files, ts_start, t_wall_start,
             )
+            for file_idx, entry in enumerate(entries, 1)
+        ]
 
-            file_attempts:   list[AttemptRecord] = []
-            file_violations = []
-            file_resolved = 0
-
-            for issue, raw_issue in zip(issues, issues_raw):
-                raw_dict    = raw_issue if isinstance(raw_issue, dict) else {}
-                confidence  = _issue_confidence(raw_dict)
-                n_tools     = raw_dict.get("tool_consensus", 1)
-                tools_by    = raw_dict.get("found_by", [])
-                wcag_cat    = _normalise_category(raw_dict.get("issue_type", "aria"))
-
-                violation_id = f"{file_path}:{issue.selector}:{issue.wcag_criteria}"
-
-                _vprint(
-                    f"    [dim]⬡ [{wcag_cat}] WCAG {issue.wcag_criteria or '?'}  "
-                    f"confidence={confidence}  tools={n_tools}  "
-                    f"selector=[italic]{(issue.selector or '')[:60]}[/italic][/dim]"
-                )
-
-                violation_attempts: list[AttemptRecord] = []
-
-                task = AgentTask(
-                    file=Path(file_path),
-                    file_content=file_content,
-                    issues=[issue],
-                )
-
-                for attempt_num in range(1, self.max_retries + 1):
-                    if self.status_writer:
-                        self.status_writer.violation_update(
-                            violation_id=violation_id,
-                            attempt_number=attempt_num,
-                            violations_done=violations_done,
-                            violations_resolved=violations_resolved,
-                            attempts=all_attempts,
-                            current_file=file_path,
-                        )
-
-                    rec = await attempt_runner.run_attempt(
-                        task=task,
-                        issue=issue,
-                        violation_id=violation_id,
-                        attempt_number=attempt_num,
-                        confidence=confidence,
-                        n_tools=n_tools,
-                        tools_detected_by=tools_by,
-                        wcag_category=wcag_cat,
-                    )
-                    collector.write_attempt(rec)
-                    violation_attempts.append(rec)
-                    all_attempts.append(rec)
-
-                    if rec.attempt_success:
-                        break
-
-                violations_done += 1
-                resolved_this = any(a.attempt_success for a in violation_attempts)
-                if resolved_this:
-                    violations_resolved += 1
-                    file_resolved += 1
-
-                vr = aggregate_violation_record(
-                    violation_attempts,
-                    run_id=self.run_id,
-                    condition_id=self.condition.id,
-                    model_name=self.model_name,
-                    repetition=self.repetition,
-                )
-                collector.write_violation(vr)
-                file_violations.append(vr)
-                all_violations.append(vr)
-                file_attempts.extend(violation_attempts)
-
-            file_ifr = file_resolved / len(issues) if issues else 0.0
-            _vprint(
-                f"    [dim]└ File IFR: "
-                f"[bold {'green' if file_ifr >= 0.5 else 'yellow'}]{file_resolved}/{len(issues)} "
-                f"({file_ifr*100:.0f}%)[/bold {'green' if file_ifr >= 0.5 else 'yellow'}][/dim]"
-            )
-
-            fr = aggregate_file_record(
-                file_violations,
-                file_path=file_path,
-                run_id=self.run_id,
-                condition_id=self.condition.id,
-                model_name=self.model_name,
-                repetition=self.repetition,
-            )
-            collector.write_file(fr)
-            all_files.append(fr)
+        if self.max_concurrent_violations == 1:
+            for coro in coros:
+                await coro
+        else:
+            await asyncio.gather(*coros)
 
         ts_end = _now_iso()
         wall_clock_s = time.perf_counter() - t_wall_start
@@ -1619,6 +1585,202 @@ class SingleRunOrchestrator:
             n_total=summary.n_violations_total,
             wall_clock_s=round(wall_clock_s, 1),
         )
+
+    async def _process_one_file(
+        self,
+        file_idx: int,
+        entry: dict,
+        attempt_runner: "AblationAttemptRunner",
+        collector: "MetricsCollector",
+        sem: asyncio.Semaphore,
+        shared: dict,
+        n_files: int,
+        ts_start: str,
+        t_wall_start: float,
+    ) -> None:
+        """Process all violations in one file under the semaphore concurrency limit."""
+        async with sem:
+            file_path    = entry["file_path"]
+            issues_raw   = entry.get("issues", [])
+            file_content = entry.get("file_content", "")
+
+            issues: list[A11yIssue] = []
+            for raw in issues_raw:
+                try:
+                    issues.append(A11yIssue(**raw) if isinstance(raw, dict) else raw)
+                except Exception:
+                    pass
+            if not issues:
+                return
+
+            short_path = Path(file_path).name
+            _vprint(
+                f"  [bold white]▶ File {file_idx}/{n_files}[/bold white]  "
+                f"[cyan]{short_path}[/cyan]  "
+                f"[dim]({len(issues)} violation{'s' if len(issues) != 1 else ''})[/dim]"
+            )
+
+            file_attempts:   list[AttemptRecord] = []
+            file_violations: list = []
+            file_resolved = 0
+
+            for issue, raw_issue in zip(issues, issues_raw):
+                raw_dict   = raw_issue if isinstance(raw_issue, dict) else {}
+                confidence = _issue_confidence(raw_dict)
+                n_tools    = raw_dict.get("tool_consensus", 1)
+                tools_by   = raw_dict.get("found_by", [])
+                wcag_cat   = _normalise_category(raw_dict.get("issue_type", "aria"))
+
+                violation_id = f"{file_path}:{issue.selector}:{issue.wcag_criteria}"
+
+                _vprint(
+                    f"    [dim]⬡ [{wcag_cat}] WCAG {issue.wcag_criteria or '?'}  "
+                    f"confidence={confidence}  tools={n_tools}  "
+                    f"selector=[italic]{(issue.selector or '')[:60]}[/italic][/dim]"
+                )
+
+                violation_attempts: list[AttemptRecord] = []
+
+                task = AgentTask(
+                    file=Path(file_path),
+                    file_content=file_content,
+                    issues=[issue],
+                )
+
+                previous_rejection: dict | None = None
+
+                for attempt_num in range(1, self.max_retries + 1):
+                    if self.status_writer:
+                        self.status_writer.violation_update(
+                            violation_id=violation_id,
+                            attempt_number=attempt_num,
+                            violations_done=shared["violations_done"],
+                            violations_resolved=shared["violations_resolved"],
+                            attempts=shared["all_attempts"],
+                            current_file=file_path,
+                        )
+
+                    rec = await attempt_runner.run_attempt(
+                        task=task,
+                        issue=issue,
+                        violation_id=violation_id,
+                        attempt_number=attempt_num,
+                        confidence=confidence,
+                        n_tools=n_tools,
+                        tools_detected_by=tools_by,
+                        wcag_category=wcag_cat,
+                        previous_rejection=previous_rejection,
+                    )
+                    collector.write_attempt(rec)
+                    collector.write_prompt_log(
+                        violation_id=violation_id,
+                        attempt_number=attempt_num,
+                        prompt=getattr(rec, '_debug_prompt', ''),
+                        response=getattr(rec, '_debug_response', ''),
+                    )
+                    violation_attempts.append(rec)
+                    shared["all_attempts"].append(rec)
+
+                    if rec.attempt_success:
+                        previous_rejection = None
+                        break
+
+                    reason_msg = (
+                        rec.layer1_error_msg
+                        or rec.layer2_error_msg
+                        or rec.layer3_error_msg
+                        or "unknown error"
+                    )
+                    previous_rejection = {
+                        "layer": rec.failure_layer,
+                        "reason": reason_msg[:300],
+                    }
+
+                shared["violations_done"] += 1
+                resolved_this = any(a.attempt_success for a in violation_attempts)
+                if resolved_this:
+                    shared["violations_resolved"] += 1
+                    file_resolved += 1
+
+                vr = aggregate_violation_record(
+                    violation_attempts,
+                    run_id=self.run_id,
+                    condition_id=self.condition.id,
+                    model_name=self.model_name,
+                    repetition=self.repetition,
+                    seed=self.seed,
+                    git_hash=self.git_hash,
+                )
+                collector.write_violation(vr)
+                file_violations.append(vr)
+                shared["all_violations"].append(vr)
+                file_attempts.extend(violation_attempts)
+                collector.write_progress({
+                    "ts":                  _now_iso(),
+                    "violations_done":     shared["violations_done"],
+                    "violations_resolved": shared["violations_resolved"],
+                    "ifr_running":         round(shared["violations_resolved"] / shared["violations_done"], 4)
+                                           if shared["violations_done"] else 0.0,
+                    "violation_id":        violation_id,
+                    "resolved":            resolved_this,
+                    "file_path":           file_path,
+                    "wcag_category":       wcag_cat,
+                    "total_attempts":      len(violation_attempts),
+                })
+
+            file_ifr = file_resolved / len(issues) if issues else 0.0
+            _vprint(
+                f"    [dim]└ File IFR: "
+                f"[bold {'green' if file_ifr >= 0.5 else 'yellow'}]{file_resolved}/{len(issues)} "
+                f"({file_ifr*100:.0f}%)[/bold {'green' if file_ifr >= 0.5 else 'yellow'}][/dim]"
+            )
+
+            fr = aggregate_file_record(
+                file_violations,
+                file_path=file_path,
+                run_id=self.run_id,
+                condition_id=self.condition.id,
+                model_name=self.model_name,
+                repetition=self.repetition,
+            )
+            collector.write_file(fr)
+            shared["all_files"].append(fr)
+            shared["files_done"] += 1
+
+            collector.write_checkpoint({
+                "timestamp":            _now_iso(),
+                "condition_id":         self.condition.id,
+                "model_name":           self.model_name,
+                "repetition":           self.repetition,
+                "seed":                 self.seed,
+                "git_hash":             self.git_hash,
+                "files_done":           shared["files_done"],
+                "files_total":          n_files,
+                "violations_done":      shared["violations_done"],
+                "violations_resolved":  shared["violations_resolved"],
+                "ifr_running":          round(shared["violations_resolved"] / shared["violations_done"], 4)
+                                        if shared["violations_done"] else 0.0,
+                "last_file":            Path(file_path).name,
+                "last_file_ifr":        round(file_ifr, 4),
+            })
+            if shared["files_done"] % 5 == 0 and shared["all_violations"]:
+                intermediate = build_run_summary(
+                    violation_records=shared["all_violations"],
+                    attempt_records=shared["all_attempts"],
+                    file_records=shared["all_files"],
+                    run_id=self.run_id,
+                    condition_id=self.condition.id,
+                    condition_label=self.condition.label,
+                    components_active=components_active(self.condition),
+                    model_name=self.model_name,
+                    repetition=self.repetition,
+                    seed=self.seed,
+                    git_hash=self.git_hash,
+                    timestamp_start=ts_start,
+                    timestamp_end=_now_iso(),
+                    wall_clock_total_s=time.perf_counter() - t_wall_start,
+                )
+                collector.write_summary(intermediate)
 
     def _build_pipeline(self) -> Pipeline:
         model_cfg = _model_config_from_yaml(self.model_name, self.temperature)

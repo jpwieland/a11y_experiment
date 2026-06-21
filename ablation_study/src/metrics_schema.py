@@ -64,6 +64,10 @@ class AttemptRecord:
     response_truncated: bool = False   # output_format missing → heuristic parse
     json_parse_success: bool = False   # only relevant when output_format active
 
+    # ── Extraction & diagnosis ──
+    response_chars: int = 0             # char count do raw LLM response
+    patched_excerpt: str = ""           # primeiros 3000 chars do patch extraído (diagnóstico L1-L3)
+
     # ── Validation layers ──
     layer1_syntax_pass: bool = False
     layer1_error_msg: str = ""
@@ -81,6 +85,10 @@ class AttemptRecord:
     failure_layer: Optional[int] = None   # 1, 2, 3, or None (success / layer-4 only)
     failure_type: str = ""             # "invalid_patch" | "functional_regression" |
                                        # "domain_violation" | "quality_only" | ""
+
+    # ── Ablation-specific flags ──
+    validation_bypassed: bool = False   # True when skip_internal_validation=True (arch_no_internal_validation)
+    reflection_feedback_active: bool = True  # False in arch_no_reflection condition
 
     # ── Timing (seconds) ──
     time_total_s: float = 0.0
@@ -108,6 +116,8 @@ class ViolationRecord:
     condition_id: str = ""
     model_name: str = ""
     repetition: int = 0
+    seed: int = 0                       # random seed — required for cross-run traceability
+    git_hash: str = ""                  # repo commit — required for reproducibility audits
 
     violation_id: str = ""
     file_path: str = ""
@@ -125,6 +135,16 @@ class ViolationRecord:
     attempt1_success: bool = False
     attempt1_failure_layer: Optional[int] = None
     attempt1_failure_type: str = ""
+
+    # Ablation-specific flags (propagated from AttemptRecord for analysis filtering)
+    validation_bypassed: bool = False   # True in arch_no_internal_validation — resolved means non-empty output only
+    reflection_feedback_active: bool = True  # False in arch_no_reflection
+
+    # Functional preservation (Layer 2) — measured for ALL conditions, including V5
+    # where it is recorded but NOT enforced. Lets us decompose Pa11y IFR into
+    # functionally-clean fixes vs. fixes that introduced a structural regression.
+    functional_regression: bool = False         # the patch that resolved this issue failed L2 functional preservation
+    resolved_functional_clean: bool = False      # resolved by Pa11y AND functionally clean (corrected IFR numerator)
 
     # Cumulative tokens across all attempts for this violation
     tokens_output_total: int = 0
@@ -255,6 +275,91 @@ class RunSummary:
     # ── Prompt stats ──
     mean_prompt_chars: float = 0.0
     mean_tokens_input_estimated: float = 0.0
+    mean_response_chars: float = 0.0
+
+    # ── Ablation-specific counters (for cross-condition analysis) ──
+    n_validation_bypassed: int = 0      # attempts where L1-L3 were skipped (V5)
+    n_reflection_feedback_inactive: int = 0  # attempts without rejection feedback (V2)
+
+
+# ── File-level attempt (arch ablation pipeline format) ───────────────────────
+
+@dataclass
+class ArchFileAttemptRecord:
+    """
+    One record per file-level LLM attempt in the arch ablation pipeline format.
+
+    In the arch ablation pipeline format, each LLM call targets ALL pending
+    violations in the file (as in the main experiment). This record stores
+    the attempt-level details; per-violation outcomes are stored in ViolationRecord.
+
+    Contrast with AttemptRecord (single-violation format used by the original
+    ablation runner): ArchFileAttemptRecord is at file granularity.
+    """
+
+    record_type: Literal["arch_file_attempt"] = field(
+        default="arch_file_attempt", init=False
+    )
+
+    # ── Identity ──
+    run_id: str = ""
+    condition_id: str = ""
+    model_name: str = ""
+    repetition: int = 0
+    seed: int = 0
+    git_hash: str = ""
+
+    # ── File identity ──
+    file_path: str = ""
+    attempt_number: int = 0           # 1, 2, 3 (file-level retry)
+    timestamp_start: str = ""
+    timestamp_end: str = ""
+
+    # ── Issues in this attempt ──
+    n_issues_targeted: int = 0        # pending issues sent to LLM in this attempt
+    n_issues_total_in_file: int = 0   # total issues in the file (all attempts combined)
+
+    # ── Prompt composition ──
+    condition_components_active: list[str] = field(default_factory=list)
+    prompt_char_count: int = 0
+    tokens_input_estimated: int = 0
+    tokens_output: int = 0
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
+    response_chars: int = 0
+    patched_excerpt: str = ""         # first 3000 chars of extracted patch
+
+    # ── Ablation-specific flags ──
+    validation_bypassed: bool = False
+    reflection_feedback_active: bool = True
+
+    # ── Validation layers ──
+    patch_extracted: bool = False     # LLM returned parseable code block
+    layer1_syntax_pass: bool = False
+    layer1_error_msg: str = ""
+    layer2_functional_pass: bool = False
+    layer2_error_msg: str = ""
+    layer3_domain_pass: bool = False
+    layer3_error_msg: str = ""
+    layer4_quality_pass: bool = False
+    validation_rejected_layer: Optional[int] = None
+    validation_failure_reason: str = ""
+
+    # ── Patch accepted (written to disk) ──
+    patch_accepted: bool = False
+
+    # ── Pa11y re-scan outcome ──
+    rescan_performed: bool = False
+    rescan_failed: bool = False
+    rescan_error_msg: str = ""
+    n_issues_resolved_this_attempt: int = 0   # violations credited by Pa11y re-scan
+    n_selector_migrations: int = 0            # issues that vanished but weren't credited
+
+    # ── Timing (seconds) ──
+    time_total_s: float = 0.0
+    time_inference_s: float = 0.0
+    time_validation_s: float = 0.0
+    time_rescan_s: float = 0.0
 
 
 def to_dict(record: object) -> dict:
